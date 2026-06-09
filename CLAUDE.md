@@ -69,7 +69,15 @@ trusted LAN use. NTLMv2 + signing is phase 2; do not expose to untrusted network
 - [x] Wire-level integration test (negotiate→session→tree→create→write→read→dir)
 - [x] cargo check + clippy clean on aarch64/x86_64-unknown-linux-musl
 - [x] Release build: 772K static ARM64 musl binary; Containerfile (scratch)
-- [ ] Integration test on a Linux box against Linux cifs.ko mount  ← NEXT (needs Linux host)
+- [x] Integration test on Linux (dev.g8.lo, Fedora 43 / kernel 6.17) against cifs.ko:
+      mounts with vers=2.1/3.0/3.0.2 (guest), 100MB zero-copy read checksum-verified
+      (~500 MB/s), 50MB write verified, mkdir/rename/delete/df all correct
+
+### Phase 1 status: COMPLETE — released as v0.1.0 (2026-06-09)
+
+Build hosts: macOS (cross-check + unit tests), **dev.g8.lo** (root@, Fedora x86_64,
+cargo installed) for native Linux builds and cifs.ko integration testing.
+Primary deploy target is x86_64; ARM64 retained for MikroTik Rose/mkube.
 
 ### Phase 2 — auth & robustness (v0.2.0)
 - [ ] NTLMv2 real authentication, user database
