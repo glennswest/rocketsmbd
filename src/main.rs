@@ -1,5 +1,9 @@
 //! rocketsmbd — smbd replacement: io_uring end-to-end, zero-copy file→socket.
 
+// Off-Linux the reactor is compiled out, so most protocol code is "dead";
+// dev hosts (macOS) still run the unit tests.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 mod config;
 mod log;
 mod ntlm;

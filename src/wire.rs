@@ -10,10 +10,6 @@ impl<'a> Rdr<'a> {
         Self { b, pos: 0 }
     }
 
-    pub fn pos(&self) -> usize {
-        self.pos
-    }
-
     pub fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let s = self.b.get(self.pos..self.pos.checked_add(n)?)?;
         self.pos += n;
@@ -48,7 +44,6 @@ pub trait Put {
     fn p64(&mut self, v: u64);
     fn pbytes(&mut self, v: &[u8]);
     fn zeros(&mut self, n: usize);
-    fn patch16(&mut self, off: usize, v: u16);
     fn patch32(&mut self, off: usize, v: u32);
     /// Pad with zeros so that (len - base) is a multiple of 8.
     fn pad8(&mut self, base: usize);
@@ -72,9 +67,6 @@ impl Put for Vec<u8> {
     }
     fn zeros(&mut self, n: usize) {
         self.resize(self.len() + n, 0);
-    }
-    fn patch16(&mut self, off: usize, v: u16) {
-        self[off..off + 2].copy_from_slice(&v.to_le_bytes());
     }
     fn patch32(&mut self, off: usize, v: u32) {
         self[off..off + 4].copy_from_slice(&v.to_le_bytes());

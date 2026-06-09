@@ -38,6 +38,7 @@ pub const CMD_OPLOCK_BREAK: u16 = 18;
 pub const FLAG_RESPONSE: u32 = 0x1;
 pub const FLAG_ASYNC: u32 = 0x2;
 pub const FLAG_RELATED: u32 = 0x4;
+#[allow(dead_code)]
 pub const FLAG_SIGNED: u32 = 0x8;
 
 pub const MAX_TRANSACT: u32 = 1 << 20;
@@ -226,7 +227,7 @@ fn read_plan_hdr(plan: &ZcReadPlan) -> ReqHdr {
     }
 }
 
-fn finish_nbt_with(tx: &mut Vec<u8>, len: u32) {
+fn finish_nbt_with(tx: &mut [u8], len: u32) {
     tx[0] = 0;
     tx[1] = ((len >> 16) & 0xFF) as u8;
     tx[2] = ((len >> 8) & 0xFF) as u8;

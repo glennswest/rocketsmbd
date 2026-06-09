@@ -185,6 +185,7 @@ pub fn fsync(fd: RawFd) -> Result<(), i32> {
 }
 
 /// (total_units, caller_avail_units, actual_avail_units, sectors_per_unit, bytes_per_sector)
+#[allow(clippy::unnecessary_cast)] // statvfs field widths differ across platforms
 pub fn fs_sizes(fd: RawFd) -> Result<(u64, u64, u64, u32, u32), i32> {
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstatvfs(fd, &mut s) } < 0 {

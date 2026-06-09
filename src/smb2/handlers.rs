@@ -388,7 +388,7 @@ fn create(
     }
 
     let dir_requested = req.options & FILE_DIRECTORY_FILE != 0;
-    let treat_as_dir = existing_dir || (dir_requested && !exists) || (dir_requested && existing_dir);
+    let treat_as_dir = existing_dir || (dir_requested && !exists);
 
     if existing_dir && req.options & FILE_NON_DIRECTORY_FILE != 0 {
         err_resp(tx, h, status::FILE_IS_A_DIRECTORY, chain);
@@ -679,6 +679,10 @@ fn write(pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
+    if !of.writable {
+        err_resp(tx, h, status::ACCESS_DENIED, chain);
+        return;
+    }
     match vfs::pwrite_all(of.fd, data, offset) {
         Ok(()) => {
             begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
@@ -1102,8 +1106,8 @@ fn set_basic_info(of: &vfs::OpenFile, data: &[u8]) -> u32 {
         } else {
             let unix100 = ft as i64 - 116_444_736_000_000_000;
             libc::timespec {
-                tv_sec: (unix100 / 10_000_000) as libc::time_t,
-                tv_nsec: ((unix100 % 10_000_000) * 100) as libc::c_long,
+                tv_sec: (unix100 / 10_000_000) as _,
+                tv_nsec: ((unix100 % 10_000_000) * 100) as _,
             }
         }
     }
