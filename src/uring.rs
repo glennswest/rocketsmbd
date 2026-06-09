@@ -27,6 +27,7 @@ const OP_SEND: u8 = 3;
 const OP_SPLICE_IN: u8 = 4;
 const OP_SPLICE_OUT: u8 = 5;
 const OP_INOTIFY: u8 = 6;
+const OP_CANCEL: u8 = 7;
 
 const IN_MASK: u32 = libc::IN_CREATE
     | libc::IN_DELETE
@@ -121,6 +122,15 @@ struct Conn {
     ibuf: Vec<u8>,
     watches: Vec<Watch>,
     deferred: std::collections::VecDeque<Vec<u8>>,
+    /// io_uring SQEs submitted for this connection that have not yet
+    /// produced a completion. Buffers referenced by in-flight ops must not
+    /// be freed, so teardown is deferred until this reaches zero.
+    inflight: u32,
+    /// Set once teardown has begun: stop submitting new ops and drop the
+    /// connection when `inflight` drains to zero.
+    closing: bool,
+    /// Whether the parked inotify Read has been asked to cancel.
+    inotify_cancelled: bool,
 }
 
 impl Drop for Conn {
@@ -268,6 +278,13 @@ fn sq_push(ring: &mut IoUring, e: &squeue::Entry) {
     }
 }
 
+/// Submit one SQE on behalf of a connection, counting it as in-flight so the
+/// connection (and the buffers its ops reference) outlives the kernel's use.
+fn sq_push_conn(ring: &mut IoUring, w: &mut Worker, idx: usize, e: &squeue::Entry) {
+    conn_mut(w, idx).inflight += 1;
+    sq_push(ring, e);
+}
+
 fn arm_accept(ring: &mut IoUring, w: &Worker) {
     let e = opcode::Accept::new(types::Fd(w.listen_fd), std::ptr::null_mut(), std::ptr::null_mut())
         .build()
@@ -286,11 +303,25 @@ fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32) {
         on_accept(ring, w, res);
         return;
     }
+    // Cancel completions carry a sentinel gen and are not counted.
+    if op == OP_CANCEL {
+        return;
+    }
     // Stale completion for a connection slot that has been recycled.
     let Some(conn) = w.conns.get_mut(idx).and_then(|c| c.as_mut()) else {
         return;
     };
     if conn.gen != gen {
+        return;
+    }
+    // This completion retires one in-flight op.
+    conn.inflight = conn.inflight.saturating_sub(1);
+    if conn.closing {
+        // Draining: ignore the result, just account it and finalize when the
+        // last in-flight op returns (buffers are now safe to free).
+        if conn.inflight == 0 {
+            finalize_close(w, idx);
+        }
         return;
     }
     match op {
@@ -344,12 +375,40 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         ibuf: Vec::new(),
         watches: Vec::new(),
         deferred: std::collections::VecDeque::new(),
+        inflight: 0,
+        closing: false,
+        inotify_cancelled: false,
     });
     logd!("worker {}: new connection (slot {idx})", w.wid);
     maybe_arm_recv(ring, w, idx);
 }
 
-fn close_conn(w: &mut Worker, idx: usize) {
+/// Begin tearing down a connection. New ops stop; the connection is only
+/// dropped (freeing buffers the kernel may still reference) once all
+/// in-flight ops have completed — see [`finalize_close`]. A parked inotify
+/// Read never completes on socket close, so it is explicitly cancelled.
+fn close_conn_ring(ring: &mut IoUring, w: &mut Worker, idx: usize) {
+    let Some(c) = w.conns[idx].as_mut() else {
+        return;
+    };
+    c.closing = true;
+    // Unpark a waiting inotify Read so its buffer can be freed.
+    if c.inotify_fd.is_some() && !c.inotify_cancelled {
+        c.inotify_cancelled = true;
+        let target = ud(OP_INOTIFY, idx, c.gen);
+        let e = opcode::AsyncCancel::new(target)
+            .build()
+            .user_data(ud(OP_CANCEL, 0xFF_FFFF, 0));
+        sq_push(ring, &e); // not counted; sentinel completion is ignored
+    }
+    if c.inflight == 0 {
+        finalize_close(w, idx);
+    }
+}
+
+/// Actually drop the connection and recycle its slot. Only call when no ops
+/// reference its buffers.
+fn finalize_close(w: &mut Worker, idx: usize) {
     if w.conns[idx].take().is_some() {
         w.gens[idx] = w.gens[idx].wrapping_add(1).max(1);
         w.free.push(idx);
@@ -383,7 +442,7 @@ fn frame_total(c: &Conn) -> Result<Option<usize>, ()> {
 /// or reallocates the buffer while a recv is in flight.
 fn maybe_arm_recv(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     let c = conn_mut(w, idx);
-    if c.recv_inflight {
+    if c.recv_inflight || c.closing {
         return;
     }
     // Compact consumed bytes to the front.
@@ -397,7 +456,7 @@ fn maybe_arm_recv(ring: &mut IoUring, w: &mut Worker, idx: usize) {
         Ok(Some(total)) => total.max(c.rx_len + RX_MIN_ROOM),
         Ok(None) => c.rx_len + RX_MIN_ROOM,
         Err(()) => {
-            close_conn(w, idx);
+            close_conn_ring(ring, w, idx);
             return;
         }
     };
@@ -412,7 +471,7 @@ fn maybe_arm_recv(ring: &mut IoUring, w: &mut Worker, idx: usize) {
         .build()
         .user_data(ud(OP_RECV, idx, c.gen));
     c.recv_inflight = true;
-    sq_push(ring, &e);
+    sq_push_conn(ring, w, idx, &e);
 }
 
 fn on_recv(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
@@ -425,7 +484,7 @@ fn on_recv(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
     if res <= 0 {
         // Peer closed or socket error. If the tx side is mid-stream it will
         // also fail shortly; tearing down now is safe (gen guards CQEs).
-        close_conn(w, idx);
+        close_conn_ring(ring, w, idx);
         return;
     }
     c.rx_len += res as usize;
@@ -461,7 +520,7 @@ fn drive(ring: &mut IoUring, w: &mut Worker, idx: usize) {
             Ok(Some(t)) if c.rx_len - c.rx_off >= t => t,
             Ok(_) => break, // need more bytes
             Err(()) => {
-                close_conn(w, idx);
+                close_conn_ring(ring, w, idx);
                 return;
             }
         };
@@ -548,16 +607,21 @@ fn service_notify(ring: &mut IoUring, w: &mut Worker, idx: usize) {
 
 /// Build + queue a final notify response and clear the active entry.
 fn complete_notify(c: &mut Conn, pend: &crate::smb2::NotifyPend, st: u32, events: &[(u32, String)]) {
+    logd!("notify complete aid={} st={:#x} events={}", pend.async_id, st, events.len());
     let resp = smb2::build_notify_final(&c.proto, &pend.meta, st, events, pend.out_len);
     c.deferred.push_back(resp);
     c.proto.notify_active.retain(|&(_, a)| a != pend.async_id);
 }
 
 fn arm_inotify(ring: &mut IoUring, c: &mut Conn, idx: usize) {
+    if c.closing {
+        return;
+    }
     let ifd = c.inotify_fd.expect("inotify created");
     let e = opcode::Read::new(types::Fd(ifd), c.ibuf.as_mut_ptr(), c.ibuf.len() as u32)
         .build()
         .user_data(ud(OP_INOTIFY, idx, c.gen));
+    c.inflight += 1;
     sq_push(ring, &e);
 }
 
@@ -656,7 +720,7 @@ fn submit_send(ring: &mut IoUring, w: &mut Worker, idx: usize, msg_flags: i32) {
         .flags(msg_flags)
         .build()
         .user_data(ud(OP_SEND, idx, c.gen));
-    sq_push(ring, &e);
+    sq_push_conn(ring, w, idx, &e);
 }
 
 fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
@@ -666,7 +730,7 @@ fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
         return;
     }
     if res <= 0 {
-        close_conn(w, idx);
+        close_conn_ring(ring, w, idx);
         return;
     }
     let c = conn_mut(w, idx);
@@ -743,7 +807,7 @@ fn submit_splice_in(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     .flags(libc::SPLICE_F_MOVE)
     .build()
     .user_data(ud(OP_SPLICE_IN, idx, c.gen));
-    sq_push(ring, &e);
+    sq_push_conn(ring, w, idx, &e);
 }
 
 fn on_splice_in(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
@@ -817,7 +881,7 @@ fn submit_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize) {
         .flags(libc::SPLICE_F_MOVE)
         .build()
         .user_data(ud(OP_SPLICE_OUT, idx, c.gen));
-    sq_push(ring, &e);
+    sq_push_conn(ring, w, idx, &e);
 }
 
 fn on_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
@@ -827,7 +891,7 @@ fn on_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
     }
     if res <= 0 {
         // Socket gone; pipe contents die with the connection.
-        close_conn(w, idx);
+        close_conn_ring(ring, w, idx);
         return;
     }
     let c = conn_mut(w, idx);
