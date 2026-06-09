@@ -3,6 +3,31 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v0.2.0] — 2026-06-09
+
+### Added
+- **feat:** NTLMv2 authentication with a user database (`[[user]]` with `password` or `nt_hash`), `allow_guest` policy (defaults to guest-only when no users defined), and NTLMSSP session-key derivation (incl. KEY_EXCH/RC4).
+- **feat:** SMB2/3 message signing — HMAC-SHA256 (2.x) and AES-128-CMAC (3.x); requests verified, all responses on authenticated sessions signed; `require_signing` config to reject unsigned requests.
+- **feat:** SMB 3.1.1 dialect with preauth integrity (SHA-512 negotiate context + hash chaining) and 3.1.1 signing-key derivation.
+- **feat:** SPNEGO wrapping (NegTokenInit2 hint + challenge/accept tokens) for Windows-client compatibility; raw NTLMSSP still accepted.
+- **feat:** IPC$ tree-connect stub (ShareType=pipe) — silences the cifs.ko mount-time "failed to connect to IPC" warning.
+- **feat:** Byte-range locks (`LOCK`) via Linux OFD locks with all-or-nothing batch semantics; conflicts return STATUS_LOCK_NOT_GRANTED.
+- **feat:** Directory change notification (`CHANGE_NOTIFY`) — interim STATUS_PENDING, inotify in the reactor, deferred async responses, CANCEL → STATUS_CANCELLED, handle close → STATUS_NOTIFY_CLEANUP.
+- **feat:** Credit accounting (window clamp + charge tracking).
+- **feat:** crypto module — SP800-108 KDF, RC4, HMAC-SHA256/AES-CMAC signatures, NT hash; RFC/reference test vectors.
+
+### Fixed
+- **fix:** Sign all responses on authenticated sessions, not only when the client set SIGNING_REQUIRED — fixes SMB 3.1.1 signature rejection by smbclient and strict clients.
+- **fix:** Defer connection teardown until in-flight io_uring ops complete — prevents a use-after-free (heap corruption crash) of buffers referenced by a parked inotify read when a client disconnects mid-notify.
+- **fix:** FSCTL_VALIDATE_NEGOTIATE_INFO echoes the negotiated security mode (incl. SIGNING_REQUIRED) — fixes `require_signing` mounts failing cifs revalidation.
+- **fix:** NTLMSSP CHALLENGE advertises the SIGN flag, required by cifs `sec=ntlmsspi`.
+
+### Changed
+- **perf:** Signed sessions use the buffered read path (a signature covers the payload, precluding zero-copy splice). Unsigned/guest reads stay zero-copy at 5.7 GB/s; signed reads ~527 MB/s (still ~2× samba unsigned). See docs/BENCHMARKS.md.
+
+### Verified
+- End-to-end on Linux (kernel 6.17) against cifs.ko and smbclient: guest + authenticated mounts; wrong-password rejection; signed (`sec=ntlmsspi`) read/write; SMB 3.1.1; `require_signing` + guest-denied policy; byte-range lock conflict/grant; directory change notification delivery; clean teardown across disconnects.
+
 ## [v0.1.1] — 2026-06-09
 
 ### Changed

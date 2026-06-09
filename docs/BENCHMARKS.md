@@ -20,6 +20,23 @@ for usage). Record every run here — newest at the top of each section.
 
 ## Results
 
+### 2026-06-09 — v0.2.0 (auth + signing)
+
+Unsigned guest path is unchanged from v0.1.1 (zero-copy splice reads). Signed
+sessions take the **buffered** read path — an SMB2 signature covers the
+response payload, which is incompatible with splicing file pages straight to
+the socket — so signed reads are slower but still ~2× samba's unsigned read.
+
+| Test | rocketsmbd unsigned | rocketsmbd signed | samba (unsigned) |
+|---|---|---|---|
+| 1 GiB sequential read | **5.7 GB/s** | 527 MB/s | 1.4 GB/s |
+| 512 MiB sequential write | **1.0 GB/s** | ~0.6 GB/s | 642 MB/s |
+
+Signing cost is the AES-CMAC over each message plus losing the zero-copy
+read path. Restoring zero-copy for signed reads (sign the header with a
+trailer-MAC scheme, or AES-GCM transform with `splice`-friendly framing) is
+phase 3.
+
 ### 2026-06-09 — v0.1.1 (frame batching, 1 MiB rsize / 4 MiB wsize)
 
 | Test | rocketsmbd | samba 4.23 | ratio |

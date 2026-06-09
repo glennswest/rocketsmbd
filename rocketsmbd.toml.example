@@ -4,7 +4,22 @@ workers = 0            # 0 = one worker per CPU core
 server_name = "ROCKETSMBD"
 log_level = 1          # 0 = warn, 1 = info, 2 = debug
 
+# Security. With no [[user]] entries, guest access is allowed by default.
+# Add users to require authentication; set allow_guest explicitly to override.
+require_signing = false   # true = reject unsigned requests on auth'd sessions
+# allow_guest = false
+
 [[share]]
 name = "data"
 path = "/srv/data"
 read_only = false
+
+# Users (NTLMv2). Provide either a plaintext password or a precomputed
+# NT hash (MD4 of the UTF-16LE password) as 32 hex characters.
+# [[user]]
+# name = "alice"
+# password = "secret"
+#
+# [[user]]
+# name = "bob"
+# nt_hash = "8846f7eaee8fb117ad06bdd830b7586c"

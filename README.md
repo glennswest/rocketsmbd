@@ -8,10 +8,12 @@ data never enters userspace.
 
 ## Status
 
-Pre-release (`0.1.x`). Phase 1 is a mountable guest read/write server speaking
-SMB 2.0.2 through 3.0.2 (3.1.1 lands with preauth integrity in phase 2; no
-signing/encryption yet). **Do not expose to untrusted networks.** See
-`CLAUDE.md` for the full roadmap.
+Pre-release (`0.2.x`). Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
+authentication, SMB2/3 signing, and SMB 3.1.1 preauth integrity**. Supports a
+user database, optional guest access, byte-range locks, and directory change
+notification. Not yet implemented: SMB3 encryption and oplocks/leases —
+phase 3. **No encryption yet, so treat as trusted-LAN only.** See `CLAUDE.md`
+for the full roadmap.
 
 ## Requirements
 
@@ -71,10 +73,19 @@ listen = "0.0.0.0:445"
 workers = 0            # 0 = one per CPU core
 server_name = "ROCKETSMBD"
 
+require_signing = false   # set true to mandate SMB2 signing
+# allow_guest defaults to true only when no [[user]] entries exist
+
 [[share]]
 name = "data"
 path = "/srv/data"
 read_only = false
+
+# Define users to require authentication (presence of any [[user]]
+# disables guest unless allow_guest = true is set explicitly).
+[[user]]
+name = "alice"
+password = "secret"        # or: nt_hash = "<32 hex chars>"
 ```
 
 Run: `rocketsmbd --config /etc/rocketsmbd.toml`
@@ -82,7 +93,11 @@ Run: `rocketsmbd --config /etc/rocketsmbd.toml`
 ## Mounting
 
 ```sh
+# Guest (when allowed)
 mount -t cifs //server/data /mnt -o guest,vers=3.0
+
+# Authenticated, signed, SMB 3.1.1
+mount -t cifs //server/data /mnt -o username=alice,password=secret,vers=3.1.1,sec=ntlmsspi
 ```
 
 ## License

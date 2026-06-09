@@ -6,7 +6,7 @@ thread-per-connection — one io_uring reactor per worker thread.
 
 ## Version
 
-- Current: **0.1.0** (pre-release, in development)
+- Current: **0.2.0** (pre-release, in development)
 - Version locations: `Cargo.toml` (`[package] version`), `src/main.rs` (`VERSION` const via `env!("CARGO_PKG_VERSION")` — single source is Cargo.toml)
 
 ## Platform & Build
@@ -91,40 +91,31 @@ Primary deploy target is x86_64; ARM64 retained for MikroTik Rose/mkube.
 re-measured with bench/bench.sh and logged in docs/BENCHMARKS.md before
 release; architecture changes update docs/ARCHITECTURE.md in the same commit.
 
-### Phase 2 — auth & robustness (v0.2.0)  ← IN PROGRESS (all items)
-Implementation order (commit per step):
-- [ ] 1. Crypto: RustCrypto deps (md4/md-5/hmac/sha2/cmac/aes) + crypto.rs
-      (SP800-108 KDF, RC4, helpers) with RFC test vectors
-- [ ] 2. NTLMv2 verification + [[user]] database in config (password or
-      nt_hash), allow_guest policy (default true only when no users),
-      session key derivation (KEY_EXCH/RC4)
-- [ ] 3. SMB2 signing: verify requests + sign responses; HMAC-SHA256 (2.x),
-      AES-128-CMAC (3.x); require_signing config; signed sessions use the
-      buffered read path (signature covers payload — splice can't sign)
-- [ ] 4. SMB 3.1.1: negotiate contexts (preauth integrity SHA-512 + cipher),
-      preauth hash chaining, 3.1.1 signing key derivation
-- [ ] 5. SPNEGO: wrap challenge/accept tokens when client speaks SPNEGO;
-      NegTokenInit2 hint in NEGOTIATE response (Windows compat)
-- [ ] 6. IPC$ tree-connect stub (ShareType=pipe; silences cifs rc=-2 warning)
-- [ ] 7. Credit accounting (window clamp, charge tracking)
-- [ ] 8. LOCK: byte-range locks via Linux OFD locks (F_OFD_SETLK),
-      all-or-nothing batch semantics with unwind; conflicts → LOCK_NOT_GRANTED
-      (blocking lock waits degrade to immediate-fail in v0.2)
-- [ ] 9. CHANGE_NOTIFY: async pend (interim STATUS_PENDING + AsyncId),
-      inotify in the reactor, deferred responses, CANCEL → STATUS_CANCELLED,
-      handle close → STATUS_NOTIFY_CLEANUP
-- [ ] 10. Oplocks/leases: grant-none is the correct phase-2 posture (no
-      breaks needed); leases deferred to phase 3 with real caching
-- [ ] 11. Integration tests on dev.g8.lo (creds mount, wrong-password reject,
-      sec=ntlmsspi signing, vers=3.1.1, flock, smbclient notify), bench
-      re-run incl. signed throughput, docs, release v0.2.0
-- [ ] Oplocks/leases (at least none→break handling correctness)
-- [ ] Credit accounting, large MTU, multi-credit reads/writes
+### Phase 2 — auth & robustness (v0.2.0) — COMPLETE, released 2026-06-09
+- [x] 1. Crypto module (SP800-108 KDF, RC4, HMAC-SHA256/AES-CMAC, NT hash) + vectors
+- [x] 2. NTLMv2 verification + [[user]] db (password/nt_hash), allow_guest, KEY_EXCH
+- [x] 3. SMB2/3 signing: verify requests, sign all auth'd responses; require_signing
+- [x] 4. SMB 3.1.1: SHA-512 preauth integrity context + hash chaining + key derivation
+- [x] 5. SPNEGO wrapping + NegTokenInit2 hint (Windows compat)
+- [x] 6. IPC$ tree-connect stub (silences cifs IPC warning)
+- [x] 7. Credit accounting (window clamp, charge tracking)
+- [x] 8. LOCK: byte-range locks via OFD locks, all-or-nothing batch
+- [x] 9. CHANGE_NOTIFY: async pend + inotify reactor + cancel/cleanup
+- [x] 10. Oplocks/leases: grant-none posture (correct for phase 2)
+- [x] 11. Integration verified on dev.g8.lo (cifs + smbclient); bench re-run; docs
+
+Two bugs found and fixed during integration (see CHANGELOG): a use-after-free
+crash on disconnect-during-notify (in-flight io_uring ops referenced freed
+buffers — now teardown waits for completions), and a 3.1.1 signature
+rejection (we only signed when the client set REQUIRED; auth'd sessions must
+always sign).
 
 ### Phase 3 — performance & SMB3 (v0.3.0)
 - [ ] SMB3 encryption (AES-128-GCM)
-- [ ] Registered buffers + send_zc everywhere applicable
-- [ ] SQPOLL mode, NUMA/core pinning
+- [ ] Zero-copy path for signed/encrypted reads (currently buffered)
+- [ ] Oplocks/leases with real caching
+- [ ] True intra-connection request concurrency (multiple zc reads in flight)
+- [ ] Registered buffers + send_zc, multishot accept/recv, SQPOLL mode, core pinning
 - [ ] Benchmarks vs samba smbd (fio over cifs mount)
 
 ## Testing
