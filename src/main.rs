@@ -65,7 +65,7 @@ fn run(cfg: Config) {
 
     let mut guid = [0u8; 16];
     config::urandom(&mut guid);
-    let max_read = uring::probe_pipe_size(smb2::MAX_TRANSACT);
+    let max_read = uring::probe_pipe_size(smb2::MAX_READ_TARGET);
     let srv = Arc::new(Srv { cfg, guid, max_read, start_ft: vfs::filetime_now() });
 
     let workers = if srv.cfg.workers > 0 {

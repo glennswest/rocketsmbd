@@ -3,6 +3,16 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v0.1.1] — 2026-06-09
+
+### Changed
+- **perf:** Full-duplex frame batching — drain all complete frames per wakeup, batch responses into one send, rx read-offset instead of per-frame memmove. Sequential write throughput 446 → ~900 MB/s (now 1.3× samba; was 0.7×).
+- **perf:** MaxWriteSize/MaxTransactSize raised to 4 MiB; MaxReadSize deliberately kept at 1 MiB — large rsize defeats client readahead parallelism and collapsed reads to 0.67 GB/s (see docs/BENCHMARKS.md tuning findings).
+
+### Added
+- **test:** `bench/bench.sh` — repeatable benchmark suite (sequential/parallel/metadata/integrity) for documenting every perf-relevant change.
+- **docs:** `docs/ARCHITECTURE.md` (process model, state machines, zero-copy path, layering) and `docs/BENCHMARKS.md` (method, results log, tuning findings).
+
 ## [v0.1.0] — 2026-06-09
 
 ### Added

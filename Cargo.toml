@@ -1,6 +1,6 @@
 [package]
 name = "rocketsmbd"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "smbd replacement: io_uring end-to-end, zero-copy file-to-socket"
 license = "MIT"

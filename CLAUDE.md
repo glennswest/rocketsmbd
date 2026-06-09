@@ -79,18 +79,22 @@ Build hosts: macOS (cross-check + unit tests), **dev.g8.lo** (root@, Fedora x86_
 cargo installed) for native Linux builds and cifs.ko integration testing.
 Primary deploy target is x86_64; ARM64 retained for MikroTik Rose/mkube.
 
-### Phase 1.5 — write throughput (v0.1.1)  ← IN PROGRESS
-Benchmarks (dev.g8.lo loopback, 2026-06-09): reads 5.8 GB/s (samba: 1.4) —
-**4× faster than samba**. Writes 446 MB/s (samba: 642) — 30% behind. Cause:
-strict one-request-in-flight serialization; cifs pipelines many 1MB WRITEs.
-- [ ] Frame batching: drain all complete frames per wakeup, accumulate
+### Phase 1.5 — write throughput (v0.1.1) — COMPLETE, released 2026-06-09
+- [x] Frame batching: drain all complete frames per wakeup, accumulate
       responses in tx, single send; flush tx before a zero-copy READ
-- [ ] rx read-offset instead of copy_within per frame (compact only pre-recv)
-- [ ] MaxWrite/MaxTransact 4 MiB (fewer, larger writes from cifs)
-- [ ] Re-benchmark vs samba
+- [x] rx read-offset instead of copy_within per frame (compact only pre-recv)
+- [x] MaxWrite/MaxTransact 4 MiB; MaxRead kept 1 MiB (readahead parallelism)
+- [x] Re-benchmark vs samba: reads 5.8–6.2 GB/s (4.3×), writes ~900 MB/s (1.3×)
+- [x] bench/bench.sh + docs/BENCHMARKS.md + docs/ARCHITECTURE.md
+
+**Documentation policy: document as we go.** Every perf-relevant change gets
+re-measured with bench/bench.sh and logged in docs/BENCHMARKS.md before
+release; architecture changes update docs/ARCHITECTURE.md in the same commit.
 
 ### Phase 2 — auth & robustness (v0.2.0)
 - [ ] NTLMv2 real authentication, user database
+- [ ] IPC$ tree-connect stub (silences cifs.ko "failed to connect to IPC
+      (rc=-2)" mount-time warning; DFS referrals can stay unsupported)
 - [ ] SMB2 signing (HMAC-SHA256 / AES-CMAC), SMB 3.1.1 + preauth integrity
 - [ ] SPNEGO wrapping (Windows client compat)
 - [ ] Byte-range locks, CHANGE_NOTIFY

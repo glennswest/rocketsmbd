@@ -18,7 +18,21 @@ signing/encryption yet). **Do not expose to untrusted networks.** See
 - Linux kernel ≥ 5.15 (≥ 6.0 recommended for multishot accept/recv)
 - Capability to bind port 445 (`CAP_NET_BIND_SERVICE` or root)
 
+## Performance
+
+Loopback vs samba 4.23 on the same host (kernel 6.17, 8 cores — full data
+and method in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
+
+| | rocketsmbd | samba | |
+|---|---|---|---|
+| 1 GiB sequential read | **5.8–6.2 GB/s** | 1.4 GB/s | 4.3× |
+| 512 MiB sequential write | **836–941 MB/s** | 642 MB/s | 1.3× |
+
+Re-run with `bench/bench.sh` (root, Linux, cifs-utils).
+
 ## Design
+
+Full write-up: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 - **No async runtime.** One reactor thread per worker, each owning its own
   `io_uring` instance and a `SO_REUSEPORT` listener. Completion-driven state

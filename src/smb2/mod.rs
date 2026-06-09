@@ -43,6 +43,12 @@ pub const FLAG_SIGNED: u32 = 0x8;
 
 pub const MAX_TRANSACT: u32 = 4 << 20;
 pub const MAX_WRITE: u32 = 4 << 20;
+/// Advertised MaxReadSize target (further bounded by pipe capacity).
+/// Deliberately smaller than MaxWriteSize: a modest rsize keeps the client
+/// issuing many parallel READs (readahead), which pipelines far better
+/// through the splice path than few huge serialized ones — measured 5.8 GB/s
+/// at 1 MiB vs 0.67 GB/s at 4 MiB on loopback.
+pub const MAX_READ_TARGET: u32 = 1 << 20;
 /// Reads at or above this size take the zero-copy splice path.
 pub const ZC_MIN_READ: u32 = 8 * 1024;
 
