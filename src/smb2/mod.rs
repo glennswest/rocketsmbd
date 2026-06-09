@@ -494,7 +494,6 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
         req_off: usize,
         req_end: usize,
         sess_id: u64,
-        req_signed: bool,
     }
     let mut recs: Vec<RespRec> = Vec::new();
 
@@ -531,7 +530,6 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
                 req_off: off,
                 req_end: msg_end,
                 sess_id: chain.session_id,
-                req_signed: h.flags & FLAG_SIGNED != 0,
             });
         }
 
@@ -550,18 +548,19 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
         return FrameAction::ZcRead(p);
     }
 
-    // Post-pass 1: sign responses for sessions with signing material.
-    // (Responses end where the next one starts; the last ends at tx end.)
+    // Post-pass 1: sign every response on an authenticated session. A
+    // session only holds signing material (`sess.sign`) once a non-guest
+    // user has authenticated, and MS-SMB2 requires such sessions to sign
+    // all responses — including the final SESSION_SETUP — regardless of
+    // whether the client set the SIGNING_REQUIRED flag. (Responses end
+    // where the next one starts; the last ends at tx end.)
     for i in 0..recs.len() {
         let end = recs.get(i + 1).map(|r| r.start).unwrap_or(tx.len());
         let rec = &recs[i];
         let Some(sess) = pc.sessions.get(&rec.sess_id) else {
             continue;
         };
-        let Some(sc) = sess.sign.clone() else {
-            continue;
-        };
-        if rec.req_signed || sess.signing_required {
+        if let Some(sc) = sess.sign.clone() {
             sign_in_place(tx, rec.start, end, &sc);
         }
     }
@@ -1103,6 +1102,161 @@ mod tests {
         let rflags = u32::from_le_bytes(tx[20..24].try_into().unwrap());
         assert_ne!(rflags & FLAG_SIGNED, 0, "response must be signed");
         assert!(verify_signature(&tx[4..], &sc), "response signature must verify");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Drive a real SMB 3.1.1 handshake and independently recompute the
+    /// preauth integrity chain + signing key from the exact transmitted
+    /// bytes, then verify the final SESSION_SETUP response signature. This
+    /// catches preauth/key-derivation divergence that real clients reject.
+    #[test]
+    fn smb311_preauth_signing() {
+        use crate::crypto;
+        use crate::ntlm;
+
+        let dir = std::env::temp_dir().join(format!("rsmbd-311-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut srv = test_srv(&dir);
+        srv.cfg.users.push(crate::config::UserCfg {
+            name: "u".into(),
+            password: Some("pw".into()),
+            nt_hash: None,
+        });
+        srv.users = srv.cfg.user_db();
+        srv.allow_guest = srv.cfg.guest_allowed();
+        let mut pc = ProtoConn::new(&srv, 1);
+
+        // --- NEGOTIATE with a 3.1.1 preauth-integrity context (SHA-512) ---
+        let mut neg = req_hdr(CMD_NEGOTIATE, 0, 0, 0);
+        let neg_body = neg.len();
+        neg.p16(36);
+        neg.p16(1); // dialect count
+        neg.p16(1); // signing enabled
+        neg.p16(0);
+        neg.p32(0);
+        neg.zeros(16); // client guid
+        // NegotiateContextOffset/Count/Reserved filled after we know layout.
+        let ncoff_pos = neg.len();
+        neg.p32(0); // ctx offset
+        neg.p16(1); // ctx count
+        neg.p16(0);
+        neg.p16(0x0311); // dialect
+                         // pad to 8 from header start
+        while (neg.len() - neg_body) % 8 != 0 {
+            neg.p16(0);
+        }
+        let ctx_off = neg.len() - 0; // offset from SMB2 header start (frame base)
+        // PREAUTH_INTEGRITY_CAPABILITIES context
+        neg.p16(1); // type
+        neg.p16(38); // data length
+        neg.p32(0);
+        neg.p16(1); // 1 hash algo
+        neg.p16(32); // salt len
+        neg.p16(1); // SHA-512
+        neg.zeros(32); // salt
+        neg[ncoff_pos..ncoff_pos + 4].copy_from_slice(&(ctx_off as u32).to_le_bytes());
+
+        // Capture transmitted bytes to recompute preauth independently.
+        let mut tx = Vec::new();
+        assert!(matches!(
+            process_frame(&srv, &mut pc, &neg, &mut tx),
+            FrameAction::Respond
+        ));
+        let neg_resp = tx[4..].to_vec(); // strip NBT
+        // dialect = body offset 4 → message offset 64 + 4
+        let dialect = u16::from_le_bytes(neg_resp[68..70].try_into().unwrap());
+        assert_eq!(dialect, 0x0311);
+
+        let h1 = crypto::sha512(&[&[0u8; 64], &neg[..]]);
+        let mut preauth = crypto::sha512(&[&h1, &neg_resp]);
+
+        // --- SESSION_SETUP type 1 ---
+        let mut blob = ntlm::SIG.to_vec();
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        let mut ss1 = req_hdr(CMD_SESSION_SETUP, 1, 0, 0);
+        ss1.p16(25);
+        ss1.p8(0);
+        ss1.p8(1);
+        ss1.p32(0);
+        ss1.p32(0);
+        ss1.p16(88);
+        ss1.p16(blob.len() as u16);
+        ss1.p64(0);
+        ss1.pbytes(&blob);
+        let mut tx = Vec::new();
+        process_frame(&srv, &mut pc, &ss1, &mut tx);
+        let ss1_resp = tx[4..].to_vec();
+        let sess = u64::from_le_bytes(ss1_resp[40..48].try_into().unwrap());
+        preauth = crypto::sha512(&[&preauth, &ss1[..]]);
+        preauth = crypto::sha512(&[&preauth, &ss1_resp]);
+        // server challenge
+        let toff = ss1_resp.len()
+            - ss1_resp.windows(8).rev().position(|w| w == ntlm::SIG).map(|p| p + 8).unwrap();
+        let chal: [u8; 8] = ss1_resp[toff + 24..toff + 32].try_into().unwrap();
+
+        // --- SESSION_SETUP type 3 (NTLMv2) ---
+        let nt = crypto::nt_hash("pw");
+        let mut id = crate::wire::utf16le("U");
+        id.extend_from_slice(&crate::wire::utf16le(""));
+        let v2 = crypto::hmac_md5(&nt, &id);
+        let mut temp = vec![1u8, 1, 0, 0, 0, 0, 0, 0];
+        temp.extend_from_slice(&[0; 8]);
+        temp.extend_from_slice(&[0x33; 8]);
+        temp.extend_from_slice(&[0; 8]);
+        let mut pb = chal.to_vec();
+        pb.extend_from_slice(&temp);
+        let proof = crypto::hmac_md5(&v2, &pb);
+        let mut nt_resp = proof.to_vec();
+        nt_resp.extend_from_slice(&temp);
+        let session_base = crypto::hmac_md5(&v2, &proof);
+
+        let user16 = crate::wire::utf16le("u");
+        let mut t3 = ntlm::SIG.to_vec();
+        t3.p32(3);
+        let mut off = 64usize;
+        for len in [0usize, nt_resp.len(), 0, user16.len(), 0, 0] {
+            t3.p16(len as u16);
+            t3.p16(len as u16);
+            t3.p32(off as u32);
+            off += len;
+        }
+        t3.p32(0); // flags: no KEY_EXCH → session key = session base key
+        t3.pbytes(&nt_resp);
+        t3.pbytes(&user16);
+
+        let mut ss3 = req_hdr(CMD_SESSION_SETUP, 2, 0, sess);
+        ss3.p16(25);
+        ss3.p8(0);
+        ss3.p8(1);
+        ss3.p32(0);
+        ss3.p32(0);
+        ss3.p16(88);
+        ss3.p16(t3.len() as u16);
+        ss3.p64(0);
+        ss3.pbytes(&t3);
+
+        // Preauth for the signing key includes ss_req2 (but NOT ss_resp2).
+        preauth = crypto::sha512(&[&preauth, &ss3[..]]);
+        let expect_key = crypto::kdf128(&session_base, b"SMBSigningKey\0", &preauth);
+        let expect_sc = SignCtx { alg: SignAlg::AesCmac, key: expect_key };
+
+        let mut tx = Vec::new();
+        process_frame(&srv, &mut pc, &ss3, &mut tx);
+        let st = u32::from_le_bytes(tx[12..16].try_into().unwrap());
+        assert_eq!(st, status::SUCCESS, "auth should succeed");
+
+        // The server's stored signing key must match the independent one.
+        let server_sc = pc.sessions.get(&sess).unwrap().sign.clone().unwrap();
+        assert_eq!(server_sc.key, expect_sc.key, "3.1.1 signing key mismatch");
+
+        // And the final SS response must verify under the independent key.
+        let rflags = u32::from_le_bytes(tx[20..24].try_into().unwrap());
+        assert_ne!(rflags & FLAG_SIGNED, 0, "final SS response must be signed");
+        assert!(
+            verify_signature(&tx[4..], &expect_sc),
+            "final SS response signature must verify under spec-derived key"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

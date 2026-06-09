@@ -40,6 +40,7 @@ pub fn classify(blob: &[u8]) -> Token {
 }
 
 const FLAGS: u32 = 0x0000_0001  // UNICODE
+    | 0x0000_0010               // SIGN (cifs requires this for sec=ntlmsspi)
     | 0x0000_0200               // NTLM
     | 0x0000_8000               // ALWAYS_SIGN
     | 0x0002_0000               // TARGET_TYPE_SERVER
