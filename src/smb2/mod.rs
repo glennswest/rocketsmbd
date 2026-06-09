@@ -875,6 +875,229 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Full authenticated session over the wire: NTLMv2 challenge/response
+    /// with a real user db, then a signed TREE_CONNECT whose response must
+    /// carry a valid signature, and rejection of a wrong password.
+    #[test]
+    fn ntlmv2_auth_and_signing() {
+        use crate::crypto;
+        use crate::ntlm;
+
+        let dir = std::env::temp_dir().join(format!("rsmbd-auth-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut srv = test_srv(&dir);
+        srv.cfg.users.push(crate::config::UserCfg {
+            name: "glenn".into(),
+            password: Some("s3cret".into()),
+            nt_hash: None,
+        });
+        srv.users = srv.cfg.user_db();
+        srv.allow_guest = srv.cfg.guest_allowed();
+        assert!(!srv.allow_guest, "users defined → guest off by default");
+
+        let mut pc = ProtoConn::new(&srv, 1);
+        // NEGOTIATE 3.0.2
+        let mut f = req_hdr(CMD_NEGOTIATE, 0, 0, 0);
+        f.p16(36);
+        f.p16(1);
+        f.p16(1);
+        f.p16(0);
+        f.p32(0);
+        f.zeros(16 + 8);
+        f.p16(0x0302);
+        let r = roundtrip(&srv, &mut pc, f);
+        assert_eq!(r.status, status::SUCCESS);
+
+        // Type 1 → challenge
+        let mut blob = ntlm::SIG.to_vec();
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        let mut f = req_hdr(CMD_SESSION_SETUP, 1, 0, 0);
+        f.p16(25);
+        f.p8(0);
+        f.p8(1);
+        f.p32(0);
+        f.p32(0);
+        f.p16(88);
+        f.p16(blob.len() as u16);
+        f.p64(0);
+        f.pbytes(&blob);
+        let r = roundtrip(&srv, &mut pc, f);
+        assert_eq!(r.status, status::MORE_PROCESSING_REQUIRED);
+        let sess = r.session_id;
+        // Pull the server challenge out of the CHALLENGE token.
+        let tok_off = r.body.len() - r.body
+            .windows(8)
+            .rev()
+            .position(|w| w == ntlm::SIG)
+            .map(|p| p + 8)
+            .unwrap();
+        let chal: [u8; 8] = r.body[tok_off + 24..tok_off + 32].try_into().unwrap();
+
+        // Build a genuine NTLMv2 type 3 like a client would.
+        let build_t3 = |password: &str| -> Vec<u8> {
+            let nt = crypto::nt_hash(password);
+            let mut id = crate::wire::utf16le("GLENN");
+            id.extend_from_slice(&crate::wire::utf16le("WG"));
+            let v2 = crypto::hmac_md5(&nt, &id);
+            let mut temp = vec![1, 1, 0, 0, 0, 0, 0, 0];
+            temp.extend_from_slice(&[0; 8]);
+            temp.extend_from_slice(&[0x42; 8]);
+            temp.extend_from_slice(&[0; 8]);
+            let mut buf = chal.to_vec();
+            buf.extend_from_slice(&temp);
+            let proof = crypto::hmac_md5(&v2, &buf);
+            let mut nt_resp = proof.to_vec();
+            nt_resp.extend_from_slice(&temp);
+            let user16 = crate::wire::utf16le("glenn");
+            let dom16 = crate::wire::utf16le("WG");
+            let mut m: Vec<u8> = Vec::new();
+            m.pbytes(ntlm::SIG);
+            m.p32(3);
+            let mut off = 64usize;
+            for len in [0usize, nt_resp.len(), dom16.len(), user16.len(), 0, 0] {
+                m.p16(len as u16);
+                m.p16(len as u16);
+                m.p32(off as u32);
+                off += len;
+            }
+            m.p32(0); // flags: no KEY_EXCH → session key = session base key
+            m.pbytes(&nt_resp);
+            m.pbytes(&dom16);
+            m.pbytes(&user16);
+            m
+        };
+
+        // Wrong password → LOGON_FAILURE
+        let t3 = build_t3("wrong");
+        let mut f = req_hdr(CMD_SESSION_SETUP, 2, 0, sess);
+        f.p16(25);
+        f.p8(0);
+        f.p8(2); // client requires signing
+        f.p32(0);
+        f.p32(0);
+        f.p16(88);
+        f.p16(t3.len() as u16);
+        f.p64(0);
+        f.pbytes(&t3);
+        let r = roundtrip(&srv, &mut pc, f);
+        assert_eq!(r.status, status::LOGON_FAILURE);
+
+        // Redo the handshake with the right password.
+        let mut blob = ntlm::SIG.to_vec();
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        let mut f = req_hdr(CMD_SESSION_SETUP, 3, 0, 0);
+        f.p16(25);
+        f.p8(0);
+        f.p8(1);
+        f.p32(0);
+        f.p32(0);
+        f.p16(88);
+        f.p16(blob.len() as u16);
+        f.p64(0);
+        f.pbytes(&blob);
+        let r = roundtrip(&srv, &mut pc, f);
+        let sess = r.session_id;
+        let tok_off = r.body.len() - r.body
+            .windows(8)
+            .rev()
+            .position(|w| w == ntlm::SIG)
+            .map(|p| p + 8)
+            .unwrap();
+        let chal2: [u8; 8] = r.body[tok_off + 24..tok_off + 32].try_into().unwrap();
+        // Rebind the closure's challenge by shadowing.
+        let chal = chal2;
+        let t3 = {
+            let nt = crypto::nt_hash("s3cret");
+            let mut id = crate::wire::utf16le("GLENN");
+            id.extend_from_slice(&crate::wire::utf16le("WG"));
+            let v2 = crypto::hmac_md5(&nt, &id);
+            let mut temp = vec![1, 1, 0, 0, 0, 0, 0, 0];
+            temp.extend_from_slice(&[0; 8]);
+            temp.extend_from_slice(&[0x42; 8]);
+            temp.extend_from_slice(&[0; 8]);
+            let mut buf = chal.to_vec();
+            buf.extend_from_slice(&temp);
+            let proof = crypto::hmac_md5(&v2, &buf);
+            let mut nt_resp = proof.to_vec();
+            nt_resp.extend_from_slice(&temp);
+            // Session base key the server will derive too.
+            let _sbk = crypto::hmac_md5(&v2, &proof);
+            let user16 = crate::wire::utf16le("glenn");
+            let dom16 = crate::wire::utf16le("WG");
+            let mut m: Vec<u8> = Vec::new();
+            m.pbytes(ntlm::SIG);
+            m.p32(3);
+            let mut off = 64usize;
+            for len in [0usize, nt_resp.len(), dom16.len(), user16.len(), 0, 0] {
+                m.p16(len as u16);
+                m.p16(len as u16);
+                m.p32(off as u32);
+                off += len;
+            }
+            m.p32(0);
+            m.pbytes(&nt_resp);
+            m.pbytes(&dom16);
+            m.pbytes(&user16);
+            m
+        };
+        let mut f = req_hdr(CMD_SESSION_SETUP, 4, 0, sess);
+        f.p16(25);
+        f.p8(0);
+        f.p8(2);
+        f.p32(0);
+        f.p32(0);
+        f.p16(88);
+        f.p16(t3.len() as u16);
+        f.p64(0);
+        f.pbytes(&t3);
+        let r = roundtrip(&srv, &mut pc, f);
+        assert_eq!(r.status, status::SUCCESS);
+        // Final session setup response on a signing-required session must
+        // itself be signed.
+        let sess_obj = pc.sessions.get(&sess).unwrap();
+        assert!(sess_obj.sign.is_some());
+        assert!(sess_obj.signing_required);
+        assert!(!sess_obj.guest);
+
+        // Unsigned TREE_CONNECT on a signing-required session → rejected.
+        let path16 = utf16le("\\\\srv\\t");
+        let mut f = req_hdr(CMD_TREE_CONNECT, 5, 0, sess);
+        f.p16(9);
+        f.p16(0);
+        f.p16(72);
+        f.p16(path16.len() as u16);
+        f.pbytes(&path16);
+        let r = roundtrip(&srv, &mut pc, f);
+        assert_eq!(r.status, status::ACCESS_DENIED);
+
+        // Properly signed TREE_CONNECT must succeed, and the response must
+        // verify under the same key.
+        let sc = pc.sessions.get(&sess).unwrap().sign.clone().unwrap();
+        let mut f = req_hdr(CMD_TREE_CONNECT, 6, 0, sess);
+        f.p16(9);
+        f.p16(0);
+        f.p16(72);
+        f.p16(path16.len() as u16);
+        f.pbytes(&path16);
+        // Set SIGNED flag and compute the signature.
+        let flags = u32::from_le_bytes(f[16..20].try_into().unwrap()) | FLAG_SIGNED;
+        f[16..20].copy_from_slice(&flags.to_le_bytes());
+        let sig = crate::crypto::smb2_signature(sc.alg, &sc.key, &[&f[..48], &[0; 16], &f[64..]]);
+        f[48..64].copy_from_slice(&sig);
+        let mut tx = Vec::new();
+        match process_frame(&srv, &mut pc, &f, &mut tx) {
+            FrameAction::Respond => {}
+            _ => panic!(),
+        }
+        let st = u32::from_le_bytes(tx[12..16].try_into().unwrap());
+        assert_eq!(st, status::SUCCESS);
+        let rflags = u32::from_le_bytes(tx[20..24].try_into().unwrap());
+        assert_ne!(rflags & FLAG_SIGNED, 0, "response must be signed");
+        assert!(verify_signature(&tx[4..], &sc), "response signature must verify");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn process_frame_appends_for_batching() {
         let dir = std::env::temp_dir().join(format!("rsmbd-batch-{}", std::process::id()));
