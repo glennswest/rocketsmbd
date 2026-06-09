@@ -1589,11 +1589,17 @@ fn ioctl(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chai
         err_resp(tx, h, status::NOT_SUPPORTED, chain);
         return;
     }
-    // Echo our negotiated parameters so the client can verify them.
+    // Echo our negotiated parameters so the client can verify them. The
+    // security mode MUST match what we advertised in NEGOTIATE or the
+    // client aborts with "security settings mismatch".
+    let mut secmode = SECURITY_MODE_SIGNING_ENABLED;
+    if srv.cfg.require_signing {
+        secmode |= SECURITY_MODE_SIGNING_REQUIRED;
+    }
     let mut out: Vec<u8> = Vec::with_capacity(24);
     out.p32(CAP_LARGE_MTU);
     out.pbytes(&srv.guid);
-    out.p16(SECURITY_MODE_SIGNING_ENABLED);
+    out.p16(secmode);
     out.p16(pc.dialect);
 
     begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
