@@ -26,6 +26,16 @@ const OP_RECV: u8 = 2;
 const OP_SEND: u8 = 3;
 const OP_SPLICE_IN: u8 = 4;
 const OP_SPLICE_OUT: u8 = 5;
+const OP_INOTIFY: u8 = 6;
+
+const IN_MASK: u32 = libc::IN_CREATE
+    | libc::IN_DELETE
+    | libc::IN_MODIFY
+    | libc::IN_ATTRIB
+    | libc::IN_CLOSE_WRITE
+    | libc::IN_MOVED_FROM
+    | libc::IN_MOVED_TO
+    | libc::IN_DELETE_SELF;
 
 const RX_INITIAL: usize = 68 * 1024;
 /// Minimum spare tail room before re-arming a recv.
@@ -85,6 +95,11 @@ struct Zc {
     out_left: u32,
 }
 
+struct Watch {
+    wd: i32,
+    pend: crate::smb2::NotifyPend,
+}
+
 struct Conn {
     fd: RawFd,
     gen: u16,
@@ -100,6 +115,12 @@ struct Conn {
     pipe: Option<(RawFd, RawFd)>,
     pipe_cap: u32,
     zc: Option<Zc>,
+    // CHANGE_NOTIFY: inotify instance, live watches, and completed async
+    // responses waiting for the tx side to go idle.
+    inotify_fd: Option<RawFd>,
+    ibuf: Vec<u8>,
+    watches: Vec<Watch>,
+    deferred: std::collections::VecDeque<Vec<u8>>,
 }
 
 impl Drop for Conn {
@@ -110,6 +131,9 @@ impl Drop for Conn {
                 libc::close(r);
                 libc::close(w);
             }
+        }
+        if let Some(ifd) = self.inotify_fd {
+            unsafe { libc::close(ifd) };
         }
     }
 }
@@ -274,6 +298,7 @@ fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32) {
         OP_SEND => on_send(ring, w, idx, res),
         OP_SPLICE_IN => on_splice_in(ring, w, idx, res),
         OP_SPLICE_OUT => on_splice_out(ring, w, idx, res),
+        OP_INOTIFY => on_inotify(ring, w, idx, res),
         _ => {}
     }
 }
@@ -315,6 +340,10 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         pipe: None,
         pipe_cap: 0,
         zc: None,
+        inotify_fd: None,
+        ibuf: Vec::new(),
+        watches: Vec::new(),
+        deferred: std::collections::VecDeque::new(),
     });
     logd!("worker {}: new connection (slot {idx})", w.wid);
     maybe_arm_recv(ring, w, idx);
@@ -413,8 +442,21 @@ fn on_recv(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
 fn drive(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     debug_assert!(matches!(conn_mut(w, idx).txm, Tx::Idle));
     let srv = Arc::clone(&w.srv);
+    // Completed async (notify) responses go out ahead of new work.
+    {
+        let c = conn_mut(w, idx);
+        while let Some(d) = c.deferred.pop_front() {
+            c.tx.extend_from_slice(&d);
+            if c.tx.len() >= TX_FLUSH {
+                break;
+            }
+        }
+    }
     loop {
         let c = conn_mut(w, idx);
+        if c.tx.len() - c.tx_off >= TX_FLUSH {
+            break; // flush the batch before processing more
+        }
         let total = match frame_total(c) {
             Ok(Some(t)) if c.rx_len - c.rx_off >= t => t,
             Ok(_) => break, // need more bytes
@@ -429,14 +471,14 @@ fn drive(ring: &mut IoUring, w: &mut Worker, idx: usize) {
             smb2::process_frame(&srv, proto, frame, tx)
         };
         c.rx_off += total;
+        // Register new CHANGE_NOTIFY pends / complete cancelled ones.
+        if !c.proto.notify_new.is_empty() || !c.proto.notify_done.is_empty() {
+            service_notify(ring, w, idx);
+        }
         match action {
-            FrameAction::Respond => {
-                if c.tx.len() - c.tx_off >= TX_FLUSH {
-                    break; // flush the batch before processing more
-                }
-            }
+            FrameAction::Respond => {}
             FrameAction::ZcRead(plan) => {
-                if c.tx.is_empty() {
+                if conn_mut(w, idx).tx.is_empty() {
                     start_zc(ring, w, idx, plan);
                 } else {
                     // Flush buffered responses first, then run the splice
@@ -454,6 +496,152 @@ fn drive(ring: &mut IoUring, w: &mut Worker, idx: usize) {
         start_send(ring, w, idx);
     }
     maybe_arm_recv(ring, w, idx);
+}
+
+/// Drain the protocol layer's notify queues: add inotify watches for new
+/// pends, emit final responses for completed ones (cancel / handle close).
+fn service_notify(ring: &mut IoUring, w: &mut Worker, idx: usize) {
+    let c = conn_mut(w, idx);
+    let new = std::mem::take(&mut c.proto.notify_new);
+    let done = std::mem::take(&mut c.proto.notify_done);
+
+    for pend in new {
+        if c.inotify_fd.is_none() {
+            let ifd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+            if ifd < 0 {
+                complete_notify(c, &pend, status::INSUFFICIENT_RESOURCES, &[]);
+                continue;
+            }
+            c.inotify_fd = Some(ifd);
+            c.ibuf = vec![0; 4096];
+            arm_inotify(ring, c, idx);
+        }
+        let ifd = c.inotify_fd.unwrap();
+        let wd = match crate::vfs::cpath(&pend.path) {
+            Ok(cp) => unsafe { libc::inotify_add_watch(ifd, cp.as_ptr(), IN_MASK) },
+            Err(_) => -1,
+        };
+        if wd < 0 {
+            complete_notify(c, &pend, status::INSUFFICIENT_RESOURCES, &[]);
+            continue;
+        }
+        logd!("notify pend on {:?} (wd {wd})", pend.path);
+        c.watches.push(Watch { wd, pend });
+    }
+
+    for d in done {
+        if let Some(pos) = c.watches.iter().position(|x| x.pend.async_id == d.async_id) {
+            let watch = c.watches.remove(pos);
+            // Same directory can back several watches (same wd): only drop
+            // the kernel watch when the last one goes.
+            if !c.watches.iter().any(|x| x.wd == watch.wd) {
+                if let Some(ifd) = c.inotify_fd {
+                    unsafe { libc::inotify_rm_watch(ifd, watch.wd) };
+                }
+            }
+            let resp =
+                smb2::build_notify_final(&c.proto, &watch.pend.meta, d.status, &[], watch.pend.out_len);
+            c.deferred.push_back(resp);
+        }
+    }
+}
+
+/// Build + queue a final notify response and clear the active entry.
+fn complete_notify(c: &mut Conn, pend: &crate::smb2::NotifyPend, st: u32, events: &[(u32, String)]) {
+    let resp = smb2::build_notify_final(&c.proto, &pend.meta, st, events, pend.out_len);
+    c.deferred.push_back(resp);
+    c.proto.notify_active.retain(|&(_, a)| a != pend.async_id);
+}
+
+fn arm_inotify(ring: &mut IoUring, c: &mut Conn, idx: usize) {
+    let ifd = c.inotify_fd.expect("inotify created");
+    let e = opcode::Read::new(types::Fd(ifd), c.ibuf.as_mut_ptr(), c.ibuf.len() as u32)
+        .build()
+        .user_data(ud(OP_INOTIFY, idx, c.gen));
+    sq_push(ring, &e);
+}
+
+fn on_inotify(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
+    if res == -libc::EINTR || res == -libc::EAGAIN {
+        let c = conn_mut(w, idx);
+        arm_inotify(ring, c, idx);
+        return;
+    }
+    if res <= 0 {
+        // inotify instance died; pending notifies will complete via
+        // cancel/close paths.
+        conn_mut(w, idx).inotify_fd.take().map(|fd| unsafe { libc::close(fd) });
+        return;
+    }
+    let c = conn_mut(w, idx);
+    let n = res as usize;
+
+    // Parse events, grouped per watch descriptor.
+    let mut groups: std::collections::HashMap<i32, Vec<(u32, String)>> =
+        std::collections::HashMap::new();
+    let mut self_gone: Vec<i32> = Vec::new();
+    let mut off = 0usize;
+    while off + 16 <= n {
+        let wd = i32::from_le_bytes(c.ibuf[off..off + 4].try_into().unwrap());
+        let mask = u32::from_le_bytes(c.ibuf[off + 4..off + 8].try_into().unwrap());
+        let name_len = u32::from_le_bytes(c.ibuf[off + 12..off + 16].try_into().unwrap()) as usize;
+        let name_bytes = &c.ibuf[off + 16..(off + 16 + name_len).min(n)];
+        let name = name_bytes
+            .split(|&b| b == 0)
+            .next()
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .unwrap_or_default();
+        off += 16 + name_len;
+
+        if mask & (libc::IN_DELETE_SELF | libc::IN_IGNORED | libc::IN_UNMOUNT) != 0 {
+            self_gone.push(wd);
+            continue;
+        }
+        let action = if mask & libc::IN_CREATE != 0 {
+            1 // FILE_ACTION_ADDED
+        } else if mask & libc::IN_DELETE != 0 {
+            2 // FILE_ACTION_REMOVED
+        } else if mask & libc::IN_MOVED_FROM != 0 {
+            4 // FILE_ACTION_RENAMED_OLD_NAME
+        } else if mask & libc::IN_MOVED_TO != 0 {
+            5 // FILE_ACTION_RENAMED_NEW_NAME
+        } else {
+            3 // FILE_ACTION_MODIFIED
+        };
+        if !name.is_empty() {
+            groups.entry(wd).or_default().push((action, name));
+        } else {
+            // Event without a name → make the client re-enumerate.
+            groups.entry(wd).or_default();
+        }
+    }
+
+    // Complete every watch that saw activity (single-shot semantics).
+    let mut fired: Vec<(Watch, Vec<(u32, String)>)> = Vec::new();
+    for (wd, events) in groups {
+        while let Some(pos) = c.watches.iter().position(|x| x.wd == wd) {
+            let watch = c.watches.remove(pos);
+            fired.push((watch, events.clone()));
+        }
+        if let Some(ifd) = c.inotify_fd {
+            unsafe { libc::inotify_rm_watch(ifd, wd) };
+        }
+    }
+    for wd in self_gone {
+        while let Some(pos) = c.watches.iter().position(|x| x.wd == wd) {
+            let watch = c.watches.remove(pos);
+            fired.push((watch, Vec::new()));
+        }
+    }
+    for (watch, events) in fired {
+        complete_notify(c, &watch.pend, status::SUCCESS, &events);
+    }
+
+    arm_inotify(ring, c, idx);
+    let c = conn_mut(w, idx);
+    if matches!(c.txm, Tx::Idle) && !c.deferred.is_empty() {
+        drive(ring, w, idx);
+    }
 }
 
 fn start_send(ring: &mut IoUring, w: &mut Worker, idx: usize) {

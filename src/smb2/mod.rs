@@ -35,6 +35,7 @@ pub const CMD_QUERY_DIRECTORY: u16 = 14;
 pub const CMD_CHANGE_NOTIFY: u16 = 15;
 pub const CMD_QUERY_INFO: u16 = 16;
 pub const CMD_SET_INFO: u16 = 17;
+#[allow(dead_code)]
 pub const CMD_OPLOCK_BREAK: u16 = 18;
 
 pub const FLAG_RESPONSE: u32 = 0x1;
@@ -158,7 +159,11 @@ impl Default for Session {
 }
 
 /// A pended CHANGE_NOTIFY the reactor must watch via inotify.
+/// `recursive` (WATCH_TREE) and `filter` are accepted but not narrowed:
+/// inotify is non-recursive and we over-deliver rather than filter —
+/// clients treat extra notifications as a hint to re-check.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct NotifyPend {
     pub async_id: u64,
     pub fid: u64,
@@ -390,22 +395,24 @@ fn read_plan_hdr(plan: &ZcReadPlan) -> ReqHdr {
 }
 
 /// Build a complete (NBT-framed, optionally signed) final response for a
-/// pended CHANGE_NOTIFY. `events` are (action, name) pairs; empty means
-/// "too many changes" → STATUS_NOTIFY_ENUM_DIR for success completions.
+/// pended CHANGE_NOTIFY. `events` are (action, name) pairs; an empty list —
+/// or an encoding that exceeds the client's buffer — degrades to
+/// STATUS_NOTIFY_ENUM_DIR ("re-enumerate") for success completions.
 pub fn build_notify_final(
     pc: &ProtoConn,
     meta: &AsyncMeta,
     st: u32,
     events: &[(u32, String)],
+    out_len: u32,
 ) -> Vec<u8> {
     let mut tx = Vec::with_capacity(256);
     tx.zeros(4);
+    let mut data: Vec<u8> = Vec::new();
     if st == status::SUCCESS && !events.is_empty() {
-        let mut data: Vec<u8> = Vec::new();
         let mut entry_starts: Vec<usize> = Vec::new();
         for (action, name) in events {
             // 4-align between entries.
-            while data.len() % 4 != 0 {
+            while !data.len().is_multiple_of(4) {
                 data.push(0);
             }
             entry_starts.push(data.len());
@@ -419,6 +426,8 @@ pub fn build_notify_final(
             let next = (w[1] - w[0]) as u32;
             data[w[0]..w[0] + 4].copy_from_slice(&next.to_le_bytes());
         }
+    }
+    if st == status::SUCCESS && !events.is_empty() && data.len() <= out_len as usize {
         let start = begin_resp_async(&mut tx, meta, st, 0, CMD_CHANGE_NOTIFY);
         tx.p16(9);
         tx.p16(72);
@@ -434,7 +443,7 @@ pub fn build_notify_final(
     tx
 }
 
-fn finalize_async(pc: &ProtoConn, meta: &AsyncMeta, tx: &mut Vec<u8>, start: usize) {
+fn finalize_async(pc: &ProtoConn, meta: &AsyncMeta, tx: &mut [u8], start: usize) {
     if meta.want_sign {
         if let Some(sc) = pc.sessions.get(&meta.session_id).and_then(|s| s.sign.clone()) {
             let end = tx.len();
