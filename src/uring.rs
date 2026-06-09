@@ -1,6 +1,12 @@
 //! io_uring reactor: one ring per worker thread, SO_REUSEPORT listeners,
 //! completion-driven per-connection state machines.
 //!
+//! Receive and transmit run full-duplex: a recv is kept posted whenever
+//! there is buffer room, while the tx side drains. All complete frames in
+//! the rx buffer are processed per wakeup and their responses batched into
+//! a single send, so pipelined client requests (e.g. streams of 1 MiB
+//! WRITEs) don't pay a per-request round trip.
+//!
 //! Data path for a standalone SMB2 READ is zero-copy: the file is spliced
 //! into a per-connection pipe, the response header is sent with MSG_MORE,
 //! and the pipe is spliced into the socket. File bytes never enter
@@ -22,7 +28,13 @@ const OP_SPLICE_IN: u8 = 4;
 const OP_SPLICE_OUT: u8 = 5;
 
 const RX_INITIAL: usize = 68 * 1024;
+/// Minimum spare tail room before re-arming a recv.
+const RX_MIN_ROOM: usize = 16 * 1024;
 const MAX_FRAME: usize = smb2::MAX_TRANSACT as usize + 0x11000;
+/// Flush accumulated responses once the batch reaches this size.
+const TX_FLUSH: usize = 1 << 20;
+/// Shrink an oversized tx buffer back to this after a send completes.
+const TX_KEEP: usize = 1 << 20;
 
 fn ud(op: u8, idx: usize, gen: u16) -> u64 {
     ((op as u64) << 56) | ((idx as u64 & 0xFF_FFFF) << 32) | ((gen as u64) << 16)
@@ -52,10 +64,11 @@ pub fn probe_pipe_size(want: u32) -> u32 {
     }
 }
 
-enum St {
+/// Transmit-side state. Only one response stream is in flight at a time;
+/// the rx side runs independently.
+enum Tx {
     Idle,
-    Recv,
-    /// Sending a fully-buffered response from tx.
+    /// Sending a batch of buffered responses from tx.
     Send,
     /// Zero-copy read: filling the pipe from the file.
     ZcIn,
@@ -77,13 +90,16 @@ struct Conn {
     gen: u16,
     proto: ProtoConn,
     rx: Vec<u8>,
+    rx_off: usize,
     rx_len: usize,
+    recv_inflight: bool,
     tx: Vec<u8>,
     tx_off: usize,
+    txm: Tx,
+    pending_zc: Option<ZcReadPlan>,
     pipe: Option<(RawFd, RawFd)>,
     pipe_cap: u32,
     zc: Option<Zc>,
-    state: St,
 }
 
 impl Drop for Conn {
@@ -289,16 +305,19 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         gen,
         proto,
         rx: vec![0; RX_INITIAL],
+        rx_off: 0,
         rx_len: 0,
+        recv_inflight: false,
         tx: Vec::with_capacity(4096),
         tx_off: 0,
+        txm: Tx::Idle,
+        pending_zc: None,
         pipe: None,
         pipe_cap: 0,
         zc: None,
-        state: St::Idle,
     });
     logd!("worker {}: new connection (slot {idx})", w.wid);
-    start_recv(ring, w, idx);
+    maybe_arm_recv(ring, w, idx);
 }
 
 fn close_conn(w: &mut Worker, idx: usize) {
@@ -313,87 +332,133 @@ fn conn_mut(w: &mut Worker, idx: usize) -> &mut Conn {
     w.conns[idx].as_mut().expect("live connection")
 }
 
-fn start_recv(ring: &mut IoUring, w: &mut Worker, idx: usize) {
+/// Size of the frame starting at rx_off, if its NBT header has arrived.
+/// Err(()) means the stream is unsynchronized and the connection must die.
+fn frame_total(c: &Conn) -> Result<Option<usize>, ()> {
+    let avail = c.rx_len - c.rx_off;
+    if avail < 4 {
+        return Ok(None);
+    }
+    let b = &c.rx[c.rx_off..];
+    if b[0] != 0 {
+        return Err(()); // only NetBIOS session messages on direct TCP 445
+    }
+    let flen = ((b[1] as usize) << 16) | ((b[2] as usize) << 8) | b[3] as usize;
+    if flen > MAX_FRAME {
+        return Err(());
+    }
+    Ok(Some(4 + flen))
+}
+
+/// Keep a recv posted whenever there is (or can be made) room. Never moves
+/// or reallocates the buffer while a recv is in flight.
+fn maybe_arm_recv(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     let c = conn_mut(w, idx);
-    if c.rx_len == c.rx.len() {
-        let new_len = (c.rx.len() * 2).min(MAX_FRAME + 4);
-        c.rx.resize(new_len, 0);
+    if c.recv_inflight {
+        return;
+    }
+    // Compact consumed bytes to the front.
+    if c.rx_off > 0 {
+        c.rx.copy_within(c.rx_off..c.rx_len, 0);
+        c.rx_len -= c.rx_off;
+        c.rx_off = 0;
+    }
+    // Grow for a known oversized frame, or to keep minimum room available.
+    let needed = match frame_total(c) {
+        Ok(Some(total)) => total.max(c.rx_len + RX_MIN_ROOM),
+        Ok(None) => c.rx_len + RX_MIN_ROOM,
+        Err(()) => {
+            close_conn(w, idx);
+            return;
+        }
+    };
+    if c.rx.len() < needed {
+        c.rx.resize(needed.min(MAX_FRAME + 4 + RX_MIN_ROOM), 0);
     }
     let buf = &mut c.rx[c.rx_len..];
+    if buf.is_empty() {
+        return; // buffer at hard cap and full; resume after frames drain
+    }
     let e = opcode::Recv::new(types::Fd(c.fd), buf.as_mut_ptr(), buf.len() as u32)
         .build()
         .user_data(ud(OP_RECV, idx, c.gen));
-    c.state = St::Recv;
+    c.recv_inflight = true;
     sq_push(ring, &e);
 }
 
 fn on_recv(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
+    let c = conn_mut(w, idx);
+    c.recv_inflight = false;
     if res == -libc::EINTR {
-        start_recv(ring, w, idx);
+        maybe_arm_recv(ring, w, idx);
         return;
     }
     if res <= 0 {
+        // Peer closed or socket error. If the tx side is mid-stream it will
+        // also fail shortly; tearing down now is safe (gen guards CQEs).
         close_conn(w, idx);
         return;
     }
-    conn_mut(w, idx).rx_len += res as usize;
-    advance(ring, w, idx);
+    c.rx_len += res as usize;
+    if matches!(c.txm, Tx::Idle) {
+        drive(ring, w, idx);
+    } else {
+        // tx busy: just keep receiving; frames are processed when it frees.
+        maybe_arm_recv(ring, w, idx);
+    }
 }
 
-/// Drive the connection: process any complete frame in rx, otherwise arm a
-/// recv. Called whenever the previous operation chain finishes.
-fn advance(ring: &mut IoUring, w: &mut Worker, idx: usize) {
+/// Process complete frames (tx side must be idle), batching responses into
+/// tx, then kick the appropriate transmit and keep a recv posted.
+fn drive(ring: &mut IoUring, w: &mut Worker, idx: usize) {
+    debug_assert!(matches!(conn_mut(w, idx).txm, Tx::Idle));
+    let srv = Arc::clone(&w.srv);
     loop {
-        let srv = Arc::clone(&w.srv);
         let c = conn_mut(w, idx);
-        if c.rx_len < 4 {
-            start_recv(ring, w, idx);
-            return;
-        }
-        if c.rx[0] != 0 {
-            // Only NetBIOS session messages are valid on direct TCP 445.
-            close_conn(w, idx);
-            return;
-        }
-        let flen = ((c.rx[1] as usize) << 16) | ((c.rx[2] as usize) << 8) | c.rx[3] as usize;
-        if flen > MAX_FRAME {
-            close_conn(w, idx);
-            return;
-        }
-        let total = 4 + flen;
-        if c.rx_len < total {
-            if c.rx.len() < total {
-                c.rx.resize(total, 0);
-            }
-            start_recv(ring, w, idx);
-            return;
-        }
-
-        // Borrow rx and proto disjointly; process the frame into tx.
-        let action = {
-            let Conn { proto, rx, tx, .. } = c;
-            smb2::process_frame(&srv, proto, &rx[4..total], tx)
-        };
-        // Consume the frame; keep any pipelined bytes that followed it.
-        c.rx.copy_within(total..c.rx_len, 0);
-        c.rx_len -= total;
-
-        match action {
-            FrameAction::Respond => {
-                if c.tx.is_empty() {
-                    continue; // no response (e.g. CANCEL) — look for next frame
-                }
-                c.tx_off = 0;
-                c.state = St::Send;
-                submit_send(ring, w, idx, 0);
+        let total = match frame_total(c) {
+            Ok(Some(t)) if c.rx_len - c.rx_off >= t => t,
+            Ok(_) => break, // need more bytes
+            Err(()) => {
+                close_conn(w, idx);
                 return;
             }
+        };
+        let action = {
+            let Conn { proto, rx, tx, .. } = c;
+            let frame = &rx[c.rx_off + 4..c.rx_off + total];
+            smb2::process_frame(&srv, proto, frame, tx)
+        };
+        c.rx_off += total;
+        match action {
+            FrameAction::Respond => {
+                if c.tx.len() - c.tx_off >= TX_FLUSH {
+                    break; // flush the batch before processing more
+                }
+            }
             FrameAction::ZcRead(plan) => {
-                start_zc(ring, w, idx, plan);
+                if c.tx.is_empty() {
+                    start_zc(ring, w, idx, plan);
+                } else {
+                    // Flush buffered responses first, then run the splice
+                    // sequence; ordering on the socket is preserved.
+                    conn_mut(w, idx).pending_zc = Some(plan);
+                    start_send(ring, w, idx);
+                }
+                maybe_arm_recv(ring, w, idx);
                 return;
             }
         }
     }
+    let c = conn_mut(w, idx);
+    if !c.tx.is_empty() {
+        start_send(ring, w, idx);
+    }
+    maybe_arm_recv(ring, w, idx);
+}
+
+fn start_send(ring: &mut IoUring, w: &mut Worker, idx: usize) {
+    conn_mut(w, idx).txm = Tx::Send;
+    submit_send(ring, w, idx, 0);
 }
 
 fn submit_send(ring: &mut IoUring, w: &mut Worker, idx: usize, msg_flags: i32) {
@@ -408,7 +473,7 @@ fn submit_send(ring: &mut IoUring, w: &mut Worker, idx: usize, msg_flags: i32) {
 
 fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
     if res == -libc::EINTR {
-        let flags = matches!(conn_mut(w, idx).state, St::ZcHdr) as i32 * libc::MSG_MORE;
+        let flags = matches!(conn_mut(w, idx).txm, Tx::ZcHdr) as i32 * libc::MSG_MORE;
         submit_send(ring, w, idx, flags);
         return;
     }
@@ -419,10 +484,10 @@ fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
     let c = conn_mut(w, idx);
     c.tx_off += res as usize;
     let done = c.tx_off >= c.tx.len();
-    match c.state {
-        St::ZcHdr => {
+    match c.txm {
+        Tx::ZcHdr => {
             if done {
-                c.state = St::ZcOut;
+                c.txm = Tx::ZcOut;
                 submit_splice_out(ring, w, idx);
             } else {
                 submit_send(ring, w, idx, libc::MSG_MORE);
@@ -430,8 +495,17 @@ fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
         }
         _ => {
             if done {
-                c.state = St::Idle;
-                advance(ring, w, idx);
+                c.tx.clear();
+                c.tx_off = 0;
+                if c.tx.capacity() > TX_KEEP {
+                    c.tx.shrink_to(TX_KEEP);
+                }
+                if let Some(plan) = c.pending_zc.take() {
+                    start_zc(ring, w, idx, plan);
+                } else {
+                    c.txm = Tx::Idle;
+                    drive(ring, w, idx);
+                }
             } else {
                 submit_send(ring, w, idx, 0);
             }
@@ -444,6 +518,7 @@ fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
 fn start_zc(ring: &mut IoUring, w: &mut Worker, idx: usize, plan: ZcReadPlan) {
     let max_read = w.srv.max_read;
     let c = conn_mut(w, idx);
+    debug_assert!(c.tx.is_empty());
     if c.pipe.is_none() {
         let mut fds = [0i32; 2];
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
@@ -451,7 +526,7 @@ fn start_zc(ring: &mut IoUring, w: &mut Worker, idx: usize, plan: ZcReadPlan) {
             smb2::build_read_err(&plan, status::INSUFFICIENT_RESOURCES, &mut tx);
             c.tx = tx;
             c.tx_off = 0;
-            c.state = St::Send;
+            c.txm = Tx::Send;
             submit_send(ring, w, idx, 0);
             return;
         }
@@ -462,7 +537,7 @@ fn start_zc(ring: &mut IoUring, w: &mut Worker, idx: usize, plan: ZcReadPlan) {
     }
     let want = plan.length.min(c.pipe_cap);
     c.zc = Some(Zc { plan, want, got: 0, out_left: 0 });
-    c.state = St::ZcIn;
+    c.txm = Tx::ZcIn;
     submit_splice_in(ring, w, idx);
 }
 
@@ -515,7 +590,7 @@ fn on_splice_in(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
     smb2::build_read_resp_prefix(&plan, got, &mut tx);
     c.tx = tx;
     c.tx_off = 0;
-    c.state = St::ZcHdr;
+    c.txm = Tx::ZcHdr;
     submit_send(ring, w, idx, libc::MSG_MORE);
 }
 
@@ -542,7 +617,7 @@ fn zc_fail(ring: &mut IoUring, w: &mut Worker, idx: usize, st: u32) {
     smb2::build_read_err(&zc.plan, st, &mut tx);
     c.tx = tx;
     c.tx_off = 0;
-    c.state = St::Send;
+    c.txm = Tx::Send;
     submit_send(ring, w, idx, 0);
 }
 
@@ -575,6 +650,8 @@ fn on_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
         return;
     }
     c.zc = None;
-    c.state = St::Idle;
-    advance(ring, w, idx);
+    c.tx.clear();
+    c.tx_off = 0;
+    c.txm = Tx::Idle;
+    drive(ring, w, idx);
 }

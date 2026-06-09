@@ -41,8 +41,8 @@ pub const FLAG_RELATED: u32 = 0x4;
 #[allow(dead_code)]
 pub const FLAG_SIGNED: u32 = 0x8;
 
-pub const MAX_TRANSACT: u32 = 1 << 20;
-pub const MAX_WRITE: u32 = 1 << 20;
+pub const MAX_TRANSACT: u32 = 4 << 20;
+pub const MAX_WRITE: u32 = 4 << 20;
 /// Reads at or above this size take the zero-copy splice path.
 pub const ZC_MIN_READ: u32 = 8 * 1024;
 
@@ -235,17 +235,18 @@ fn finish_nbt_with(tx: &mut [u8], len: u32) {
 }
 
 /// Process one NetBIOS-framed message (without the 4-byte NBT prefix).
-/// Responses are appended to `tx` including the NBT prefix; an empty `tx`
-/// on return means "no response" (e.g. CANCEL).
+/// The response — including its NBT prefix — is **appended** to `tx`, so a
+/// reactor can batch several frames' responses into one send. If `tx` does
+/// not grow, the frame produced no response (e.g. CANCEL).
 pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u8>) -> FrameAction {
-    tx.clear();
+    let base = tx.len();
     tx.zeros(4); // NBT placeholder
 
     // Legacy SMB1 negotiate → wildcard SMB2 response (dialect 0x02FF).
     if frame.len() >= 4 && frame[0] == 0xFF && &frame[1..4] == b"SMB" {
         handlers::negotiate_resp_smb1_wildcard(srv, pc, tx);
-        let total = (tx.len() - 4) as u32;
-        finish_nbt_with(tx, total);
+        let total = (tx.len() - base - 4) as u32;
+        finish_nbt_with(&mut tx[base..], total);
         return FrameAction::Respond;
     }
 
@@ -277,7 +278,7 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
 
         // Align this response and patch the previous header's NextCommand.
         if let Some(p) = prev_start {
-            tx.pad8(4);
+            tx.pad8(base + 4);
             let here = tx.len();
             tx.patch32(p + 20, (here - p) as u32);
         }
@@ -299,13 +300,15 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
     }
 
     if let Some(p) = plan {
+        // A zero-copy plan writes nothing buffered; drop the placeholder.
+        tx.truncate(base);
         return FrameAction::ZcRead(p);
     }
-    let total = (tx.len() - 4) as u32;
+    let total = (tx.len() - base - 4) as u32;
     if total == 0 {
-        tx.clear(); // nothing to send
+        tx.truncate(base); // nothing to send for this frame
     } else {
-        finish_nbt_with(tx, total);
+        finish_nbt_with(&mut tx[base..], total);
     }
     FrameAction::Respond
 }
@@ -588,6 +591,39 @@ mod tests {
             FrameAction::Respond => panic!("expected zero-copy plan for 64K read"),
         }
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_frame_appends_for_batching() {
+        let dir = std::env::temp_dir().join(format!("rsmbd-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let srv = test_srv(&dir);
+        let mut pc = ProtoConn::new(&srv, 1);
+
+        // Two ECHO frames processed into the same tx buffer must yield two
+        // complete, independently-framed responses.
+        let mut echo = req_hdr(CMD_ECHO, 7, 0, 0);
+        echo.p16(4);
+        echo.p16(0);
+        let mut tx = Vec::new();
+        for _ in 0..2 {
+            match process_frame(&srv, &mut pc, &echo, &mut tx) {
+                FrameAction::Respond => {}
+                _ => panic!("echo must respond"),
+            }
+        }
+        // Walk both NBT frames.
+        let mut off = 0;
+        for _ in 0..2 {
+            let nbt = ((tx[off + 1] as usize) << 16) | ((tx[off + 2] as usize) << 8)
+                | tx[off + 3] as usize;
+            let status =
+                u32::from_le_bytes(tx[off + 4 + 8..off + 4 + 12].try_into().unwrap());
+            assert_eq!(status, status::SUCCESS);
+            off += 4 + nbt;
+        }
+        assert_eq!(off, tx.len(), "exactly two framed responses");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
