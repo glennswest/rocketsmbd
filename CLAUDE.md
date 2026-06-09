@@ -91,13 +91,33 @@ Primary deploy target is x86_64; ARM64 retained for MikroTik Rose/mkube.
 re-measured with bench/bench.sh and logged in docs/BENCHMARKS.md before
 release; architecture changes update docs/ARCHITECTURE.md in the same commit.
 
-### Phase 2 — auth & robustness (v0.2.0)
-- [ ] NTLMv2 real authentication, user database
-- [ ] IPC$ tree-connect stub (silences cifs.ko "failed to connect to IPC
-      (rc=-2)" mount-time warning; DFS referrals can stay unsupported)
-- [ ] SMB2 signing (HMAC-SHA256 / AES-CMAC), SMB 3.1.1 + preauth integrity
-- [ ] SPNEGO wrapping (Windows client compat)
-- [ ] Byte-range locks, CHANGE_NOTIFY
+### Phase 2 — auth & robustness (v0.2.0)  ← IN PROGRESS (all items)
+Implementation order (commit per step):
+- [ ] 1. Crypto: RustCrypto deps (md4/md-5/hmac/sha2/cmac/aes) + crypto.rs
+      (SP800-108 KDF, RC4, helpers) with RFC test vectors
+- [ ] 2. NTLMv2 verification + [[user]] database in config (password or
+      nt_hash), allow_guest policy (default true only when no users),
+      session key derivation (KEY_EXCH/RC4)
+- [ ] 3. SMB2 signing: verify requests + sign responses; HMAC-SHA256 (2.x),
+      AES-128-CMAC (3.x); require_signing config; signed sessions use the
+      buffered read path (signature covers payload — splice can't sign)
+- [ ] 4. SMB 3.1.1: negotiate contexts (preauth integrity SHA-512 + cipher),
+      preauth hash chaining, 3.1.1 signing key derivation
+- [ ] 5. SPNEGO: wrap challenge/accept tokens when client speaks SPNEGO;
+      NegTokenInit2 hint in NEGOTIATE response (Windows compat)
+- [ ] 6. IPC$ tree-connect stub (ShareType=pipe; silences cifs rc=-2 warning)
+- [ ] 7. Credit accounting (window clamp, charge tracking)
+- [ ] 8. LOCK: byte-range locks via Linux OFD locks (F_OFD_SETLK),
+      all-or-nothing batch semantics with unwind; conflicts → LOCK_NOT_GRANTED
+      (blocking lock waits degrade to immediate-fail in v0.2)
+- [ ] 9. CHANGE_NOTIFY: async pend (interim STATUS_PENDING + AsyncId),
+      inotify in the reactor, deferred responses, CANCEL → STATUS_CANCELLED,
+      handle close → STATUS_NOTIFY_CLEANUP
+- [ ] 10. Oplocks/leases: grant-none is the correct phase-2 posture (no
+      breaks needed); leases deferred to phase 3 with real caching
+- [ ] 11. Integration tests on dev.g8.lo (creds mount, wrong-password reject,
+      sec=ntlmsspi signing, vers=3.1.1, flock, smbclient notify), bench
+      re-run incl. signed throughput, docs, release v0.2.0
 - [ ] Oplocks/leases (at least none→break handling correctness)
 - [ ] Credit accounting, large MTU, multi-credit reads/writes
 
