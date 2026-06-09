@@ -8,9 +8,10 @@ data never enters userspace.
 
 ## Status
 
-Pre-release (`0.1.x`). Phase 1 targets a mountable guest read/write server
-speaking SMB 2.0.2 through 3.1.1 (no signing/encryption yet). **Do not expose
-to untrusted networks.** See `CLAUDE.md` for the full roadmap.
+Pre-release (`0.1.x`). Phase 1 is a mountable guest read/write server speaking
+SMB 2.0.2 through 3.0.2 (3.1.1 lands with preauth integrity in phase 2; no
+signing/encryption yet). **Do not expose to untrusted networks.** See
+`CLAUDE.md` for the full roadmap.
 
 ## Requirements
 
@@ -27,7 +28,8 @@ to untrusted networks.** See `CLAUDE.md` for the full roadmap.
   `splice(pipe → socket)`. The kernel moves page-cache pages directly to the
   socket.
 - **NBT framing** (4-byte direct-TCP length prefix) handled in the receive
-  state machine with provided-buffer rings.
+  state machine with per-connection buffers that grow to the negotiated
+  transact size. Provided-buffer rings and multishot recv are phase 3.
 - **Static binary.** Builds with musl to a single static binary suitable for a
   `scratch` container image.
 

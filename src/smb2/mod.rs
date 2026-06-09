@@ -309,3 +309,285 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
     }
     FrameAction::Respond
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, ShareCfg};
+    use crate::wire::utf16le;
+
+    fn test_srv(dir: &std::path::Path) -> Srv {
+        Srv {
+            cfg: Config {
+                listen: "127.0.0.1:445".into(),
+                workers: 1,
+                server_name: "TESTSRV".into(),
+                log_level: 0,
+                shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
+            },
+            guid: [9; 16],
+            max_read: 1 << 20,
+            start_ft: 0,
+        }
+    }
+
+    fn req_hdr(cmd: u16, msg_id: u64, tree: u32, sess: u64) -> Vec<u8> {
+        let mut v: Vec<u8> = Vec::with_capacity(64);
+        v.pbytes(&[0xFE, b'S', b'M', b'B']);
+        v.p16(64);
+        v.p16(1); // credit charge
+        v.p32(0);
+        v.p16(cmd);
+        v.p16(64); // credits requested
+        v.p32(0); // flags
+        v.p32(0); // next
+        v.p64(msg_id);
+        v.p32(0); // pid
+        v.p32(tree);
+        v.p64(sess);
+        v.zeros(16);
+        v
+    }
+
+    struct Resp {
+        status: u32,
+        tree_id: u32,
+        session_id: u64,
+        body: Vec<u8>,
+    }
+
+    fn roundtrip(srv: &Srv, pc: &mut ProtoConn, frame: Vec<u8>) -> Resp {
+        let mut tx = Vec::new();
+        match process_frame(srv, pc, &frame, &mut tx) {
+            FrameAction::Respond => {}
+            FrameAction::ZcRead(_) => panic!("unexpected zc plan"),
+        }
+        assert!(tx.len() > 68, "no response produced");
+        let nbt = ((tx[1] as usize) << 16) | ((tx[2] as usize) << 8) | tx[3] as usize;
+        assert_eq!(nbt, tx.len() - 4, "NBT length mismatch");
+        let h = &tx[4..68];
+        Resp {
+            status: u32::from_le_bytes(h[8..12].try_into().unwrap()),
+            tree_id: u32::from_le_bytes(h[36..40].try_into().unwrap()),
+            session_id: u64::from_le_bytes(h[40..48].try_into().unwrap()),
+            body: tx[68..].to_vec(),
+        }
+    }
+
+    fn establish(srv: &Srv, pc: &mut ProtoConn) -> (u64, u32) {
+        // NEGOTIATE offering 2.1 / 3.0 / 3.0.2
+        let mut f = req_hdr(CMD_NEGOTIATE, 0, 0, 0);
+        f.p16(36);
+        f.p16(3);
+        f.p16(1);
+        f.p16(0);
+        f.p32(0);
+        f.zeros(16 + 8);
+        f.p16(0x0210);
+        f.p16(0x0300);
+        f.p16(0x0302);
+        let r = roundtrip(srv, pc, f);
+        assert_eq!(r.status, status::SUCCESS);
+        let dialect = u16::from_le_bytes(r.body[4..6].try_into().unwrap());
+        assert_eq!(dialect, 0x0302);
+
+        // SESSION_SETUP: NTLMSSP NEGOTIATE → challenge
+        let mut blob = crate::ntlm::SIG.to_vec();
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        let mut f = req_hdr(CMD_SESSION_SETUP, 1, 0, 0);
+        f.p16(25);
+        f.p8(0);
+        f.p8(1);
+        f.p32(0);
+        f.p32(0);
+        f.p16(88);
+        f.p16(blob.len() as u16);
+        f.p64(0);
+        f.pbytes(&blob);
+        let r = roundtrip(srv, pc, f);
+        assert_eq!(r.status, status::MORE_PROCESSING_REQUIRED);
+        let sess = r.session_id;
+        assert_ne!(sess, 0);
+
+        // SESSION_SETUP: NTLMSSP AUTHENTICATE → guest session
+        let mut blob = crate::ntlm::SIG.to_vec();
+        blob.extend_from_slice(&3u32.to_le_bytes());
+        let mut f = req_hdr(CMD_SESSION_SETUP, 2, 0, sess);
+        f.p16(25);
+        f.p8(0);
+        f.p8(1);
+        f.p32(0);
+        f.p32(0);
+        f.p16(88);
+        f.p16(blob.len() as u16);
+        f.p64(0);
+        f.pbytes(&blob);
+        let r = roundtrip(srv, pc, f);
+        assert_eq!(r.status, status::SUCCESS);
+
+        // TREE_CONNECT \\srv\t
+        let path = utf16le("\\\\srv\\t");
+        let mut f = req_hdr(CMD_TREE_CONNECT, 3, 0, sess);
+        f.p16(9);
+        f.p16(0);
+        f.p16(72);
+        f.p16(path.len() as u16);
+        f.pbytes(&path);
+        let r = roundtrip(srv, pc, f);
+        assert_eq!(r.status, status::SUCCESS);
+        (sess, r.tree_id)
+    }
+
+    fn create_file(srv: &Srv, pc: &mut ProtoConn, sess: u64, tree: u32, name: &str, disp: u32, opts: u32, desired: u32) -> (u32, u64) {
+        let n = utf16le(name);
+        let mut f = req_hdr(CMD_CREATE, 10, tree, sess);
+        f.p16(57);
+        f.p8(0);
+        f.p8(0);
+        f.p32(2);
+        f.p64(0);
+        f.p64(0);
+        f.p32(desired);
+        f.p32(0);
+        f.p32(7);
+        f.p32(disp);
+        f.p32(opts);
+        f.p16(120);
+        f.p16(n.len() as u16);
+        f.p32(0);
+        f.p32(0);
+        f.pbytes(&n);
+        let r = roundtrip(srv, pc, f);
+        let fid = if r.status == status::SUCCESS {
+            u64::from_le_bytes(r.body[72..80].try_into().unwrap())
+        } else {
+            0
+        };
+        (r.status, fid)
+    }
+
+    #[test]
+    fn full_session_create_write_read_dir() {
+        let dir = std::env::temp_dir().join(format!("rsmbd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let srv = test_srv(&dir);
+        let mut pc = ProtoConn::new(&srv, 1);
+        let (sess, tree) = establish(&srv, &mut pc);
+
+        // CREATE hello.txt (overwrite-if, generic all)
+        let (st, fid) = create_file(&srv, &mut pc, sess, tree, "hello.txt", 5, 0x40, 0x1000_0000);
+        assert_eq!(st, status::SUCCESS);
+
+        // WRITE "rocket data"
+        let data = b"rocket data";
+        let mut f = req_hdr(CMD_WRITE, 11, tree, sess);
+        f.p16(49);
+        f.p16(112);
+        f.p32(data.len() as u32);
+        f.p64(0);
+        f.p64(fid);
+        f.p64(fid);
+        f.p32(0);
+        f.p32(0);
+        f.p16(0);
+        f.p16(0);
+        f.p32(0);
+        f.pbytes(data);
+        let r = roundtrip(&srv, &mut pc, f);
+        assert_eq!(r.status, status::SUCCESS);
+        let count = u32::from_le_bytes(r.body[4..8].try_into().unwrap());
+        assert_eq!(count as usize, data.len());
+
+        // READ it back (small read → buffered path)
+        let mut f = req_hdr(CMD_READ, 12, tree, sess);
+        f.p16(49);
+        f.p8(0);
+        f.p8(0);
+        f.p32(1024);
+        f.p64(0);
+        f.p64(fid);
+        f.p64(fid);
+        f.p32(0);
+        f.p32(0);
+        f.p32(0);
+        f.p16(0);
+        f.p16(0);
+        f.p8(0);
+        let r = roundtrip(&srv, &mut pc, f);
+        assert_eq!(r.status, status::SUCCESS);
+        let dlen = u32::from_le_bytes(r.body[4..8].try_into().unwrap()) as usize;
+        assert_eq!(&r.body[16..16 + dlen], data);
+
+        // CLOSE
+        let mut f = req_hdr(CMD_CLOSE, 13, tree, sess);
+        f.p16(24);
+        f.p16(1);
+        f.p32(0);
+        f.p64(fid);
+        f.p64(fid);
+        let r = roundtrip(&srv, &mut pc, f);
+        assert_eq!(r.status, status::SUCCESS);
+
+        // Open share root and enumerate: must contain hello.txt
+        let (st, dfid) = create_file(&srv, &mut pc, sess, tree, "", 1, 0x1, 0x8000_0000);
+        assert_eq!(st, status::SUCCESS);
+        let pat = utf16le("*");
+        let mut f = req_hdr(CMD_QUERY_DIRECTORY, 14, tree, sess);
+        f.p16(33);
+        f.p8(37); // FileIdBothDirectoryInformation
+        f.p8(0);
+        f.p32(0);
+        f.p64(dfid);
+        f.p64(dfid);
+        f.p16(96);
+        f.p16(pat.len() as u16);
+        f.p32(65536);
+        f.pbytes(&pat);
+        let r = roundtrip(&srv, &mut pc, f);
+        assert_eq!(r.status, status::SUCCESS);
+        let needle = utf16le("hello.txt");
+        assert!(
+            r.body.windows(needle.len()).any(|w| w == &needle[..]),
+            "directory listing must contain hello.txt"
+        );
+
+        // Traversal must be rejected
+        let (st, _) = create_file(&srv, &mut pc, sess, tree, "..\\evil", 1, 0x40, 0x8000_0000);
+        assert_eq!(st, status::OBJECT_NAME_INVALID);
+
+        // Large standalone READ must produce a zero-copy plan
+        let (st, fid2) = create_file(&srv, &mut pc, sess, tree, "hello.txt", 1, 0x40, 0x8000_0000);
+        assert_eq!(st, status::SUCCESS);
+        let mut f = req_hdr(CMD_READ, 15, tree, sess);
+        f.p16(49);
+        f.p8(0);
+        f.p8(0);
+        f.p32(64 * 1024);
+        f.p64(0);
+        f.p64(fid2);
+        f.p64(fid2);
+        f.p32(0);
+        f.p32(0);
+        f.p32(0);
+        f.p16(0);
+        f.p16(0);
+        f.p8(0);
+        let mut tx = Vec::new();
+        match process_frame(&srv, &mut pc, &f, &mut tx) {
+            FrameAction::ZcRead(p) => {
+                assert_eq!(p.length, 64 * 1024);
+                assert_eq!(p.offset, 0);
+                // Reactor-side header builder sanity
+                let mut hdr = Vec::new();
+                build_read_resp_prefix(&p, 11, &mut hdr);
+                assert_eq!(hdr.len(), 4 + 64 + 16);
+                let nbt = ((hdr[1] as usize) << 16) | ((hdr[2] as usize) << 8) | hdr[3] as usize;
+                assert_eq!(nbt, 80 + 11);
+            }
+            FrameAction::Respond => panic!("expected zero-copy plan for 64K read"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

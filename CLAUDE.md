@@ -21,13 +21,19 @@ thread-per-connection — one io_uring reactor per worker thread.
 ```
 main ─ config (TOML) ─ spawn N workers (SO_REUSEPORT)
 each worker:
-  io_uring ring (SQPOLL optional)
-  ├─ multishot accept on :445
-  ├─ per-connection: recv (provided buffer ring) → NBT framing → SMB2 dispatch
-  ├─ responses: send / send_zc
-  └─ READ data path (zero-copy): linked SQE chain
-       send(hdr, MSG_MORE) → splice(file → pipe) → splice(pipe → socket)
+  io_uring ring
+  ├─ accept on :445 (oneshot, re-armed; multishot is phase 3)
+  ├─ per-connection: recv (per-conn growable buffer) → NBT framing → SMB2 dispatch
+  ├─ responses: send (send_zc is phase 3)
+  └─ READ data path (zero-copy), one request in flight per connection:
+       splice(file → pipe) → send(hdr, MSG_MORE) → splice(pipe → socket)
+       (splice-first so the header carries the actual byte count; the pipe is
+        sized to the advertised MaxReadSize so the splice never blocks)
 ```
+
+Phase-1 simplification: one in-flight request per connection (responses are
+strictly serialized; client pipelining is absorbed by TCP). True intra-
+connection concurrency with credit accounting is phase 3.
 
 - `src/main.rs` — startup, worker spawn
 - `src/config.rs` — TOML config: listen, workers, shares
@@ -50,7 +56,7 @@ trusted LAN use. NTLMv2 + signing is phase 2; do not expose to untrusted network
 - [x] io_uring reactor: multishot accept, recv, send, close; user_data scheme
 - [x] NBT framing + connection state machine
 - [x] SMB2 header parse/build + error responses
-- [x] NEGOTIATE (dialects 2.0.2–3.1.1, negotiate contexts for 3.1.1)
+- [x] NEGOTIATE (dialects 2.0.2–3.0.2; 3.1.1 + preauth integrity is phase 2)
 - [x] SESSION_SETUP — NTLMSSP guest/anonymous
 - [x] TREE_CONNECT / TREE_DISCONNECT
 - [x] CREATE / CLOSE (files + dirs), handle table
@@ -58,13 +64,18 @@ trusted LAN use. NTLMv2 + signing is phase 2; do not expose to untrusted network
 - [x] WRITE / FLUSH
 - [x] QUERY_DIRECTORY (FileIdBothDirectoryInformation)
 - [x] QUERY_INFO (basic/standard/network-open/fs info classes), ECHO, LOGOFF
+- [x] SET_INFO (rename, delete-on-close, truncate, basic times)
+- [x] IOCTL FSCTL_VALIDATE_NEGOTIATE_INFO
+- [x] Wire-level integration test (negotiate→session→tree→create→write→read→dir)
 - [x] cargo check + clippy clean on aarch64/x86_64-unknown-linux-musl
+- [x] Release build: 772K static ARM64 musl binary; Containerfile (scratch)
 - [ ] Integration test on a Linux box against Linux cifs.ko mount  ← NEXT (needs Linux host)
 
 ### Phase 2 — auth & robustness (v0.2.0)
 - [ ] NTLMv2 real authentication, user database
-- [ ] SMB2 signing (HMAC-SHA256 / AES-CMAC)
-- [ ] SET_INFO (rename, delete-on-close, allocation), byte-range locks
+- [ ] SMB2 signing (HMAC-SHA256 / AES-CMAC), SMB 3.1.1 + preauth integrity
+- [ ] SPNEGO wrapping (Windows client compat)
+- [ ] Byte-range locks, CHANGE_NOTIFY
 - [ ] Oplocks/leases (at least none→break handling correctness)
 - [ ] Credit accounting, large MTU, multi-credit reads/writes
 

@@ -15,8 +15,9 @@ mod wire;
 #[cfg(target_os = "linux")]
 mod uring;
 
-use config::{Config, Srv};
-use std::sync::Arc;
+use config::Config;
+#[cfg(target_os = "linux")]
+use {config::Srv, std::sync::Arc};
 
 const USAGE: &str = "usage: rocketsmbd [--config <path>] [--check] [--version]";
 
