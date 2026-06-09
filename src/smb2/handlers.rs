@@ -37,11 +37,14 @@ const CREATE_ACTION_OVERWRITTEN: u32 = 3;
 
 const FSCTL_VALIDATE_NEGOTIATE_INFO: u32 = 0x0014_0204;
 
-const SUPPORTED_DIALECTS: [u16; 4] = [0x0302, 0x0300, 0x0210, 0x0202];
+const SUPPORTED_DIALECTS: [u16; 5] = [0x0311, 0x0302, 0x0300, 0x0210, 0x0202];
 const CAP_LARGE_MTU: u32 = 0x4;
 const SECURITY_MODE_SIGNING_ENABLED: u16 = 0x1;
+const SECURITY_MODE_SIGNING_REQUIRED: u16 = 0x2;
 const SESSION_FLAG_IS_GUEST: u16 = 0x1;
 const MAXIMAL_ACCESS_ALL: u32 = 0x001F_01FF;
+/// Max credits a connection may hold (window accounting).
+const CREDIT_WINDOW: i64 = 512;
 
 pub fn dispatch(
     srv: &Srv,
@@ -68,10 +71,37 @@ pub fn dispatch(
         chain.tree_id = h.tree_id;
     }
 
+    // Credit accounting: consume the charge, grant within the window.
+    pc.credits_out = (pc.credits_out - h.credit_charge.max(1) as i64).max(0);
+    let avail = (CREDIT_WINDOW - pc.credits_out).max(1);
+    let grant = (h.credits as i64).clamp(1, avail) as u16;
+    pc.credits_out += grant as i64;
+    let mut h = h.clone();
+    h.credits = grant;
+    let h = &h;
+
+    // Verify signatures on signed requests; reject unsigned requests on
+    // signing-required sessions.
+    if let Some(sess) = pc.sessions.get(&chain.session_id) {
+        if let Some(sc) = &sess.sign {
+            if h.flags & FLAG_SIGNED != 0 {
+                if !verify_signature(msg, sc) {
+                    err_resp(tx, h, status::ACCESS_DENIED, chain);
+                    return None;
+                }
+            } else if sess.signing_required
+                && !matches!(h.command, CMD_NEGOTIATE | CMD_SESSION_SETUP | CMD_CANCEL)
+            {
+                err_resp(tx, h, status::ACCESS_DENIED, chain);
+                return None;
+            }
+        }
+    }
+
     match h.command {
-        CMD_NEGOTIATE => negotiate(srv, pc, h, body, chain, tx),
+        CMD_NEGOTIATE => negotiate(srv, pc, h, msg, chain, tx),
         CMD_ECHO => simple_resp(tx, h, chain),
-        CMD_CANCEL => {} // no response
+        CMD_CANCEL => cancel(pc, h),
         CMD_SESSION_SETUP => session_setup(srv, pc, h, msg, chain, tx),
         _ => {
             if !pc.sessions.contains_key(&chain.session_id) {
@@ -85,7 +115,7 @@ pub fn dispatch(
                 }
                 CMD_TREE_CONNECT => tree_connect(srv, pc, h, msg, chain, tx),
                 _ => {
-                    let Some(share_idx) = pc
+                    let Some(tree) = pc
                         .sessions
                         .get(&chain.session_id)
                         .and_then(|s| s.trees.get(&chain.tree_id))
@@ -94,15 +124,25 @@ pub fn dispatch(
                         err_resp(tx, h, status::NETWORK_NAME_DELETED, chain);
                         return None;
                     };
-                    let share = &srv.cfg.shares[share_idx as usize];
-                    match h.command {
-                        CMD_TREE_DISCONNECT => {
-                            if let Some(s) = pc.sessions.get_mut(&chain.session_id) {
-                                s.trees.remove(&chain.tree_id);
-                            }
-                            simple_resp(tx, h, chain);
+                    if h.command == CMD_TREE_DISCONNECT {
+                        if let Some(s) = pc.sessions.get_mut(&chain.session_id) {
+                            s.trees.remove(&chain.tree_id);
                         }
-                        CMD_CREATE => create(pc, h, msg, chain, tx, share, share_idx),
+                        simple_resp(tx, h, chain);
+                        return None;
+                    }
+                    if tree.ipc {
+                        // IPC$ exists to keep clients happy at mount time;
+                        // named pipes are not served.
+                        match h.command {
+                            CMD_IOCTL => ioctl(srv, pc, h, msg, chain, tx),
+                            _ => err_resp(tx, h, status::ACCESS_DENIED, chain),
+                        }
+                        return None;
+                    }
+                    let share = &srv.cfg.shares[tree.share_idx as usize];
+                    match h.command {
+                        CMD_CREATE => create(pc, h, msg, chain, tx, share, tree.share_idx),
                         CMD_CLOSE => close(pc, h, body, chain, tx),
                         CMD_FLUSH => flush(pc, h, body, chain, tx),
                         CMD_READ => return read(pc, h, body, chain, tx),
@@ -111,9 +151,8 @@ pub fn dispatch(
                         CMD_QUERY_INFO => query_info(srv, pc, h, body, chain, tx),
                         CMD_SET_INFO => set_info(pc, h, msg, chain, tx, share),
                         CMD_IOCTL => ioctl(srv, pc, h, msg, chain, tx),
-                        CMD_LOCK | CMD_CHANGE_NOTIFY | CMD_OPLOCK_BREAK => {
-                            err_resp(tx, h, status::NOT_SUPPORTED, chain)
-                        }
+                        CMD_LOCK => lock(pc, h, body, chain, tx),
+                        CMD_CHANGE_NOTIFY => change_notify(pc, h, body, chain, tx),
                         _ => err_resp(tx, h, status::NOT_SUPPORTED, chain),
                     }
                 }
@@ -121,6 +160,18 @@ pub fn dispatch(
         }
     }
     None
+}
+
+/// CANCEL: no response of its own; a matching pended operation completes
+/// with STATUS_CANCELLED via the notify queues.
+fn cancel(pc: &mut ProtoConn, h: &ReqHdr) {
+    let Some(aid) = h.async_id else {
+        return; // sync cancel of an already-completed op: nothing pended
+    };
+    if let Some(pos) = pc.notify_active.iter().position(|&(_, a)| a == aid) {
+        let (_, async_id) = pc.notify_active.remove(pos);
+        pc.notify_done.push(crate::smb2::NotifyDone { async_id, status: status::CANCELLED });
+    }
 }
 
 fn simple_resp(tx: &mut Vec<u8>, h: &ReqHdr, chain: &Chain) {
@@ -148,21 +199,25 @@ fn put_fid(tx: &mut Vec<u8>, fid: u64) {
 
 // ---------------------------------------------------------------- NEGOTIATE
 
-fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &Chain, tx: &mut Vec<u8>) {
+fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chain, tx: &mut Vec<u8>) {
+    let body = &msg[64..];
     let parsed = (|| {
         let mut r = Rdr::new(body);
         if r.u16()? != 36 {
             return None;
         }
         let count = r.u16()? as usize;
-        r.skip(2 + 2 + 4 + 16 + 8)?; // secmode, reserved, caps, guid, (ctx/starttime)
+        r.skip(2 + 2 + 4 + 16)?; // secmode, reserved, caps, guid
+        let ctx_off = r.u32()? as usize;
+        let ctx_count = r.u16()? as usize;
+        r.skip(2)?;
         let mut dialects = Vec::with_capacity(count.min(16));
         for _ in 0..count.min(16) {
             dialects.push(r.u16()?);
         }
-        Some(dialects)
+        Some((dialects, ctx_off, ctx_count))
     })();
-    let Some(dialects) = parsed else {
+    let Some((dialects, ctx_off, ctx_count)) = parsed else {
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
@@ -170,9 +225,53 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &Cha
         err_resp(tx, h, status::NOT_SUPPORTED, chain);
         return;
     };
+
+    // For 3.1.1, require the preauth integrity context (SHA-512) and note
+    // whether the client offered ciphers (we answer "none").
+    let mut cipher_offered = false;
+    if chosen == 0x0311 {
+        let mut have_preauth = false;
+        let mut off = ctx_off;
+        for _ in 0..ctx_count.min(16) {
+            let Some((t, data_len)) = (|| {
+                let mut r = Rdr::new(msg.get(off..)?);
+                let t = r.u16()?;
+                let l = r.u16()? as usize;
+                r.skip(4)?;
+                Some((t, l))
+            })() else {
+                break;
+            };
+            match t {
+                1 => {
+                    let ok = (|| {
+                        let mut r = Rdr::new(msg.get(off + 8..off + 8 + data_len)?);
+                        let n = r.u16()? as usize;
+                        let _salt = r.u16()?;
+                        for _ in 0..n.min(8) {
+                            if r.u16()? == 1 {
+                                return Some(true);
+                            }
+                        }
+                        Some(false)
+                    })();
+                    have_preauth = ok == Some(true);
+                }
+                2 => cipher_offered = true,
+                _ => {}
+            }
+            off += 8 + data_len;
+            off = (off + 7) & !7;
+        }
+        if !have_preauth {
+            err_resp(tx, h, status::INVALID_PARAMETER, chain);
+            return;
+        }
+    }
+
     pc.dialect = chosen;
-    begin_resp(tx, h, status::SUCCESS, false, 0, 0);
-    negotiate_body(srv, pc, chosen, tx);
+    let start = begin_resp(tx, h, status::SUCCESS, false, 0, 0);
+    negotiate_body(srv, pc, chosen, cipher_offered, start, tx);
 }
 
 pub fn negotiate_resp_smb1_wildcard(srv: &Srv, pc: &mut ProtoConn, tx: &mut Vec<u8>) {
@@ -185,16 +284,30 @@ pub fn negotiate_resp_smb1_wildcard(srv: &Srv, pc: &mut ProtoConn, tx: &mut Vec<
         msg_id: 0,
         tree_id: 0,
         session_id: 0,
+        async_id: None,
     };
-    begin_resp(tx, &h, status::SUCCESS, false, 0, 0);
-    negotiate_body(srv, pc, 0x02FF, tx);
+    let start = begin_resp(tx, &h, status::SUCCESS, false, 0, 0);
+    negotiate_body(srv, pc, 0x02FF, false, start, tx);
 }
 
-fn negotiate_body(srv: &Srv, pc: &ProtoConn, dialect: u16, tx: &mut Vec<u8>) {
+fn negotiate_body(
+    srv: &Srv,
+    pc: &ProtoConn,
+    dialect: u16,
+    cipher_offered: bool,
+    resp_start: usize,
+    tx: &mut Vec<u8>,
+) {
+    let mut secmode = SECURITY_MODE_SIGNING_ENABLED;
+    if srv.cfg.require_signing {
+        secmode |= SECURITY_MODE_SIGNING_REQUIRED;
+    }
+    let hint = crate::ntlm::spnego_hint();
+    let body = resp_start + 64;
     tx.p16(65);
-    tx.p16(SECURITY_MODE_SIGNING_ENABLED);
+    tx.p16(secmode);
     tx.p16(dialect);
-    tx.p16(0); // NegotiateContextCount / Reserved
+    tx.p16(0); // NegotiateContextCount, patched below for 3.1.1
     tx.pbytes(&srv.guid);
     tx.p32(CAP_LARGE_MTU);
     tx.p32(MAX_TRANSACT);
@@ -202,33 +315,76 @@ fn negotiate_body(srv: &Srv, pc: &ProtoConn, dialect: u16, tx: &mut Vec<u8>) {
     tx.p32(MAX_WRITE);
     tx.p64(vfs::filetime_now());
     tx.p64(srv.start_ft);
-    tx.p16(0); // SecurityBufferOffset (no SPNEGO hint; raw NTLMSSP accepted)
-    tx.p16(0); // SecurityBufferLength
-    tx.p32(0); // NegotiateContextOffset / Reserved2
+    tx.p16(128); // SecurityBufferOffset (header 64 + fixed body 64)
+    tx.p16(hint.len() as u16);
+    tx.p32(0); // NegotiateContextOffset, patched below
+    debug_assert_eq!(tx.len() - body, 64);
+    tx.pbytes(&hint);
+
+    if dialect == 0x0311 {
+        tx.pad8(resp_start);
+        let ctx_off = tx.len() - resp_start;
+        let mut count = 1u16;
+        // PREAUTH_INTEGRITY_CAPABILITIES: SHA-512 + 32-byte salt.
+        let mut salt = [0u8; 32];
+        crate::config::urandom(&mut salt);
+        tx.p16(1);
+        tx.p16(38);
+        tx.p32(0);
+        tx.p16(1);
+        tx.p16(32);
+        tx.p16(1); // SHA-512
+        tx.pbytes(&salt);
+        if cipher_offered {
+            tx.pad8(resp_start);
+            // Cipher 0: encryption not supported yet (phase 3).
+            count += 1;
+            tx.p16(2);
+            tx.p16(4);
+            tx.p32(0);
+            tx.p16(1);
+            tx.p16(0);
+        }
+        tx.patch32(body + 60, ctx_off as u32);
+        let cnt_off = body + 6;
+        tx[cnt_off..cnt_off + 2].copy_from_slice(&count.to_le_bytes());
+    }
 }
 
 // ------------------------------------------------------------ SESSION_SETUP
 
+fn ss_resp(tx: &mut Vec<u8>, h: &ReqHdr, st: u32, related: bool, sid: u64, flags: u16, blob: &[u8]) {
+    begin_resp(tx, h, st, related, 0, sid);
+    tx.p16(9);
+    tx.p16(flags);
+    tx.p16(72); // SecurityBufferOffset
+    tx.p16(blob.len() as u16);
+    tx.pbytes(blob);
+}
+
 fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
-    let blob = (|| {
+    let parsed = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);
         if r.u16()? != 25 {
             return None;
         }
-        r.skip(1 + 1 + 4 + 4)?; // flags, security mode, caps, channel
+        r.skip(1)?; // flags
+        let secmode = r.u8()?;
+        r.skip(4 + 4)?; // caps, channel
         let off = r.u16()? as usize;
         let len = r.u16()? as usize;
         let _prev = r.u64()?;
-        if len == 0 {
-            return Some(&[][..]);
-        }
-        msg.get(off..off + len)
+        let blob = if len == 0 { &[][..] } else { msg.get(off..off + len)? };
+        Some((secmode, blob))
     })();
-    let Some(blob) = blob else {
+    let Some((client_secmode, blob)) = parsed else {
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
+    let spnego = ntlm::is_spnego(blob);
+    let signing_required =
+        srv.cfg.require_signing || client_secmode as u16 & SECURITY_MODE_SIGNING_REQUIRED != 0;
 
     match ntlm::classify(blob) {
         ntlm::Token::Negotiate => {
@@ -238,30 +394,107 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
             chain.session_id = sid;
             let mut chal = [0u8; 8];
             crate::config::urandom(&mut chal);
-            let token = ntlm::challenge(&srv.cfg.server_name, chal);
-            begin_resp(tx, h, status::MORE_PROCESSING_REQUIRED, chain.related, 0, sid);
-            tx.p16(9);
-            tx.p16(0); // SessionFlags
-            tx.p16(72); // SecurityBufferOffset
-            tx.p16(token.len() as u16);
-            tx.pbytes(&token);
-        }
-        _ => {
-            // AUTHENTICATE (or anonymous/empty): grant a guest session.
-            let sid = if h.session_id != 0 {
-                h.session_id
-            } else {
-                let s = pc.next_session_id;
-                pc.next_session_id += 1;
-                s
+            let mut sess = Session {
+                pending: Some(crate::smb2::PendingAuth { challenge: chal, spnego }),
+                preauth: pc.preauth_neg,
+                ..Default::default()
             };
-            pc.sessions.entry(sid).or_default();
+            if pc.dialect == 0x0311 {
+                sess.preauth = crate::crypto::sha512(&[&sess.preauth, msg]);
+            }
+            pc.sessions.insert(sid, sess);
+
+            let mut token = ntlm::challenge(&srv.cfg.server_name, chal);
+            if spnego {
+                token = ntlm::spnego_wrap_challenge(&token);
+            }
+            ss_resp(tx, h, status::MORE_PROCESSING_REQUIRED, chain.related, sid, 0, &token);
+        }
+        ntlm::Token::Authenticate => {
+            let sid = h.session_id;
             chain.session_id = sid;
-            begin_resp(tx, h, status::SUCCESS, chain.related, 0, sid);
-            tx.p16(9);
-            tx.p16(SESSION_FLAG_IS_GUEST);
-            tx.p16(0);
-            tx.p16(0);
+            let Some(sess) = pc.sessions.get_mut(&sid) else {
+                err_resp(tx, h, status::USER_SESSION_DELETED, chain);
+                return;
+            };
+            if pc.dialect == 0x0311 {
+                sess.preauth = crate::crypto::sha512(&[&sess.preauth, msg]);
+            }
+            let Some(pending) = sess.pending.take() else {
+                // Re-auth on an established session: acknowledge.
+                let flags = if sess.guest { SESSION_FLAG_IS_GUEST } else { 0 };
+                ss_resp(tx, h, status::SUCCESS, chain.related, sid, flags, &[]);
+                return;
+            };
+            let wrapped = pending.spnego || spnego;
+            let done = if wrapped { ntlm::spnego_accept_completed() } else { Vec::new() };
+
+            let auth = ntlm::parse_authenticate(blob);
+            let verdict = match &auth {
+                Some(a) if !a.is_anonymous() => {
+                    match srv.users.get(&a.user.to_lowercase()) {
+                        Some(nt) => match ntlm::verify_ntlmv2(nt, a, &pending.challenge) {
+                            Some(key) => Verdict::User(key),
+                            None => Verdict::Reject,
+                        },
+                        None if srv.allow_guest => Verdict::Guest,
+                        None => Verdict::Reject,
+                    }
+                }
+                _ if srv.allow_guest => Verdict::Guest,
+                _ => Verdict::Reject,
+            };
+            enum Verdict {
+                User([u8; 16]),
+                Guest,
+                Reject,
+            }
+            match verdict {
+                Verdict::User(key) => {
+                    sess.established = true;
+                    sess.guest = false;
+                    sess.signing_required = signing_required;
+                    sess.sign =
+                        Some(crate::smb2::derive_sign_ctx(pc.dialect, &key, &sess.preauth));
+                    crate::logi!(
+                        "session {:x}: user {:?} authenticated (signing {})",
+                        sid,
+                        auth.as_ref().map(|a| a.user.as_str()).unwrap_or(""),
+                        if signing_required { "required" } else { "optional" }
+                    );
+                    ss_resp(tx, h, status::SUCCESS, chain.related, sid, 0, &done);
+                }
+                Verdict::Guest => {
+                    sess.established = true;
+                    sess.guest = true;
+                    ss_resp(tx, h, status::SUCCESS, chain.related, sid, SESSION_FLAG_IS_GUEST, &done);
+                }
+                Verdict::Reject => {
+                    let user = auth.map(|a| a.user).unwrap_or_default();
+                    crate::logw!("session {:x}: logon failure for user {:?}", sid, user);
+                    pc.sessions.remove(&sid);
+                    err_resp(tx, h, status::LOGON_FAILURE, chain);
+                }
+            }
+        }
+        ntlm::Token::Other => {
+            // No NTLMSSP token at all (e.g. pure anonymous).
+            if srv.allow_guest {
+                let sid = if h.session_id != 0 {
+                    h.session_id
+                } else {
+                    let s = pc.next_session_id;
+                    pc.next_session_id += 1;
+                    s
+                };
+                let sess = pc.sessions.entry(sid).or_default();
+                sess.established = true;
+                sess.guest = true;
+                chain.session_id = sid;
+                ss_resp(tx, h, status::SUCCESS, chain.related, sid, SESSION_FLAG_IS_GUEST, &[]);
+            } else {
+                err_resp(tx, h, status::LOGON_FAILURE, chain);
+            }
         }
     }
 }
@@ -286,28 +519,31 @@ fn tree_connect(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &m
     };
     // "\\server\share" → "share"
     let share_name = path.rsplit('\\').next().unwrap_or("");
-    let Some(share_idx) = srv
-        .cfg
-        .shares
-        .iter()
-        .position(|s| s.name.eq_ignore_ascii_case(share_name))
-    else {
-        err_resp(tx, h, status::BAD_NETWORK_NAME, chain);
-        return;
+    let ipc = share_name.eq_ignore_ascii_case("IPC$");
+    let share_idx = if ipc {
+        u32::MAX
+    } else {
+        match srv.cfg.shares.iter().position(|s| s.name.eq_ignore_ascii_case(share_name)) {
+            Some(i) => i as u32,
+            None => {
+                err_resp(tx, h, status::BAD_NETWORK_NAME, chain);
+                return;
+            }
+        }
     };
     let sess = pc.sessions.get_mut(&chain.session_id).expect("session checked");
     sess.next_tree_id += 1;
     let tree_id = sess.next_tree_id;
-    sess.trees.insert(tree_id, share_idx as u32);
+    sess.trees.insert(tree_id, crate::smb2::Tree { share_idx, ipc });
     chain.tree_id = tree_id;
 
     begin_resp(tx, h, status::SUCCESS, chain.related, tree_id, chain.session_id);
     tx.p16(16);
-    tx.p8(1); // ShareType: disk
+    tx.p8(if ipc { 2 } else { 1 }); // ShareType: pipe / disk
     tx.p8(0);
     tx.p32(0); // ShareFlags
     tx.p32(0); // Capabilities
-    tx.p32(MAXIMAL_ACCESS_ALL);
+    tx.p32(if ipc { 0x001F_00A9 } else { MAXIMAL_ACCESS_ALL });
 }
 
 // ------------------------------------------------------------------- CREATE
@@ -520,6 +756,17 @@ fn close(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mu
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
+    // Complete any CHANGE_NOTIFY pended on this handle.
+    let mut i = 0;
+    while i < pc.notify_active.len() {
+        if pc.notify_active[i].0 == fid {
+            let (_, async_id) = pc.notify_active.remove(i);
+            pc.notify_done
+                .push(crate::smb2::NotifyDone { async_id, status: status::NOTIFY_CLEANUP });
+        } else {
+            i += 1;
+        }
+    }
 
     let post_attrib = flags & 0x1 != 0;
     let meta = if post_attrib { vfs::fstat_meta(of.fd).ok() } else { None };
@@ -606,6 +853,13 @@ fn read(
         return None;
     };
     let max_read = pc.max_read;
+    // A signed response covers the payload, which rules out splicing —
+    // signed sessions always take the buffered path.
+    let must_sign = pc
+        .sessions
+        .get(&chain.session_id)
+        .map(|s| s.sign.is_some() && (s.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
+        .unwrap_or(false);
     let Some(of) = pc.handles.get(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return None;
@@ -617,7 +871,7 @@ fn read(
     let length = length.min(max_read);
 
     // Standalone large reads take the zero-copy splice path.
-    if chain.single && length >= ZC_MIN_READ {
+    if chain.single && length >= ZC_MIN_READ && !must_sign {
         return Some(ZcReadPlan {
             fd: of.fd,
             offset,
@@ -1167,6 +1421,150 @@ fn set_rename(of: &mut vfs::OpenFile, data: &[u8], share_root: &Path) -> u32 {
     of.path = new_path;
     of.rel = new_rel;
     status::SUCCESS
+}
+
+// --------------------------------------------------------------------- LOCK
+
+const LOCKFLAG_SHARED: u32 = 0x1;
+const LOCKFLAG_EXCLUSIVE: u32 = 0x2;
+const LOCKFLAG_UNLOCK: u32 = 0x4;
+
+fn lock(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+    let parsed = (|| {
+        let mut r = Rdr::new(body);
+        if r.u16()? != 48 {
+            return None;
+        }
+        let count = r.u16()? as usize;
+        r.skip(4)?; // lock sequence
+        let fid = parse_fid(&mut r, chain)?;
+        if count == 0 || count > 64 {
+            return None;
+        }
+        let mut elems = Vec::with_capacity(count);
+        for _ in 0..count {
+            let off = r.u64()?;
+            let len = r.u64()?;
+            let flags = r.u32()?;
+            r.skip(4)?;
+            elems.push((off, len, flags));
+        }
+        Some((fid, elems))
+    })();
+    let Some((fid, elems)) = parsed else {
+        err_resp(tx, h, status::INVALID_PARAMETER, chain);
+        return;
+    };
+    let Some(of) = pc.handles.get(fid) else {
+        err_resp(tx, h, status::FILE_CLOSED, chain);
+        return;
+    };
+    if of.is_dir {
+        err_resp(tx, h, status::INVALID_PARAMETER, chain);
+        return;
+    }
+
+    // Batch semantics: all-or-nothing. Locks taken earlier in this request
+    // are unwound if a later element conflicts. Blocking waits degrade to
+    // immediate failure in v0.2 (clients retry).
+    let mut applied: Vec<(u64, u64)> = Vec::new();
+    let mut fail = status::SUCCESS;
+    for &(off, len, flags) in &elems {
+        let res = if flags & LOCKFLAG_UNLOCK != 0 {
+            vfs::range_lock(of.fd, off, len, vfs::LockKind::Unlock)
+        } else if flags & LOCKFLAG_EXCLUSIVE != 0 {
+            vfs::range_lock(of.fd, off, len, vfs::LockKind::Exclusive)
+        } else if flags & LOCKFLAG_SHARED != 0 {
+            vfs::range_lock(of.fd, off, len, vfs::LockKind::Shared)
+        } else {
+            fail = status::INVALID_PARAMETER;
+            break;
+        };
+        match res {
+            Ok(()) => {
+                if flags & LOCKFLAG_UNLOCK == 0 {
+                    applied.push((off, len));
+                }
+            }
+            Err(e) if e == libc::EAGAIN || e == libc::EACCES => {
+                fail = status::LOCK_NOT_GRANTED;
+                break;
+            }
+            Err(e) => {
+                fail = status::from_errno(e);
+                break;
+            }
+        }
+    }
+    if fail != status::SUCCESS {
+        for &(off, len) in applied.iter().rev() {
+            let _ = vfs::range_lock(of.fd, off, len, vfs::LockKind::Unlock);
+        }
+        err_resp(tx, h, fail, chain);
+        return;
+    }
+    begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
+    tx.p16(4);
+    tx.p16(0);
+}
+
+// ------------------------------------------------------------ CHANGE_NOTIFY
+
+fn change_notify(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+    let parsed = (|| {
+        let mut r = Rdr::new(body);
+        if r.u16()? != 32 {
+            return None;
+        }
+        let flags = r.u16()?;
+        let out_len = r.u32()?;
+        let fid = parse_fid(&mut r, chain)?;
+        let filter = r.u32()?;
+        Some((flags, out_len, fid, filter))
+    })();
+    let Some((flags, out_len, fid, filter)) = parsed else {
+        err_resp(tx, h, status::INVALID_PARAMETER, chain);
+        return;
+    };
+    let want_sign = pc
+        .sessions
+        .get(&chain.session_id)
+        .map(|s| s.sign.is_some() && (s.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
+        .unwrap_or(false);
+    let Some(of) = pc.handles.get(fid) else {
+        err_resp(tx, h, status::FILE_CLOSED, chain);
+        return;
+    };
+    if !of.is_dir {
+        err_resp(tx, h, status::INVALID_PARAMETER, chain);
+        return;
+    }
+    let path = of.path.clone();
+
+    let async_id = pc.next_async_id;
+    pc.next_async_id += 1;
+    let meta = crate::smb2::AsyncMeta {
+        msg_id: h.msg_id,
+        credit_charge: h.credit_charge,
+        session_id: chain.session_id,
+        async_id,
+        want_sign,
+    };
+    pc.notify_new.push(crate::smb2::NotifyPend {
+        async_id,
+        fid,
+        path,
+        recursive: flags & 0x1 != 0,
+        filter,
+        out_len: out_len.min(MAX_TRANSACT),
+        meta: meta.clone(),
+    });
+    pc.notify_active.push((fid, async_id));
+
+    // Interim response: STATUS_PENDING with the async id; the final
+    // completion is sent out-of-band by the reactor.
+    crate::smb2::begin_resp_async(tx, &meta, status::PENDING, h.credits, CMD_CHANGE_NOTIFY);
+    crate::smb2::err_body(tx);
 }
 
 // -------------------------------------------------------------------- IOCTL

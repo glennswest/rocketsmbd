@@ -9,8 +9,10 @@ pub mod handlers;
 
 use std::collections::HashMap;
 use std::os::fd::RawFd;
+use std::path::PathBuf;
 
 use crate::config::Srv;
+use crate::crypto::{self, SignAlg};
 use crate::status;
 use crate::vfs::HandleTable;
 use crate::wire::{Put, Rdr};
@@ -64,6 +66,8 @@ pub struct ReqHdr {
     pub msg_id: u64,
     pub tree_id: u32,
     pub session_id: u64,
+    /// Present when the ASYNC flag is set (e.g. CANCEL of a pended op).
+    pub async_id: Option<u64>,
 }
 
 pub fn parse_hdr(b: &[u8]) -> Option<ReqHdr> {
@@ -81,24 +85,103 @@ pub fn parse_hdr(b: &[u8]) -> Option<ReqHdr> {
     let flags = r.u32()?;
     let next = r.u32()?;
     let msg_id = r.u64()?;
-    let (tree_id, session_id);
+    let (tree_id, session_id, async_id);
     if flags & FLAG_ASYNC != 0 {
-        let _async_id = r.u64()?;
+        async_id = Some(r.u64()?);
         tree_id = 0;
         session_id = r.u64()?;
     } else {
         let _process_id = r.u32()?;
         tree_id = r.u32()?;
         session_id = r.u64()?;
+        async_id = None;
     }
     r.skip(16)?; // signature
-    Some(ReqHdr { credit_charge, command, credits, flags, next, msg_id, tree_id, session_id })
+    Some(ReqHdr {
+        credit_charge,
+        command,
+        credits,
+        flags,
+        next,
+        msg_id,
+        tree_id,
+        session_id,
+        async_id,
+    })
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy)]
+pub struct Tree {
+    pub share_idx: u32,
+    pub ipc: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignCtx {
+    pub alg: SignAlg,
+    pub key: [u8; 16],
+}
+
+/// Auth state stashed between the NTLM challenge and the AUTHENTICATE.
+#[derive(Debug)]
+pub struct PendingAuth {
+    pub challenge: [u8; 8],
+    pub spnego: bool,
+}
+
+#[derive(Debug)]
 pub struct Session {
-    pub trees: HashMap<u32, u32>, // tree_id -> share index
+    pub trees: HashMap<u32, Tree>,
     pub next_tree_id: u32,
+    pub established: bool,
+    pub guest: bool,
+    pub signing_required: bool,
+    pub sign: Option<SignCtx>,
+    pub pending: Option<PendingAuth>,
+    /// SMB 3.1.1 per-session preauth integrity hash.
+    pub preauth: [u8; 64],
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            trees: HashMap::new(),
+            next_tree_id: 0,
+            established: false,
+            guest: false,
+            signing_required: false,
+            sign: None,
+            pending: None,
+            preauth: [0; 64],
+        }
+    }
+}
+
+/// A pended CHANGE_NOTIFY the reactor must watch via inotify.
+#[derive(Debug, Clone)]
+pub struct NotifyPend {
+    pub async_id: u64,
+    pub fid: u64,
+    pub path: PathBuf,
+    pub recursive: bool,
+    pub filter: u32,
+    pub out_len: u32,
+    pub meta: AsyncMeta,
+}
+
+#[derive(Debug, Clone)]
+pub struct NotifyDone {
+    pub async_id: u64,
+    pub status: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct AsyncMeta {
+    pub msg_id: u64,
+    pub credit_charge: u16,
+    pub session_id: u64,
+    pub async_id: u64,
+    pub want_sign: bool,
 }
 
 /// Per-connection protocol state. OS-independent and unit-testable; all
@@ -109,6 +192,17 @@ pub struct ProtoConn {
     pub handles: HandleTable,
     pub next_session_id: u64,
     pub max_read: u32,
+    /// SMB 3.1.1 connection preauth hash (negotiate exchange).
+    pub preauth_neg: [u8; 64],
+    /// Credits currently granted to the client (window accounting).
+    pub credits_out: i64,
+    pub next_async_id: u64,
+    /// CHANGE_NOTIFY pends for the reactor to register (drained each frame).
+    pub notify_new: Vec<NotifyPend>,
+    /// Completions (cancel / handle close) for the reactor to emit.
+    pub notify_done: Vec<NotifyDone>,
+    /// Live pends: (fid, async_id) — owned here so CLOSE/CANCEL can find them.
+    pub notify_active: Vec<(u64, u64)>,
 }
 
 impl ProtoConn {
@@ -119,6 +213,12 @@ impl ProtoConn {
             handles: HandleTable::default(),
             next_session_id: (conn_seed << 32) | 1,
             max_read: srv.max_read,
+            preauth_neg: [0; 64],
+            credits_out: 0,
+            next_async_id: 1,
+            notify_new: Vec::new(),
+            notify_done: Vec::new(),
+            notify_active: Vec::new(),
         }
     }
 }
@@ -168,7 +268,7 @@ pub fn begin_resp(
     tx.p16(h.credit_charge);
     tx.p32(st);
     tx.p16(h.command);
-    tx.p16(h.credits.clamp(1, 512)); // credits granted
+    tx.p16(h.credits); // credits granted (accounted by the dispatcher)
     tx.p32(FLAG_RESPONSE | if related { FLAG_RELATED } else { 0 });
     tx.p32(0); // NextCommand, patched by the chain loop
     tx.p64(h.msg_id);
@@ -177,6 +277,61 @@ pub fn begin_resp(
     tx.p64(session_id);
     tx.zeros(16); // signature
     start
+}
+
+/// Async response header (interim STATUS_PENDING and final completions).
+pub fn begin_resp_async(tx: &mut Vec<u8>, meta: &AsyncMeta, st: u32, credits: u16, cmd: u16) -> usize {
+    let start = tx.len();
+    tx.pbytes(&[0xFE, b'S', b'M', b'B']);
+    tx.p16(64);
+    tx.p16(meta.credit_charge);
+    tx.p32(st);
+    tx.p16(cmd);
+    tx.p16(credits);
+    tx.p32(FLAG_RESPONSE | FLAG_ASYNC);
+    tx.p32(0); // NextCommand
+    tx.p64(meta.msg_id);
+    tx.p64(meta.async_id);
+    tx.p64(meta.session_id);
+    tx.zeros(16);
+    start
+}
+
+/// Sign the message at tx[start..end] in place (signature field is zeroed
+/// by construction) and set the SIGNED flag.
+pub fn sign_in_place(tx: &mut [u8], start: usize, end: usize, sc: &SignCtx) {
+    let flags_off = start + 16;
+    let cur = u32::from_le_bytes(tx[flags_off..flags_off + 4].try_into().unwrap());
+    tx[flags_off..flags_off + 4].copy_from_slice(&(cur | FLAG_SIGNED).to_le_bytes());
+    let sig = crypto::smb2_signature(sc.alg, &sc.key, &[&tx[start..end]]);
+    tx[start + 48..start + 64].copy_from_slice(&sig);
+}
+
+/// Verify a signed request message (signature field substituted with zeros).
+pub fn verify_signature(msg: &[u8], sc: &SignCtx) -> bool {
+    if msg.len() < 64 {
+        return false;
+    }
+    let zeros = [0u8; 16];
+    let sig = crypto::smb2_signature(sc.alg, &sc.key, &[&msg[..48], &zeros, &msg[64..]]);
+    // Not secret-dependent timing-wise in any exploitable way (MAC compare),
+    // but compare without early exit anyway.
+    sig.iter().zip(&msg[48..64]).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0
+}
+
+/// Derive the SMB2/3 signing context for `dialect` from a 16-byte session key.
+pub fn derive_sign_ctx(dialect: u16, session_key: &[u8; 16], preauth: &[u8; 64]) -> SignCtx {
+    match dialect {
+        0x0202 | 0x0210 => SignCtx { alg: SignAlg::HmacSha256, key: *session_key },
+        0x0311 => SignCtx {
+            alg: SignAlg::AesCmac,
+            key: crypto::kdf128(session_key, b"SMBSigningKey\0", preauth),
+        },
+        _ => SignCtx {
+            alg: SignAlg::AesCmac,
+            key: crypto::kdf128(session_key, b"SMB2AESCMAC\0", b"SmbSign\0"),
+        },
+    }
 }
 
 /// 9-byte SMB2 ERROR response body.
@@ -230,7 +385,64 @@ fn read_plan_hdr(plan: &ZcReadPlan) -> ReqHdr {
         msg_id: plan.msg_id,
         tree_id: plan.tree_id,
         session_id: plan.session_id,
+        async_id: None,
     }
+}
+
+/// Build a complete (NBT-framed, optionally signed) final response for a
+/// pended CHANGE_NOTIFY. `events` are (action, name) pairs; empty means
+/// "too many changes" → STATUS_NOTIFY_ENUM_DIR for success completions.
+pub fn build_notify_final(
+    pc: &ProtoConn,
+    meta: &AsyncMeta,
+    st: u32,
+    events: &[(u32, String)],
+) -> Vec<u8> {
+    let mut tx = Vec::with_capacity(256);
+    tx.zeros(4);
+    if st == status::SUCCESS && !events.is_empty() {
+        let mut data: Vec<u8> = Vec::new();
+        let mut entry_starts: Vec<usize> = Vec::new();
+        for (action, name) in events {
+            // 4-align between entries.
+            while data.len() % 4 != 0 {
+                data.push(0);
+            }
+            entry_starts.push(data.len());
+            let n16 = crate::wire::utf16le(name);
+            data.p32(0); // NextEntryOffset patched below
+            data.p32(*action);
+            data.p32(n16.len() as u32);
+            data.pbytes(&n16);
+        }
+        for w in entry_starts.windows(2) {
+            let next = (w[1] - w[0]) as u32;
+            data[w[0]..w[0] + 4].copy_from_slice(&next.to_le_bytes());
+        }
+        let start = begin_resp_async(&mut tx, meta, st, 0, CMD_CHANGE_NOTIFY);
+        tx.p16(9);
+        tx.p16(72);
+        tx.p32(data.len() as u32);
+        tx.pbytes(&data);
+        finalize_async(pc, meta, &mut tx, start);
+    } else {
+        let final_st = if st == status::SUCCESS { status::NOTIFY_ENUM_DIR } else { st };
+        let start = begin_resp_async(&mut tx, meta, final_st, 0, CMD_CHANGE_NOTIFY);
+        err_body(&mut tx);
+        finalize_async(pc, meta, &mut tx, start);
+    }
+    tx
+}
+
+fn finalize_async(pc: &ProtoConn, meta: &AsyncMeta, tx: &mut Vec<u8>, start: usize) {
+    if meta.want_sign {
+        if let Some(sc) = pc.sessions.get(&meta.session_id).and_then(|s| s.sign.clone()) {
+            let end = tx.len();
+            sign_in_place(tx, start, end, &sc);
+        }
+    }
+    let total = (tx.len() - 4) as u32;
+    finish_nbt_with(tx, total);
 }
 
 fn finish_nbt_with(tx: &mut [u8], len: u32) {
@@ -266,6 +478,16 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
     let mut plan: Option<ZcReadPlan> = None;
     let mut prev_start: Option<usize> = None;
     let mut off = 0usize;
+    // Per-response bookkeeping for the post-pass (signing + preauth).
+    struct RespRec {
+        cmd: u16,
+        start: usize,
+        req_off: usize,
+        req_end: usize,
+        sess_id: u64,
+        req_signed: bool,
+    }
+    let mut recs: Vec<RespRec> = Vec::new();
 
     loop {
         let Some(h) = parse_hdr(&frame[off..]) else {
@@ -294,6 +516,14 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
         }
         if tx.len() > resp_start {
             prev_start = Some(resp_start);
+            recs.push(RespRec {
+                cmd: h.command,
+                start: resp_start,
+                req_off: off,
+                req_end: msg_end,
+                sess_id: chain.session_id,
+                req_signed: h.flags & FLAG_SIGNED != 0,
+            });
         }
 
         if h.next == 0 {
@@ -310,6 +540,50 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
         tx.truncate(base);
         return FrameAction::ZcRead(p);
     }
+
+    // Post-pass 1: sign responses for sessions with signing material.
+    // (Responses end where the next one starts; the last ends at tx end.)
+    for i in 0..recs.len() {
+        let end = recs.get(i + 1).map(|r| r.start).unwrap_or(tx.len());
+        let rec = &recs[i];
+        let Some(sess) = pc.sessions.get(&rec.sess_id) else {
+            continue;
+        };
+        let Some(sc) = sess.sign.clone() else {
+            continue;
+        };
+        if rec.req_signed || sess.signing_required {
+            sign_in_place(tx, rec.start, end, &sc);
+        }
+    }
+
+    // Post-pass 2 (SMB 3.1.1): preauth integrity hash chaining over the
+    // exact transmitted bytes. The NEGOTIATE exchange updates the
+    // connection hash; interim SESSION_SETUP responses update the pending
+    // session hash (requests are hashed in the handler, where ordering
+    // against key derivation matters).
+    if pc.dialect == 0x0311 {
+        for i in 0..recs.len() {
+            let end = recs.get(i + 1).map(|r| r.start).unwrap_or(tx.len());
+            let rec = &recs[i];
+            match rec.cmd {
+                CMD_NEGOTIATE => {
+                    let h0 = crypto::sha512(&[&[0u8; 64], &frame[rec.req_off..rec.req_end]]);
+                    pc.preauth_neg = crypto::sha512(&[&h0, &tx[rec.start..end]]);
+                }
+                CMD_SESSION_SETUP => {
+                    let st = u32::from_le_bytes(tx[rec.start + 8..rec.start + 12].try_into().unwrap());
+                    if st == status::MORE_PROCESSING_REQUIRED {
+                        if let Some(sess) = pc.sessions.get_mut(&rec.sess_id) {
+                            sess.preauth = crypto::sha512(&[&sess.preauth, &tx[rec.start..end]]);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     let total = (tx.len() - base - 4) as u32;
     if total == 0 {
         tx.truncate(base); // nothing to send for this frame
@@ -326,18 +600,19 @@ mod tests {
     use crate::wire::utf16le;
 
     fn test_srv(dir: &std::path::Path) -> Srv {
-        Srv {
-            cfg: Config {
-                listen: "127.0.0.1:445".into(),
-                workers: 1,
-                server_name: "TESTSRV".into(),
-                log_level: 0,
-                shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
-            },
-            guid: [9; 16],
-            max_read: 1 << 20,
-            start_ft: 0,
-        }
+        let cfg = Config {
+            listen: "127.0.0.1:445".into(),
+            workers: 1,
+            server_name: "TESTSRV".into(),
+            log_level: 0,
+            allow_guest: None,
+            require_signing: false,
+            shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
+            users: vec![],
+        };
+        let users = cfg.user_db();
+        let allow_guest = cfg.guest_allowed();
+        Srv { cfg, guid: [9; 16], max_read: 1 << 20, start_ft: 0, users, allow_guest }
     }
 
     fn req_hdr(cmd: u16, msg_id: u64, tree: u32, sess: u64) -> Vec<u8> {

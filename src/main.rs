@@ -67,7 +67,12 @@ fn run(cfg: Config) {
     let mut guid = [0u8; 16];
     config::urandom(&mut guid);
     let max_read = uring::probe_pipe_size(smb2::MAX_READ_TARGET);
-    let srv = Arc::new(Srv { cfg, guid, max_read, start_ft: vfs::filetime_now() });
+    let users = cfg.user_db();
+    let allow_guest = cfg.guest_allowed();
+    if !users.is_empty() {
+        logi!("{} user(s) loaded, guest {}", users.len(), if allow_guest { "allowed" } else { "denied" });
+    }
+    let srv = Arc::new(Srv { cfg, guid, max_read, start_ft: vfs::filetime_now(), users, allow_guest });
 
     let workers = if srv.cfg.workers > 0 {
         srv.cfg.workers

@@ -176,6 +176,38 @@ pub fn ftruncate(fd: RawFd, len: u64) -> Result<(), i32> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockKind {
+    Shared,
+    Exclusive,
+    Unlock,
+}
+
+/// Byte-range lock via open-file-description locks (per-fd semantics match
+/// SMB handles; conflicts surface as EAGAIN/EACCES).
+pub fn range_lock(fd: RawFd, off: u64, len: u64, kind: LockKind) -> Result<(), i32> {
+    let start = off.min(i64::MAX as u64) as i64;
+    let l_len = len.min((i64::MAX as u64) - start as u64) as i64;
+    let mut fl: libc::flock = unsafe { std::mem::zeroed() };
+    fl.l_type = match kind {
+        LockKind::Shared => libc::F_RDLCK as _,
+        LockKind::Exclusive => libc::F_WRLCK as _,
+        LockKind::Unlock => libc::F_UNLCK as _,
+    };
+    fl.l_whence = libc::SEEK_SET as _;
+    fl.l_start = start as _;
+    fl.l_len = l_len as _;
+    #[cfg(target_os = "linux")]
+    let cmd = libc::F_OFD_SETLK;
+    #[cfg(not(target_os = "linux"))]
+    let cmd = libc::F_SETLK; // dev-host fallback; semantics differ slightly
+    if unsafe { libc::fcntl(fd, cmd, &fl) } < 0 {
+        Err(errno())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn fsync(fd: RawFd) -> Result<(), i32> {
     if unsafe { libc::fsync(fd) } < 0 {
         Err(errno())
