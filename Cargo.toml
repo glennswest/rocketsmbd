@@ -10,6 +10,13 @@ repository = "https://github.com/glennswest/rocketsmbd"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# Pure-Rust crypto (RustCrypto) for NTLMv2 + SMB2/3 signing
+md4 = "0.10"
+md-5 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+cmac = "0.7"
+aes = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"

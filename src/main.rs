@@ -5,6 +5,7 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 mod config;
+mod crypto;
 mod log;
 mod ntlm;
 mod smb2;
