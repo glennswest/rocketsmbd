@@ -6,7 +6,7 @@ thread-per-connection — one io_uring reactor per worker thread.
 
 ## Version
 
-- Current: **0.2.0** (pre-release, in development)
+- Current: **0.3.0** (pre-release, in development)
 - Version locations: `Cargo.toml` (`[package] version`), `src/main.rs` (`VERSION` const via `env!("CARGO_PKG_VERSION")` — single source is Cargo.toml)
 
 ## Platform & Build
@@ -125,16 +125,17 @@ Order:
       = 100 Gbps (linear SO_REUSEPORT scaling). Single-client gap = multichannel.
 - [x] 2. docs/TUNING.md: jumbo frames, TCP buffers, NIC/RSS, multichannel path
 - [ ] 3. TCP send/recv buffer headroom on accepted sockets (high-BDP links)
-- [ ] 4. SMB3 multichannel: advertise MULTI_CHANNEL cap, FSCTL_QUERY_NETWORK_
-      INTERFACE_INFO (report server NICs+speed), session binding (bind a new
-      connection to an existing session, signed with the session key) — THE
-      lever for a single client to fill 100GbE
+- [x] 4. SMB3 multichannel: MULTI_CHANNEL cap, FSCTL_QUERY_NETWORK_INTERFACE_INFO,
+      session binding (shared registry, per-channel signing). Single mount
+      4.7 → 21.1 GB/s (169 Gbps), 4.5×. — released v0.3.0
+- [x]    Server-side read-ahead (POSIX_FADV_SEQUENTIAL); lock-free read I/O.
 - [ ] 5. send_zc (MSG_ZEROCOPY) for the buffered send path; registered buffers
 - [ ] 6. multishot accept/recv, SQPOLL mode, worker core pinning
 - [ ] 7. Intra-connection request concurrency (multiple zc reads in flight)
 - [ ] 8. SMB3 encryption (AES-128-GCM) + zero-copy-friendly signed/enc reads
 - [ ] 9. Oplocks/leases with real caching
-- [ ] 10. Benchmarks vs samba (fio over cifs), incl. multi-stream + multichannel
+- [ ] 10. Cross-VM benchmark on Proxmox (real NIC fabric) + Windows Server head-to-head
+- [ ] 11. SMB Direct (RDMA) — the endgame for 400/800GbE
 
 ## Testing
 

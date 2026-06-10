@@ -20,6 +20,28 @@ for usage). Record every run here — newest at the top of each section.
 
 ## Results
 
+### 2026-06-10 — SMB3 multichannel (v0.3.0)
+
+Single client mount, loopback, 8 workers, 1 GiB cached file, `max_channels=4`.
+
+| Scenario | 1 mount, 4 parallel readers |
+|---|---|
+| Before multichannel (one TCP conn) | 4.7 GB/s (38 Gbps) |
+| **Guest multichannel, zero-copy** | **21.1 GB/s (169 Gbps)** |
+
+A single mount now stripes across 4 channels → 4 worker cores, a **4.5×**
+jump that clears 100GbE. 1 GiB checksum verified over multichannel.
+Authenticated multichannel binds correctly (NTLMv2 per channel) but signing
+forces the buffered path, so signed throughput is CPU-bound (AES-CMAC),
+well below the zero-copy figure — use unsigned for max throughput.
+
+Notes:
+- Needs concurrent I/O to show: a single sequential reader rides ~one
+  channel (~6 GB/s). Parallel readers / deep client readahead fill all
+  channels.
+- Loopback is a stand-in; a real 400/800GbE NIC test (cross-VM on Proxmox)
+  is the next validation.
+
 ### 2026-06-09 — multi-connection scaling (phase 3 baseline)
 
 Loopback, 8 workers, 1 GiB cached file. Establishes that the architecture

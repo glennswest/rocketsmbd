@@ -93,14 +93,71 @@ On loopback (tiny BDP) this is moot; it matters on real links with RTT.
 - **Worker pinning**: planned (phase 3) — pin each worker to the core whose
   NIC queue it drains.
 
-## Roadmap to single-client line rate
+## Read-ahead
 
-- **SMB3 multichannel** (in progress): the client opens N connections to one
-  share and stripes I/O across them automatically — this is how Windows and
-  Samba fill 100GbE from one mount. rocketsmbd advertises the capability,
-  reports its interfaces via `FSCTL_QUERY_NETWORK_INTERFACE_INFO`, and accepts
-  session binding.
-- **Intra-connection concurrency**: pipeline multiple reads in flight on a
-  single connection so one connection exceeds the current ~45 Gbps ceiling.
-- **send_zc / registered buffers**: lower CPU per byte on the send path,
-  freeing cores for more flows.
+There are two layers, and we use both:
+
+- **Client read-ahead** (not server-controlled): the cifs/Windows client
+  issues reads ahead of the application using `rsize` and its credit window.
+  Deeper readahead = more outstanding reads = more channels filled. This is
+  what turns multichannel into throughput; a single shallow reader won't.
+- **Server read-ahead** (implemented): on opening a file for reading we issue
+  `posix_fadvise(POSIX_FADV_SEQUENTIAL)`, which doubles the kernel's readahead
+  window and prefetches pages ahead of each splice. For **cold-storage**
+  serving (NVMe, not page-cache-warm) this keeps the splice pipe fed so reads
+  aren't bound by per-request disk latency. For warmed benchmarks it's a no-op.
+  A future refinement is an explicit `readahead(2)`/`IORING_OP_FADVISE` ahead
+  of the next splice offset for very large sequential streams.
+
+## What else boosts throughput
+
+Implemented:
+- **Multichannel** — N connections per mount across N cores (the big one).
+- **Zero-copy reads** — `splice` file→pipe→socket, no userspace copy.
+- **Lock-free read I/O** — the session lock is held only to dup the fd, so
+  reads on different channels run truly in parallel.
+- **Server read-ahead** — `POSIX_FADV_SEQUENTIAL`.
+- **Frame batching, TCP_NODELAY, 4 MiB writes, 1 MiB reads** (see other entries).
+
+Planned, in rough value order for 400/800GbE:
+- **SQPOLL** — kernel-side submission-queue polling removes a syscall per
+  batch; meaningful at high IOPS / many channels.
+- **Registered files + registered buffers** (`IORING_REGISTER_*`) — drops
+  per-op fd refcount and buffer-pinning overhead on the hot path.
+- **send_zc (`MSG_ZEROCOPY`)** for the buffered send path (small/compound/
+  signed responses); the splice read path is already zero-copy.
+- **Intra-connection read concurrency** — multiple splices in flight per
+  connection (pool of pipes) so even one channel exceeds ~45 Gbps and fewer
+  channels are needed to fill the link.
+- **Worker core-pinning aligned to NIC RSS queues** — each worker drains the
+  queue its flows land on; avoids cross-core cache traffic.
+- **Signed/encrypted zero-copy** — keep the splice path under signing/GCM via
+  a trailer-MAC or offload scheme, so security doesn't force buffered reads.
+- **SMB Direct (RDMA)** — the endgame for 100GbE+; Windows uses it to bypass
+  TCP/CPU entirely. Large effort (RDMA verbs, separate transport).
+
+## Comparison vs other SMB servers
+
+- **vs Samba** (measured, same host): ~4× on unsigned sequential reads
+  (5.7 GB/s vs 1.4), ~1.3× on writes. See results above.
+- **vs Windows Server SMB3** (reference, not yet measured head-to-head):
+  Windows is the multichannel reference implementation and reaches near
+  line-rate on 100GbE with RSS multichannel, and beyond with SMB Direct/RDMA.
+  Our unsigned multichannel hit 169 Gbps single-mount on loopback, which is
+  in the same class for the TCP zero-copy path; the gap at the very top end
+  is RDMA (SMB Direct), which we don't implement yet. A real head-to-head
+  needs a Windows Server VM on the same fabric — see below.
+
+### Running a Windows Server head-to-head
+
+To compare on equal footing (same client, same NIC/fabric):
+1. Stand up a Windows Server eval VM on the Proxmox host (`vmbr0`), enable
+   the File Server role, share an NVMe-backed folder.
+2. From a Linux client VM, `mount -t cifs` both servers with identical
+   `vers=3.1.1,multichannel,max_channels=N` and run the same `fio`/`dd`
+   workload against each.
+3. Compare aggregate GB/s at matched channel counts; watch server CPU
+   (Windows offloads more to the NIC, so CPU-per-GB is the interesting axis).
+
+RDMA-capable NICs would let both use SMB Direct; without RDMA the comparison
+is the pure TCP multichannel path, which is where rocketsmbd is strongest.

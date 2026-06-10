@@ -1,9 +1,25 @@
 # Changelog
 
 ## [Unreleased]
+<!-- New unreleased changes go here -->
 
-### 2026-06-09
-- **docs:** Add docs/TUNING.md — jumbo frames, TCP buffers, NIC/RSS, and the path to 100GbE saturation; record multi-connection scaling baseline (4 connections = 100 Gbps on loopback; single connection ≈ 45 Gbps, motivating SMB3 multichannel).
+## [v0.3.0] — 2026-06-10
+
+### Added
+- **feat:** SMB3 multichannel — a single client mount stripes one share across multiple connections and worker cores. Cross-connection shared session registry (per-session locks), channel binding (guest + NTLMv2-verified, per-channel 3.1.1 signing keys), `MULTI_CHANNEL` capability, and `FSCTL_QUERY_NETWORK_INTERFACE_INFO` reporting RSS-capable interfaces. `multichannel` config flag.
+- **feat:** Server-side read-ahead — `posix_fadvise(POSIX_FADV_SEQUENTIAL)` on file open keeps the kernel prefetching ahead of the splice for cold-storage streaming.
+
+### Changed
+- **perf:** Single client mount, 4 channels: **4.7 → 21.1 GB/s (38 → 169 Gbps)** on loopback — 4.5×, past 100GbE. Zero-copy reads on a multichannel mount, 1 GiB checksum verified.
+- **perf:** READ holds the session lock only long enough to dup the fd; all read I/O (splice or buffered) runs lock-free, so reads on different channels of one session run in parallel instead of serializing.
+- **refactor:** Sessions and open-file handles moved from per-connection state into the shared registry; per-channel signing/preauth stays connection-local (no lock on the sign/verify hot path).
+
+### Fixed
+- **fix:** Zero-copy reads dup the file fd so a concurrent CLOSE on another channel can't free it mid-splice; the reactor closes the dup on completion.
+- **fix:** Channel binding accepts guest sessions regardless of presented credentials.
+
+### Docs
+- **docs:** TUNING.md — read-ahead (client + server), throughput boost roadmap (SQPOLL, registered buffers, send_zc, intra-connection concurrency, SMB Direct), and a Windows Server head-to-head method. BENCHMARKS.md multichannel results.
 
 ## [v0.2.0] — 2026-06-09
 
