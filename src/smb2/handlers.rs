@@ -147,7 +147,13 @@ pub fn dispatch(
                 CMD_CREATE => create(&mut sess, h, msg, chain, tx, share, tree.share_idx),
                 CMD_CLOSE => close(pc, &mut sess, h, body, chain, tx),
                 CMD_FLUSH => flush(&mut sess, h, body, chain, tx),
-                CMD_READ => return read(pc, &mut sess, h, body, chain, tx),
+                CMD_READ => {
+                    // Read briefly re-locks the session itself (dup the fd,
+                    // then do I/O lock-free) so concurrent reads across
+                    // channels don't serialize on the session lock.
+                    drop(sess);
+                    return read(pc, &sref, h, body, chain, tx);
+                }
                 CMD_WRITE => write(&mut sess, h, msg, chain, tx, share),
                 CMD_QUERY_DIRECTORY => query_directory(&mut sess, h, msg, chain, tx),
                 CMD_QUERY_INFO => query_info(srv, &mut sess, h, body, chain, tx),
@@ -827,6 +833,10 @@ fn create(
             return;
         }
     };
+    // Prefetch hint for streamed file reads (helps cold-storage throughput).
+    if !is_dir {
+        vfs::advise_sequential(fd);
+    }
     let leaf = rel.rsplit('\\').next().unwrap_or("").to_string();
     let attrs = vfs::finalize_attrs(meta.attrs, &leaf);
     let fid = sess.handles.insert(OpenFile {
@@ -955,7 +965,7 @@ fn flush(sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx
 
 fn read(
     pc: &mut ProtoConn,
-    sess: &mut SessionInner,
+    sref: &crate::session::SessionRef,
     h: &ReqHdr,
     body: &[u8],
     chain: &mut Chain,
@@ -985,41 +995,51 @@ fn read(
         .get(&chain.session_id)
         .map(|c| c.sign.is_some() && (c.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
         .unwrap_or(false);
-    let Some(of) = sess.handles.get(fid) else {
-        err_resp(tx, h, status::FILE_CLOSED, chain);
-        return None;
+
+    // Hold the session lock only long enough to validate the handle and dup
+    // its fd. All subsequent I/O (splice or buffered pread) runs lock-free,
+    // so reads on different channels of the same session run in parallel
+    // instead of serializing — and a concurrent CLOSE can't free the fd
+    // mid-read (the dup keeps it alive; the reactor/handler closes it).
+    let dup = {
+        let mut sess = sref.lock().unwrap();
+        let Some(of) = sess.handles.get(fid) else {
+            err_resp(tx, h, status::FILE_CLOSED, chain);
+            return None;
+        };
+        if of.is_dir {
+            err_resp(tx, h, status::INVALID_DEVICE_REQUEST, chain);
+            return None;
+        }
+        unsafe { libc::dup(of.fd) }
     };
-    if of.is_dir {
-        err_resp(tx, h, status::INVALID_DEVICE_REQUEST, chain);
+    if dup < 0 {
+        err_resp(tx, h, status::INSUFFICIENT_RESOURCES, chain);
         return None;
     }
     let length = length.min(max_read);
 
-    // Standalone large reads take the zero-copy splice path. The plan owns a
-    // dup of the fd so a concurrent CLOSE on another channel can't pull the
-    // file out from under the in-flight splice; the reactor closes it after.
+    // Standalone large unsigned reads take the zero-copy splice path; the
+    // plan owns the dup and the reactor closes it when the splice finishes.
     if chain.single && length >= ZC_MIN_READ && !must_sign {
-        let dup = unsafe { libc::dup(of.fd) };
-        if dup >= 0 {
-            return Some(ZcReadPlan {
-                fd: dup,
-                offset,
-                length,
-                min_count,
-                msg_id: h.msg_id,
-                credit_charge: h.credit_charge,
-                credits: h.credits,
-                tree_id: chain.tree_id,
-                session_id: chain.session_id,
-            });
-        }
-        // dup failed: fall through to the buffered path.
+        return Some(ZcReadPlan {
+            fd: dup,
+            offset,
+            length,
+            min_count,
+            msg_id: h.msg_id,
+            credit_charge: h.credit_charge,
+            credits: h.credits,
+            tree_id: chain.tree_id,
+            session_id: chain.session_id,
+        });
     }
 
-    // Buffered fallback (small reads, compounds, signed).
-    let fd = of.fd;
+    // Buffered path (small reads, compounds, signed) — lock-free pread.
     let mut buf = vec![0u8; length as usize];
-    match vfs::pread(fd, &mut buf, offset) {
+    let res = vfs::pread(dup, &mut buf, offset);
+    unsafe { libc::close(dup) };
+    match res {
         Ok(0) if length > 0 => err_resp(tx, h, status::END_OF_FILE, chain),
         Ok(n) if (n as u32) < min_count => err_resp(tx, h, status::END_OF_FILE, chain),
         Ok(n) => {

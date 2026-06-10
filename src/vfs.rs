@@ -216,6 +216,19 @@ pub fn fsync(fd: RawFd) -> Result<(), i32> {
     }
 }
 
+/// Hint the kernel to read this file ahead aggressively. For a file server
+/// streaming large files this keeps the page cache warm ahead of the splice,
+/// so reads from cold storage (NVMe) aren't bound by per-request latency.
+/// Best-effort: ignored on platforms/filesystems without the syscall.
+pub fn advise_sequential(fd: RawFd) {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = fd;
+}
+
 /// (total_units, caller_avail_units, actual_avail_units, sectors_per_unit, bytes_per_sector)
 #[allow(clippy::unnecessary_cast)] // statvfs field widths differ across platforms
 pub fn fs_sizes(fd: RawFd) -> Result<(u64, u64, u64, u32, u32), i32> {
