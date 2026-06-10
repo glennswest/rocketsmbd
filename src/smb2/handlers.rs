@@ -83,15 +83,15 @@ pub fn dispatch(
     let h = &h;
 
     // Verify signatures on signed requests; reject unsigned requests on
-    // signing-required sessions.
-    if let Some(sess) = pc.sessions.get(&chain.session_id) {
-        if let Some(sc) = &sess.sign {
+    // signing-required channels. Signing state is connection-local.
+    if let Some(ch) = pc.channels.get(&chain.session_id) {
+        if let Some(sc) = &ch.sign {
             if h.flags & FLAG_SIGNED != 0 {
                 if !verify_signature(msg, sc) {
                     err_resp(tx, h, status::ACCESS_DENIED, chain);
                     return None;
                 }
-            } else if sess.signing_required
+            } else if ch.signing_required
                 && !matches!(h.command, CMD_NEGOTIATE | CMD_SESSION_SETUP | CMD_CANCEL)
             {
                 err_resp(tx, h, status::ACCESS_DENIED, chain);
@@ -105,63 +105,84 @@ pub fn dispatch(
         CMD_ECHO => simple_resp(tx, h, chain),
         CMD_CANCEL => cancel(pc, h),
         CMD_SESSION_SETUP => session_setup(srv, pc, h, msg, chain, tx),
+        CMD_LOGOFF => logoff(srv, pc, h, chain, tx),
         _ => {
-            if !pc.sessions.contains_key(&chain.session_id) {
+            // Established session required. The channel proves this
+            // connection is bound; the shared session holds trees + handles.
+            let established =
+                pc.channels.get(&chain.session_id).map(|c| c.established).unwrap_or(false);
+            if !established {
                 err_resp(tx, h, status::USER_SESSION_DELETED, chain);
                 return None;
             }
+            let Some(sref) = srv.sessions.get(chain.session_id) else {
+                err_resp(tx, h, status::USER_SESSION_DELETED, chain);
+                return None;
+            };
+            let mut sess = sref.lock().unwrap();
+
+            if h.command == CMD_TREE_CONNECT {
+                tree_connect(srv, &mut sess, h, msg, chain, tx);
+                return None;
+            }
+            let Some(tree) = sess.trees.get(&chain.tree_id).copied() else {
+                err_resp(tx, h, status::NETWORK_NAME_DELETED, chain);
+                return None;
+            };
+            if h.command == CMD_TREE_DISCONNECT {
+                sess.trees.remove(&chain.tree_id);
+                simple_resp(tx, h, chain);
+                return None;
+            }
+            if tree.ipc {
+                drop(sess);
+                match h.command {
+                    CMD_IOCTL => ioctl(srv, pc, h, msg, chain, tx),
+                    _ => err_resp(tx, h, status::ACCESS_DENIED, chain),
+                }
+                return None;
+            }
+            let share = &srv.cfg.shares[tree.share_idx as usize];
             match h.command {
-                CMD_LOGOFF => {
-                    pc.sessions.remove(&chain.session_id);
-                    simple_resp(tx, h, chain);
+                CMD_CREATE => create(&mut sess, h, msg, chain, tx, share, tree.share_idx),
+                CMD_CLOSE => close(pc, &mut sess, h, body, chain, tx),
+                CMD_FLUSH => flush(&mut sess, h, body, chain, tx),
+                CMD_READ => return read(pc, &mut sess, h, body, chain, tx),
+                CMD_WRITE => write(&mut sess, h, msg, chain, tx, share),
+                CMD_QUERY_DIRECTORY => query_directory(&mut sess, h, msg, chain, tx),
+                CMD_QUERY_INFO => query_info(srv, &mut sess, h, body, chain, tx),
+                CMD_SET_INFO => set_info(&mut sess, h, msg, chain, tx, share),
+                CMD_IOCTL => {
+                    drop(sess);
+                    ioctl(srv, pc, h, msg, chain, tx);
                 }
-                CMD_TREE_CONNECT => tree_connect(srv, pc, h, msg, chain, tx),
-                _ => {
-                    let Some(tree) = pc
-                        .sessions
-                        .get(&chain.session_id)
-                        .and_then(|s| s.trees.get(&chain.tree_id))
-                        .copied()
-                    else {
-                        err_resp(tx, h, status::NETWORK_NAME_DELETED, chain);
-                        return None;
-                    };
-                    if h.command == CMD_TREE_DISCONNECT {
-                        if let Some(s) = pc.sessions.get_mut(&chain.session_id) {
-                            s.trees.remove(&chain.tree_id);
-                        }
-                        simple_resp(tx, h, chain);
-                        return None;
-                    }
-                    if tree.ipc {
-                        // IPC$ exists to keep clients happy at mount time;
-                        // named pipes are not served.
-                        match h.command {
-                            CMD_IOCTL => ioctl(srv, pc, h, msg, chain, tx),
-                            _ => err_resp(tx, h, status::ACCESS_DENIED, chain),
-                        }
-                        return None;
-                    }
-                    let share = &srv.cfg.shares[tree.share_idx as usize];
-                    match h.command {
-                        CMD_CREATE => create(pc, h, msg, chain, tx, share, tree.share_idx),
-                        CMD_CLOSE => close(pc, h, body, chain, tx),
-                        CMD_FLUSH => flush(pc, h, body, chain, tx),
-                        CMD_READ => return read(pc, h, body, chain, tx),
-                        CMD_WRITE => write(pc, h, msg, chain, tx, share),
-                        CMD_QUERY_DIRECTORY => query_directory(pc, h, msg, chain, tx),
-                        CMD_QUERY_INFO => query_info(srv, pc, h, body, chain, tx),
-                        CMD_SET_INFO => set_info(pc, h, msg, chain, tx, share),
-                        CMD_IOCTL => ioctl(srv, pc, h, msg, chain, tx),
-                        CMD_LOCK => lock(pc, h, body, chain, tx),
-                        CMD_CHANGE_NOTIFY => change_notify(pc, h, body, chain, tx),
-                        _ => err_resp(tx, h, status::NOT_SUPPORTED, chain),
-                    }
-                }
+                CMD_LOCK => lock(&mut sess, h, body, chain, tx),
+                CMD_CHANGE_NOTIFY => change_notify(pc, &mut sess, h, body, chain, tx),
+                _ => err_resp(tx, h, status::NOT_SUPPORTED, chain),
             }
         }
     }
     None
+}
+
+/// LOGOFF: drop this connection's channel; tear down the shared session when
+/// its last channel goes away.
+fn logoff(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, chain: &Chain, tx: &mut Vec<u8>) {
+    if pc.channels.remove(&chain.session_id).is_none() {
+        err_resp(tx, h, status::USER_SESSION_DELETED, chain);
+        return;
+    }
+    if let Some(sref) = srv.sessions.get(chain.session_id) {
+        let drop_session = {
+            let mut s = sref.lock().unwrap();
+            s.channels = s.channels.saturating_sub(1);
+            s.channels == 0
+        };
+        if drop_session {
+            srv.sessions.remove(chain.session_id);
+        }
+    }
+    simple_resp(tx, h, chain);
 }
 
 /// CANCEL: no response of its own; a matching pended operation completes
@@ -371,6 +392,8 @@ fn ss_resp(tx: &mut Vec<u8>, h: &ReqHdr, st: u32, related: bool, sid: u64, flags
     tx.pbytes(blob);
 }
 
+const SESSION_FLAG_BINDING: u8 = 0x01;
+
 fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let body = &msg[64..];
@@ -378,40 +401,51 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
         if r.u16()? != 25 {
             return None;
         }
-        r.skip(1)?; // flags
+        let flags = r.u8()?;
         let secmode = r.u8()?;
         r.skip(4 + 4)?; // caps, channel
         let off = r.u16()? as usize;
         let len = r.u16()? as usize;
         let _prev = r.u64()?;
         let blob = if len == 0 { &[][..] } else { msg.get(off..off + len)? };
-        Some((secmode, blob))
+        Some((flags, secmode, blob))
     })();
-    let Some((client_secmode, blob)) = parsed else {
+    let Some((ss_flags, client_secmode, blob)) = parsed else {
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
     let spnego = ntlm::is_spnego(blob);
+    let binding = ss_flags & SESSION_FLAG_BINDING != 0;
     let signing_required =
         srv.cfg.require_signing || client_secmode as u16 & SECURITY_MODE_SIGNING_REQUIRED != 0;
 
     match ntlm::classify(blob) {
         ntlm::Token::Negotiate => {
-            // Interim response: assign the session id, send a CHALLENGE.
-            let sid = pc.next_session_id;
-            pc.next_session_id += 1;
+            // Interim: assign/locate the session id, stash a challenge in this
+            // connection's channel state, respond with the NTLM CHALLENGE.
+            let sid = if binding {
+                // Bind to an existing session — it must already exist.
+                if h.session_id == 0 || srv.sessions.get(h.session_id).is_none() {
+                    err_resp(tx, h, status::USER_SESSION_DELETED, chain);
+                    return;
+                }
+                h.session_id
+            } else {
+                let (id, _sref) = srv.sessions.create();
+                id
+            };
             chain.session_id = sid;
             let mut chal = [0u8; 8];
             crate::config::urandom(&mut chal);
-            let mut sess = Session {
-                pending: Some(crate::smb2::PendingAuth { challenge: chal, spnego }),
+            let mut ch = crate::smb2::ChannelState {
+                pending: Some(crate::smb2::PendingAuth { challenge: chal, spnego, binding }),
                 preauth: pc.preauth_neg,
                 ..Default::default()
             };
             if pc.dialect == 0x0311 {
-                sess.preauth = crate::crypto::sha512(&[&sess.preauth, msg]);
+                ch.preauth = crate::crypto::sha512(&[&ch.preauth, msg]);
             }
-            pc.sessions.insert(sid, sess);
+            pc.channels.insert(sid, ch);
 
             let mut token = ntlm::challenge(&srv.cfg.server_name, chal);
             if spnego {
@@ -422,83 +456,151 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
         ntlm::Token::Authenticate => {
             let sid = h.session_id;
             chain.session_id = sid;
-            let Some(sess) = pc.sessions.get_mut(&sid) else {
+            let Some(ch) = pc.channels.get_mut(&sid) else {
                 err_resp(tx, h, status::USER_SESSION_DELETED, chain);
                 return;
             };
             if pc.dialect == 0x0311 {
-                sess.preauth = crate::crypto::sha512(&[&sess.preauth, msg]);
+                ch.preauth = crate::crypto::sha512(&[&ch.preauth, msg]);
             }
-            let Some(pending) = sess.pending.take() else {
-                // Re-auth on an established session: acknowledge.
-                let flags = if sess.guest { SESSION_FLAG_IS_GUEST } else { 0 };
+            let Some(pending) = ch.pending.take() else {
+                // Re-auth on an already-established channel: acknowledge.
+                let flags = if ch.sign.is_none() { SESSION_FLAG_IS_GUEST } else { 0 };
                 ss_resp(tx, h, status::SUCCESS, chain.related, sid, flags, &[]);
                 return;
             };
+            let ch_preauth = ch.preauth;
             let wrapped = pending.spnego || spnego;
             let done = if wrapped { ntlm::spnego_accept_completed() } else { Vec::new() };
+            let dialect = pc.dialect;
 
-            let auth = ntlm::parse_authenticate(blob);
-            let verdict = match &auth {
-                Some(a) if !a.is_anonymous() => {
-                    match srv.users.get(&a.user.to_lowercase()) {
-                        Some(nt) => match ntlm::verify_ntlmv2(nt, a, &pending.challenge) {
-                            Some(key) => Verdict::User(key),
-                            None => Verdict::Reject,
-                        },
-                        None if srv.allow_guest => Verdict::Guest,
-                        None => Verdict::Reject,
-                    }
-                }
-                _ if srv.allow_guest => Verdict::Guest,
-                _ => Verdict::Reject,
+            let Some(sref) = srv.sessions.get(sid) else {
+                err_resp(tx, h, status::USER_SESSION_DELETED, chain);
+                return;
             };
+            let auth = ntlm::parse_authenticate(blob);
+
+            if pending.binding {
+                // Channel binding: prove the same identity, then derive this
+                // channel's signing key from the session's original key.
+                let mut s = sref.lock().unwrap();
+                let ok = match &auth {
+                    Some(a) if !a.is_anonymous() => {
+                        s.established
+                            && a.user.eq_ignore_ascii_case(&s.user)
+                            && srv
+                                .users
+                                .get(&a.user.to_lowercase())
+                                .map(|nt| ntlm::verify_ntlmv2(nt, a, &pending.challenge).is_some())
+                                .unwrap_or(false)
+                    }
+                    // Guest sessions have no key; binding them is signing-free.
+                    _ => s.established && s.guest,
+                };
+                if !ok {
+                    drop(s);
+                    pc.channels.remove(&sid);
+                    crate::logw!("session {:x}: channel bind rejected", sid);
+                    err_resp(tx, h, status::ACCESS_DENIED, chain);
+                    return;
+                }
+                let key = s.session_key;
+                let guest = s.guest;
+                s.channels += 1;
+                drop(s);
+                let chm = pc.channels.get_mut(&sid).unwrap();
+                chm.established = true;
+                chm.signing_required = signing_required && !guest;
+                chm.sign = if guest {
+                    None
+                } else {
+                    Some(crate::smb2::derive_sign_ctx(dialect, &key, &ch_preauth))
+                };
+                crate::logi!("session {:x}: channel bound (now striping)", sid);
+                let flags = if guest { SESSION_FLAG_IS_GUEST } else { 0 };
+                ss_resp(tx, h, status::SUCCESS, chain.related, sid, flags, &done);
+                return;
+            }
+
+            // First authentication on a fresh session.
             enum Verdict {
-                User([u8; 16]),
+                User([u8; 16], String),
                 Guest,
                 Reject,
             }
+            let verdict = match &auth {
+                Some(a) if !a.is_anonymous() => match srv.users.get(&a.user.to_lowercase()) {
+                    Some(nt) => match ntlm::verify_ntlmv2(nt, a, &pending.challenge) {
+                        Some(key) => Verdict::User(key, a.user.clone()),
+                        None => Verdict::Reject,
+                    },
+                    None if srv.allow_guest => Verdict::Guest,
+                    None => Verdict::Reject,
+                },
+                _ if srv.allow_guest => Verdict::Guest,
+                _ => Verdict::Reject,
+            };
             match verdict {
-                Verdict::User(key) => {
-                    sess.established = true;
-                    sess.guest = false;
-                    sess.signing_required = signing_required;
-                    sess.sign =
-                        Some(crate::smb2::derive_sign_ctx(pc.dialect, &key, &sess.preauth));
+                Verdict::User(key, user) => {
+                    {
+                        let mut s = sref.lock().unwrap();
+                        s.session_key = key;
+                        s.established = true;
+                        s.guest = false;
+                        s.signing_required = signing_required;
+                        s.user = user.clone();
+                        s.channels = 1;
+                    }
+                    let chm = pc.channels.get_mut(&sid).unwrap();
+                    chm.established = true;
+                    chm.signing_required = signing_required;
+                    chm.sign = Some(crate::smb2::derive_sign_ctx(dialect, &key, &ch_preauth));
                     crate::logi!(
                         "session {:x}: user {:?} authenticated (signing {})",
                         sid,
-                        auth.as_ref().map(|a| a.user.as_str()).unwrap_or(""),
+                        user,
                         if signing_required { "required" } else { "optional" }
                     );
                     ss_resp(tx, h, status::SUCCESS, chain.related, sid, 0, &done);
                 }
                 Verdict::Guest => {
-                    sess.established = true;
-                    sess.guest = true;
+                    {
+                        let mut s = sref.lock().unwrap();
+                        s.established = true;
+                        s.guest = true;
+                        s.channels = 1;
+                    }
+                    let chm = pc.channels.get_mut(&sid).unwrap();
+                    chm.established = true;
                     ss_resp(tx, h, status::SUCCESS, chain.related, sid, SESSION_FLAG_IS_GUEST, &done);
                 }
                 Verdict::Reject => {
                     let user = auth.map(|a| a.user).unwrap_or_default();
                     crate::logw!("session {:x}: logon failure for user {:?}", sid, user);
-                    pc.sessions.remove(&sid);
+                    pc.channels.remove(&sid);
+                    srv.sessions.remove(sid);
                     err_resp(tx, h, status::LOGON_FAILURE, chain);
                 }
             }
         }
         ntlm::Token::Other => {
-            // No NTLMSSP token at all (e.g. pure anonymous).
+            // No NTLMSSP token at all (e.g. pure anonymous): guest if allowed.
             if srv.allow_guest {
-                let sid = if h.session_id != 0 {
-                    h.session_id
-                } else {
-                    let s = pc.next_session_id;
-                    pc.next_session_id += 1;
-                    s
-                };
-                let sess = pc.sessions.entry(sid).or_default();
-                sess.established = true;
-                sess.guest = true;
+                let (sid, sref) = srv.sessions.create();
+                {
+                    let mut s = sref.lock().unwrap();
+                    s.established = true;
+                    s.guest = true;
+                    s.channels = 1;
+                }
+                pc.channels.insert(
+                    sid,
+                    crate::smb2::ChannelState {
+                        established: true,
+                        preauth: pc.preauth_neg,
+                        ..Default::default()
+                    },
+                );
                 chain.session_id = sid;
                 ss_resp(tx, h, status::SUCCESS, chain.related, sid, SESSION_FLAG_IS_GUEST, &[]);
             } else {
@@ -510,7 +612,7 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
 
 // ------------------------------------------------------------- TREE_CONNECT
 
-fn tree_connect(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+fn tree_connect(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let path = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);
@@ -540,7 +642,6 @@ fn tree_connect(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &m
             }
         }
     };
-    let sess = pc.sessions.get_mut(&chain.session_id).expect("session checked");
     sess.next_tree_id += 1;
     let tree_id = sess.next_tree_id;
     sess.trees.insert(tree_id, crate::smb2::Tree { share_idx, ipc });
@@ -588,7 +689,7 @@ fn parse_create(msg: &[u8]) -> Option<CreateReq> {
 
 #[allow(clippy::too_many_arguments)]
 fn create(
-    pc: &mut ProtoConn,
+    sess: &mut SessionInner,
     h: &ReqHdr,
     msg: &[u8],
     chain: &mut Chain,
@@ -714,7 +815,7 @@ fn create(
     };
     let leaf = rel.rsplit('\\').next().unwrap_or("").to_string();
     let attrs = vfs::finalize_attrs(meta.attrs, &leaf);
-    let fid = pc.handles.insert(OpenFile {
+    let fid = sess.handles.insert(OpenFile {
         fd,
         path,
         rel,
@@ -747,7 +848,7 @@ fn create(
 
 // -------------------------------------------------------------------- CLOSE
 
-fn close(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+fn close(pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let mut r = Rdr::new(body);
         if r.u16()? != 24 {
@@ -761,7 +862,7 @@ fn close(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mu
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = pc.handles.remove(fid) else {
+    let Some(of) = sess.handles.remove(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -813,7 +914,7 @@ fn close(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mu
     }
 }
 
-fn flush(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+fn flush(sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let mut r = Rdr::new(body);
         if r.u16()? != 24 {
@@ -826,7 +927,7 @@ fn flush(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mu
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = pc.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -840,6 +941,7 @@ fn flush(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mu
 
 fn read(
     pc: &mut ProtoConn,
+    sess: &mut SessionInner,
     h: &ReqHdr,
     body: &[u8],
     chain: &mut Chain,
@@ -863,13 +965,13 @@ fn read(
     };
     let max_read = pc.max_read;
     // A signed response covers the payload, which rules out splicing —
-    // signed sessions always take the buffered path.
+    // signed channels always take the buffered path. Signing is per-channel.
     let must_sign = pc
-        .sessions
+        .channels
         .get(&chain.session_id)
-        .map(|s| s.sign.is_some() && (s.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
+        .map(|c| c.sign.is_some() && (c.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
         .unwrap_or(false);
-    let Some(of) = pc.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return None;
     };
@@ -879,24 +981,31 @@ fn read(
     }
     let length = length.min(max_read);
 
-    // Standalone large reads take the zero-copy splice path.
+    // Standalone large reads take the zero-copy splice path. The plan owns a
+    // dup of the fd so a concurrent CLOSE on another channel can't pull the
+    // file out from under the in-flight splice; the reactor closes it after.
     if chain.single && length >= ZC_MIN_READ && !must_sign {
-        return Some(ZcReadPlan {
-            fd: of.fd,
-            offset,
-            length,
-            min_count,
-            msg_id: h.msg_id,
-            credit_charge: h.credit_charge,
-            credits: h.credits,
-            tree_id: chain.tree_id,
-            session_id: chain.session_id,
-        });
+        let dup = unsafe { libc::dup(of.fd) };
+        if dup >= 0 {
+            return Some(ZcReadPlan {
+                fd: dup,
+                offset,
+                length,
+                min_count,
+                msg_id: h.msg_id,
+                credit_charge: h.credit_charge,
+                credits: h.credits,
+                tree_id: chain.tree_id,
+                session_id: chain.session_id,
+            });
+        }
+        // dup failed: fall through to the buffered path.
     }
 
-    // Buffered fallback (small reads and compounds).
+    // Buffered fallback (small reads, compounds, signed).
+    let fd = of.fd;
     let mut buf = vec![0u8; length as usize];
-    match vfs::pread(of.fd, &mut buf, offset) {
+    match vfs::pread(fd, &mut buf, offset) {
         Ok(0) if length > 0 => err_resp(tx, h, status::END_OF_FILE, chain),
         Ok(n) if (n as u32) < min_count => err_resp(tx, h, status::END_OF_FILE, chain),
         Ok(n) => {
@@ -916,7 +1025,7 @@ fn read(
 
 // -------------------------------------------------------------------- WRITE
 
-fn write(pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>, share: &ShareCfg) {
+fn write(sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>, share: &ShareCfg) {
     let parsed = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);
@@ -938,7 +1047,7 @@ fn write(pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
     }
-    let Some(of) = pc.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -966,7 +1075,7 @@ const QD_RESTART_SCANS: u8 = 0x01;
 const QD_RETURN_SINGLE: u8 = 0x02;
 const QD_REOPEN: u8 = 0x10;
 
-fn query_directory(pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+fn query_directory(sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);
@@ -991,7 +1100,7 @@ fn query_directory(pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = pc.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -1123,7 +1232,7 @@ fn put_dir_entry(b: &mut Vec<u8>, class: u8, e: &vfs::DirEnt) -> bool {
 const INFO_FILE: u8 = 1;
 const INFO_FILESYSTEM: u8 = 2;
 
-fn query_info(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+fn query_info(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let mut r = Rdr::new(body);
         if r.u16()? != 41 {
@@ -1140,7 +1249,7 @@ fn query_info(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mu
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = pc.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -1296,7 +1405,7 @@ fn fs_info(srv: &Srv, of: &vfs::OpenFile, class: u8, b: &mut Vec<u8>) -> u32 {
 
 // ----------------------------------------------------------------- SET_INFO
 
-fn set_info(pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>, share: &ShareCfg) {
+fn set_info(sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>, share: &ShareCfg) {
     let parsed = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);
@@ -1325,7 +1434,7 @@ fn set_info(pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &
         return;
     }
     let share_root = share.path.clone();
-    let Some(of) = pc.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -1438,7 +1547,7 @@ const LOCKFLAG_SHARED: u32 = 0x1;
 const LOCKFLAG_EXCLUSIVE: u32 = 0x2;
 const LOCKFLAG_UNLOCK: u32 = 0x4;
 
-fn lock(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+fn lock(sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let mut r = Rdr::new(body);
         if r.u16()? != 48 {
@@ -1464,7 +1573,7 @@ fn lock(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = pc.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -1519,7 +1628,7 @@ fn lock(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut
 
 // ------------------------------------------------------------ CHANGE_NOTIFY
 
-fn change_notify(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+fn change_notify(pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let mut r = Rdr::new(body);
         if r.u16()? != 32 {
@@ -1536,11 +1645,11 @@ fn change_notify(pc: &mut ProtoConn, h: &ReqHdr, body: &[u8], chain: &mut Chain,
         return;
     };
     let want_sign = pc
-        .sessions
+        .channels
         .get(&chain.session_id)
-        .map(|s| s.sign.is_some() && (s.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
+        .map(|c| c.sign.is_some() && (c.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
         .unwrap_or(false);
-    let Some(of) = pc.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };

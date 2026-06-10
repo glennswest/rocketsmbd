@@ -8,6 +8,7 @@ mod config;
 mod crypto;
 mod log;
 mod net;
+mod session;
 mod ntlm;
 mod smb2;
 mod status;
@@ -85,6 +86,7 @@ fn run(cfg: Config) {
         users,
         allow_guest,
         interfaces,
+        sessions: session::Registry::default(),
     });
 
     let workers = if srv.cfg.workers > 0 {

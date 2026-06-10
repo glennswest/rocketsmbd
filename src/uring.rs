@@ -145,6 +145,10 @@ impl Drop for Conn {
         if let Some(ifd) = self.inotify_fd {
             unsafe { libc::close(ifd) };
         }
+        // A zero-copy read in flight owns a dup'd file fd.
+        if let Some(zc) = self.zc.take() {
+            unsafe { libc::close(zc.plan.fd) };
+        }
     }
 }
 
@@ -776,6 +780,8 @@ fn start_zc(ring: &mut IoUring, w: &mut Worker, idx: usize, plan: ZcReadPlan) {
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
             let mut tx = std::mem::take(&mut c.tx);
             smb2::build_read_err(&plan, status::INSUFFICIENT_RESOURCES, &mut tx);
+            // The plan owns a dup of the file fd; release it on this error path.
+            unsafe { libc::close(plan.fd) };
             c.tx = tx;
             c.tx_off = 0;
             c.txm = Tx::Send;
@@ -867,6 +873,8 @@ fn zc_fail(ring: &mut IoUring, w: &mut Worker, idx: usize, st: u32) {
     }
     let mut tx = std::mem::take(&mut c.tx);
     smb2::build_read_err(&zc.plan, st, &mut tx);
+    // Release the plan's dup'd file fd.
+    unsafe { libc::close(zc.plan.fd) };
     c.tx = tx;
     c.tx_off = 0;
     c.txm = Tx::Send;
@@ -901,7 +909,10 @@ fn on_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
         submit_splice_out(ring, w, idx);
         return;
     }
-    c.zc = None;
+    // Zero-copy read done: release the plan's dup'd file fd.
+    if let Some(zc) = c.zc.take() {
+        unsafe { libc::close(zc.plan.fd) };
+    }
     c.tx.clear();
     c.tx_off = 0;
     c.txm = Tx::Idle;

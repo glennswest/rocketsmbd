@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 use crate::config::Srv;
 use crate::crypto::{self, SignAlg};
+use crate::session::SessionInner;
 use crate::status;
-use crate::vfs::HandleTable;
 use crate::wire::{Put, Rdr};
 
 pub const CMD_NEGOTIATE: u16 = 0;
@@ -128,28 +128,28 @@ pub struct SignCtx {
 pub struct PendingAuth {
     pub challenge: [u8; 8],
     pub spnego: bool,
+    /// Set when this is a multichannel session-binding handshake.
+    pub binding: bool,
 }
 
+/// Per-connection, per-session channel state. One `ProtoConn` holds a
+/// `ChannelState` for every session it is a channel of. Signing and preauth
+/// are connection-local (no registry lock on the sign/verify hot path); the
+/// shared session state (trees, handles, key) lives in the registry.
 #[derive(Debug)]
-pub struct Session {
-    pub trees: HashMap<u32, Tree>,
-    pub next_tree_id: u32,
+pub struct ChannelState {
     pub established: bool,
-    pub guest: bool,
     pub signing_required: bool,
     pub sign: Option<SignCtx>,
     pub pending: Option<PendingAuth>,
-    /// SMB 3.1.1 per-session preauth integrity hash.
+    /// This connection's running preauth hash for this session's setup.
     pub preauth: [u8; 64],
 }
 
-impl Default for Session {
+impl Default for ChannelState {
     fn default() -> Self {
         Self {
-            trees: HashMap::new(),
-            next_tree_id: 0,
             established: false,
-            guest: false,
             signing_required: false,
             sign: None,
             pending: None,
@@ -189,13 +189,12 @@ pub struct AsyncMeta {
     pub want_sign: bool,
 }
 
-/// Per-connection protocol state. OS-independent and unit-testable; all
-/// io_uring specifics live in the reactor.
+/// Per-connection protocol state. Sessions and their handles live in the
+/// shared `Srv::sessions` registry (so channels on other cores share them);
+/// `channels` holds this connection's per-session signing/preauth state.
 pub struct ProtoConn {
     pub dialect: u16,
-    pub sessions: HashMap<u64, Session>,
-    pub handles: HandleTable,
-    pub next_session_id: u64,
+    pub channels: HashMap<u64, ChannelState>,
     pub max_read: u32,
     /// SMB 3.1.1 connection preauth hash (negotiate exchange).
     pub preauth_neg: [u8; 64],
@@ -211,12 +210,10 @@ pub struct ProtoConn {
 }
 
 impl ProtoConn {
-    pub fn new(srv: &Srv, conn_seed: u64) -> Self {
+    pub fn new(srv: &Srv, _conn_seed: u64) -> Self {
         Self {
             dialect: 0,
-            sessions: HashMap::new(),
-            handles: HandleTable::default(),
-            next_session_id: (conn_seed << 32) | 1,
+            channels: HashMap::new(),
             max_read: srv.max_read,
             preauth_neg: [0; 64],
             credits_out: 0,
@@ -445,7 +442,7 @@ pub fn build_notify_final(
 
 fn finalize_async(pc: &ProtoConn, meta: &AsyncMeta, tx: &mut [u8], start: usize) {
     if meta.want_sign {
-        if let Some(sc) = pc.sessions.get(&meta.session_id).and_then(|s| s.sign.clone()) {
+        if let Some(sc) = pc.channels.get(&meta.session_id).and_then(|c| c.sign.clone()) {
             let end = tx.len();
             sign_in_place(tx, start, end, &sc);
         }
@@ -557,10 +554,10 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
     for i in 0..recs.len() {
         let end = recs.get(i + 1).map(|r| r.start).unwrap_or(tx.len());
         let rec = &recs[i];
-        let Some(sess) = pc.sessions.get(&rec.sess_id) else {
+        let Some(ch) = pc.channels.get(&rec.sess_id) else {
             continue;
         };
-        if let Some(sc) = sess.sign.clone() {
+        if let Some(sc) = ch.sign.clone() {
             sign_in_place(tx, rec.start, end, &sc);
         }
     }
@@ -582,8 +579,8 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
                 CMD_SESSION_SETUP => {
                     let st = u32::from_le_bytes(tx[rec.start + 8..rec.start + 12].try_into().unwrap());
                     if st == status::MORE_PROCESSING_REQUIRED {
-                        if let Some(sess) = pc.sessions.get_mut(&rec.sess_id) {
-                            sess.preauth = crypto::sha512(&[&sess.preauth, &tx[rec.start..end]]);
+                        if let Some(ch) = pc.channels.get_mut(&rec.sess_id) {
+                            ch.preauth = crypto::sha512(&[&ch.preauth, &tx[rec.start..end]]);
                         }
                     }
                 }
@@ -629,6 +626,7 @@ mod tests {
             users,
             allow_guest,
             interfaces: vec![],
+            sessions: crate::session::Registry::default(),
         }
     }
 
@@ -1070,11 +1068,11 @@ mod tests {
         let r = roundtrip(&srv, &mut pc, f);
         assert_eq!(r.status, status::SUCCESS);
         // Final session setup response on a signing-required session must
-        // itself be signed.
-        let sess_obj = pc.sessions.get(&sess).unwrap();
-        assert!(sess_obj.sign.is_some());
-        assert!(sess_obj.signing_required);
-        assert!(!sess_obj.guest);
+        // itself be signed. Signing is per-channel; guest is session-wide.
+        let ch = pc.channels.get(&sess).unwrap();
+        assert!(ch.sign.is_some());
+        assert!(ch.signing_required);
+        assert!(!srv.sessions.get(sess).unwrap().lock().unwrap().guest);
 
         // Unsigned TREE_CONNECT on a signing-required session → rejected.
         let path16 = utf16le("\\\\srv\\t");
@@ -1089,7 +1087,7 @@ mod tests {
 
         // Properly signed TREE_CONNECT must succeed, and the response must
         // verify under the same key.
-        let sc = pc.sessions.get(&sess).unwrap().sign.clone().unwrap();
+        let sc = pc.channels.get(&sess).unwrap().sign.clone().unwrap();
         let mut f = req_hdr(CMD_TREE_CONNECT, 6, 0, sess);
         f.p16(9);
         f.p16(0);
@@ -1256,7 +1254,7 @@ mod tests {
         assert_eq!(st, status::SUCCESS, "auth should succeed");
 
         // The server's stored signing key must match the independent one.
-        let server_sc = pc.sessions.get(&sess).unwrap().sign.clone().unwrap();
+        let server_sc = pc.channels.get(&sess).unwrap().sign.clone().unwrap();
         assert_eq!(server_sc.key, expect_sc.key, "3.1.1 signing key mismatch");
 
         // And the final SS response must verify under the independent key.

@@ -162,6 +162,8 @@ pub struct Srv {
     pub allow_guest: bool,
     /// Network interfaces reported for SMB3 multichannel.
     pub interfaces: Vec<crate::net::Iface>,
+    /// Cross-connection session table (multichannel).
+    pub sessions: crate::session::Registry,
 }
 
 pub fn urandom(buf: &mut [u8]) {
