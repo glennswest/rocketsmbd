@@ -20,6 +20,43 @@ for usage). Record every run here — newest at the top of each section.
 
 ## Results
 
+### 2026-06-10 — cross-VM, real network (Proxmox)
+
+Dedicated `smbtest` VMs on one Proxmox host (server + client, 8 vCPU each),
+Fedora 43. Server `rocketsmbd` guest multichannel, `advertise_only` the test
+NIC. Client mounts `vers=3.1.1,multichannel,max_channels=8`, client cache
+dropped before each run, distinct 1 GiB files (traffic genuinely on the wire).
+
+**Network matters more than anything here.** Two virtual networks compared:
+
+| | raw TCP (iperf3) | SMB, 8 readers |
+|---|---|---|
+| `vmbr0`: virtio single-queue, MTU 1500 | 9 Gbps (1 or 8 streams) | 7.7 Gbps |
+| `vmbr1`: virtio **multiqueue=8 + MTU 9000** | 80 Gbps (1), 53 (8) | **46.9 Gbps** |
+
+SMB read scaling on the tuned network (jumbo + multiqueue):
+
+| readers (channels filled) | throughput |
+|---|---|
+| 1 | 21.0 Gbps |
+| 2 | 33.6 Gbps |
+| 4 | 43.4 Gbps |
+| 8 | 46.9 Gbps |
+
+Takeaways:
+- The virtual NIC, not the server, is the cross-VM ceiling. Single-queue
+  virtio @1500 caps ~9 Gbps; multiqueue + jumbo takes raw TCP to ~80 Gbps
+  and SMB to ~47 Gbps (≈88% of the 8-stream iperf3 ceiling).
+- 7 extra channels bind over the real network; throughput scales with
+  parallel readers up to the network limit.
+- Loopback (below) shows 169 Gbps when there's no network limit — the
+  architecture isn't the bottleneck. 400/800GbE needs SR-IOV/RDMA hardware.
+
+Test rig (reusable): Proxmox VMs `smbtest-srv` (200, 192.168.8.161 /
+10.99.0.10) and `smbtest-c1` (201, .162 / 10.99.0.11). `net0`→`vmbr0` (mgmt),
+`net1`→`vmbr1` (internal, MTU 9000), both `queues=8`. Server binary at
+`/usr/local/bin/rocketsmbd`, config `/etc/rocketsmbd.toml`, data `/srv/data`.
+
 ### 2026-06-10 — SMB3 multichannel (v0.3.0)
 
 Single client mount, loopback, 8 workers, 1 GiB cached file, `max_channels=4`.
