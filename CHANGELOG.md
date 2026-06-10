@@ -1,7 +1,11 @@
 # Changelog
 
 ## [Unreleased]
-<!-- New unreleased changes go here -->
+
+### 2026-06-10
+- **feat:** `advertise_only` config — restrict SMB3 multichannel interface advertisement to specific IPs (e.g. a dedicated storage NIC).
+- **perf:** Full reads (offset+length ≤ file size) submit splice-in → send-header → splice-out as one io_uring IO_LINK chain, cutting two userspace round-trips (and syscalls/CPU) per read. EOF-region reads keep the sequential, partial-safe path. Integrity verified over the linked path; throughput is network-bound on the test fabric so wire speed is unchanged, but CPU-per-read drops (matters at 400/800GbE).
+- **fix:** Never advertise loopback in FSCTL_QUERY_NETWORK_INTERFACE_INFO (a remote client would try to connect to its own loopback).
 
 ## [v0.3.0] — 2026-06-10
 

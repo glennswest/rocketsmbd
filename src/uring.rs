@@ -94,6 +94,12 @@ struct Zc {
     want: u32,
     got: u32,
     out_left: u32,
+    /// Linked fast path: splice-in → send → splice-out submitted as one
+    /// IO_LINK chain. `chain` counts the original linked CQEs still pending;
+    /// `err` records any failure across the chain.
+    linked: bool,
+    chain: u8,
+    err: bool,
 }
 
 struct Watch {
@@ -728,6 +734,10 @@ fn submit_send(ring: &mut IoUring, w: &mut Worker, idx: usize, msg_flags: i32) {
 }
 
 fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
+    if conn_mut(w, idx).zc.as_ref().is_some_and(|z| z.linked) {
+        on_linked_cqe(ring, w, idx, OP_SEND, res);
+        return;
+    }
     if res == -libc::EINTR {
         let flags = matches!(conn_mut(w, idx).txm, Tx::ZcHdr) as i32 * libc::MSG_MORE;
         submit_send(ring, w, idx, flags);
@@ -794,9 +804,57 @@ fn start_zc(ring: &mut IoUring, w: &mut Worker, idx: usize, plan: ZcReadPlan) {
         c.pipe_cap = if got > 0 { got as u32 } else { 64 * 1024 };
     }
     let want = plan.length.min(c.pipe_cap);
-    c.zc = Some(Zc { plan, want, got: 0, out_left: 0 });
+    // Linked fast path: a full read (no EOF) whose data fits the pipe in one
+    // splice can go out as a single splice-in → send(hdr) → splice-out chain,
+    // eliminating the two userspace round-trips that otherwise bubble the
+    // socket between ops. EOF-possible or oversized reads stay sequential.
+    if plan.linked && plan.length <= c.pipe_cap {
+        let mut tx = std::mem::take(&mut c.tx);
+        smb2::build_read_resp_prefix(&plan, plan.length, &mut tx);
+        c.tx = tx;
+        c.tx_off = 0;
+        let out_left = plan.length;
+        c.zc = Some(Zc { plan, want, got: want, out_left, linked: true, chain: 3, err: false });
+        c.txm = Tx::ZcOut;
+        submit_zc_linked(ring, w, idx);
+        return;
+    }
+    c.zc = Some(Zc { plan, want, got: 0, out_left: 0, linked: false, chain: 0, err: false });
     c.txm = Tx::ZcIn;
     submit_splice_in(ring, w, idx);
+}
+
+/// Submit the whole zero-copy read as one IO_LINK chain:
+/// splice(file→pipe) → send(header, MSG_MORE) → splice(pipe→socket).
+fn submit_zc_linked(ring: &mut IoUring, w: &mut Worker, idx: usize) {
+    let c = conn_mut(w, idx);
+    let zc = c.zc.as_ref().expect("zc in flight");
+    let (pipe_r, pipe_w) = c.pipe.expect("pipe created");
+    let len = zc.want;
+    let splice_in = opcode::Splice::new(
+        types::Fd(zc.plan.fd),
+        zc.plan.offset as i64,
+        types::Fd(pipe_w),
+        -1,
+        len,
+    )
+    .flags(libc::SPLICE_F_MOVE)
+    .build()
+    .flags(squeue::Flags::IO_LINK)
+    .user_data(ud(OP_SPLICE_IN, idx, c.gen));
+    let send = opcode::Send::new(types::Fd(c.fd), c.tx.as_ptr(), c.tx.len() as u32)
+        .flags(libc::MSG_MORE)
+        .build()
+        .flags(squeue::Flags::IO_LINK)
+        .user_data(ud(OP_SEND, idx, c.gen));
+    let splice_out = opcode::Splice::new(types::Fd(pipe_r), -1, types::Fd(c.fd), -1, len)
+        .flags(libc::SPLICE_F_MOVE)
+        .build()
+        .user_data(ud(OP_SPLICE_OUT, idx, c.gen));
+    conn_mut(w, idx).inflight += 3;
+    sq_push(ring, &splice_in);
+    sq_push(ring, &send);
+    sq_push(ring, &splice_out);
 }
 
 fn submit_splice_in(ring: &mut IoUring, w: &mut Worker, idx: usize) {
@@ -816,7 +874,52 @@ fn submit_splice_in(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     sq_push_conn(ring, w, idx, &e);
 }
 
+/// Retire one CQE of a linked zero-copy chain. The three ops complete in
+/// order (splice-in, send, splice-out); we finalize when the last lands.
+fn on_linked_cqe(ring: &mut IoUring, w: &mut Worker, idx: usize, op: u8, res: i32) {
+    {
+        let zc = conn_mut(w, idx).zc.as_mut().expect("zc in flight");
+        zc.chain = zc.chain.saturating_sub(1);
+        if op == OP_SPLICE_OUT && res > 0 {
+            zc.out_left = zc.out_left.saturating_sub(res as u32);
+        }
+        if res < 0 {
+            zc.err = true; // includes -ECANCELED from a broken link
+        }
+        if zc.chain > 0 {
+            return; // wait for the rest of the chain
+        }
+    }
+    let c = conn_mut(w, idx);
+    let zc = c.zc.as_mut().expect("zc in flight");
+    if zc.err {
+        // Rare (e.g. EIO mid-read): drop the connection. Conn::drop releases
+        // the dup'd fd and the pipe once in-flight ops drain.
+        close_conn_ring(ring, w, idx);
+        return;
+    }
+    if zc.out_left > 0 {
+        // Socket took a partial splice-out; the remainder is still in the
+        // pipe. Finish it on the normal (non-linked) splice-out path.
+        zc.linked = false;
+        c.txm = Tx::ZcOut;
+        submit_splice_out(ring, w, idx);
+        return;
+    }
+    let dupfd = zc.plan.fd;
+    c.zc = None;
+    unsafe { libc::close(dupfd) };
+    c.tx.clear();
+    c.tx_off = 0;
+    c.txm = Tx::Idle;
+    drive(ring, w, idx);
+}
+
 fn on_splice_in(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
+    if conn_mut(w, idx).zc.as_ref().is_some_and(|z| z.linked) {
+        on_linked_cqe(ring, w, idx, OP_SPLICE_IN, res);
+        return;
+    }
     if res == -libc::EINTR || res == -libc::EAGAIN {
         submit_splice_in(ring, w, idx);
         return;
@@ -893,6 +996,10 @@ fn submit_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize) {
 }
 
 fn on_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
+    if conn_mut(w, idx).zc.as_ref().is_some_and(|z| z.linked) {
+        on_linked_cqe(ring, w, idx, OP_SPLICE_OUT, res);
+        return;
+    }
     if res == -libc::EINTR || res == -libc::EAGAIN {
         submit_splice_out(ring, w, idx);
         return;

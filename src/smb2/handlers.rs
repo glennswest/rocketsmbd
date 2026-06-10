@@ -1022,6 +1022,12 @@ fn read(
     // Standalone large unsigned reads take the zero-copy splice path; the
     // plan owns the dup and the reactor closes it when the splice finishes.
     if chain.single && length >= ZC_MIN_READ && !must_sign {
+        // A full read (offset+length within the file) can never hit EOF, so
+        // the reactor can submit the whole splice→send→splice as one linked
+        // chain (no userspace round-trips). EOF-region reads stay sequential.
+        let linked = vfs::fstat_meta(dup)
+            .map(|m| offset.saturating_add(length as u64) <= m.size)
+            .unwrap_or(false);
         return Some(ZcReadPlan {
             fd: dup,
             offset,
@@ -1032,6 +1038,7 @@ fn read(
             credits: h.credits,
             tree_id: chain.tree_id,
             session_id: chain.session_id,
+            linked,
         });
     }
 

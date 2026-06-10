@@ -20,6 +20,25 @@ for usage). Record every run here — newest at the top of each section.
 
 ## Results
 
+### 2026-06-10 — read-path findings (linked zero-copy chain)
+
+Investigated single-channel read headroom: one SMB channel did ~21 Gbps while
+raw TCP (iperf3) did ~80 Gbps single-stream on the same jumbo path. Hypothesis
+was server-side bubbles between the `splice-in → send-header → splice-out`
+round-trips, so the full-read fast path now submits all three as **one
+IO_LINK chain**.
+
+Result: throughput unchanged (20.6 vs 21.0 Gbps single channel; 46 vs 47 at 8
+readers), which is itself the finding — the single-channel cap is **not**
+server round-trips (eliminating them changed nothing) but the SMB
+request/response pipelining depth and the network. iperf streams
+continuously; SMB is request/response with a bounded outstanding-read window
+per channel. Takeaway: per-channel reads are network/protocol-bound, not
+server-bound; aggregate scales via channels (multichannel) and faster
+fabric. The linked chain is retained anyway — it cuts syscalls/CPU per read
+(one submission vs three), which is the scarce resource at 400/800GbE.
+Integrity verified (md5 match, server↔client, over the linked path).
+
 ### 2026-06-10 — cross-VM, real network (Proxmox)
 
 Dedicated `smbtest` VMs on one Proxmox host (server + client, 8 vCPU each),

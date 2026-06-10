@@ -238,6 +238,10 @@ pub struct ZcReadPlan {
     pub credits: u16,
     pub tree_id: u32,
     pub session_id: u64,
+    /// True when offset+length ≤ file size (a full read, no EOF possible),
+    /// so the reactor can submit splice-in → send → splice-out as one linked
+    /// io_uring chain instead of three round-trips.
+    pub linked: bool,
 }
 
 pub enum FrameAction {
