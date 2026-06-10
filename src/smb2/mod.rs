@@ -498,10 +498,7 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
     }
     let mut recs: Vec<RespRec> = Vec::new();
 
-    loop {
-        let Some(h) = parse_hdr(&frame[off..]) else {
-            break;
-        };
+    while let Some(h) = parse_hdr(&frame[off..]) {
         let msg_end = if h.next > 0 {
             (off + h.next as usize).min(frame.len())
         } else {
