@@ -23,7 +23,7 @@
 - **fix:** NTLMSSP CHALLENGE advertises the SIGN flag, required by cifs `sec=ntlmsspi`.
 
 ### Changed
-- **perf:** Signed sessions use the buffered read path (a signature covers the payload, precluding zero-copy splice). Unsigned/guest reads stay zero-copy at 5.7 GB/s; signed reads ~527 MB/s (still ~2× samba unsigned). See docs/BENCHMARKS.md.
+- **perf:** Signed sessions use the buffered read path (a signature covers the payload, precluding zero-copy splice). Unsigned/guest: read 5.7 GB/s, write 1.0 GB/s. Signed: read 527 MB/s, write 474 MB/s (still ~2× samba unsigned read). See docs/BENCHMARKS.md.
 
 ### Verified
 - End-to-end on Linux (kernel 6.17) against cifs.ko and smbclient: guest + authenticated mounts; wrong-password rejection; signed (`sec=ntlmsspi`) read/write; SMB 3.1.1; `require_signing` + guest-denied policy; byte-range lock conflict/grant; directory change notification delivery; clean teardown across disconnects.

@@ -30,7 +30,7 @@ the socket — so signed reads are slower but still ~2× samba's unsigned read.
 | Test | rocketsmbd unsigned | rocketsmbd signed | samba (unsigned) |
 |---|---|---|---|
 | 1 GiB sequential read | **5.7 GB/s** | 527 MB/s | 1.4 GB/s |
-| 512 MiB sequential write | **1.0 GB/s** | ~0.6 GB/s | 642 MB/s |
+| 512 MiB sequential write | **1.0 GB/s** | 474 MB/s | 642 MB/s |
 
 Signing cost is the AES-CMAC over each message plus losing the zero-copy
 read path. Restoring zero-copy for signed reads (sign the header with a
