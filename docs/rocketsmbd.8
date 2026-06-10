@@ -1,0 +1,88 @@
+.TH ROCKETSMBD 8 "2026-06-10" "rocketsmbd" "System Administration"
+.SH NAME
+rocketsmbd \- io_uring SMB2/SMB3 file server (zero-copy, multichannel)
+.SH SYNOPSIS
+.B rocketsmbd
+[\fB\-\-config\fR \fIpath\fR]
+[\fB\-\-check\fR]
+[\fB\-\-version\fR]
+.SH DESCRIPTION
+.B rocketsmbd
+is a from-scratch SMB2/3 file server built on Linux io_uring. Accept, receive,
+send, and file I/O all flow through one io_uring per worker thread; file reads
+are served zero-copy from page cache to socket via linked
+.BR splice (2)
+operations. It speaks SMB 2.0.2 through 3.1.1 with NTLMv2 authentication,
+SMB2/3 signing, and SMB3 multichannel.
+.SH OPTIONS
+.TP
+.BR \-\-config " " \fIpath\fR " (or " \-c ")"
+Path to the TOML configuration file. Default: \fIrocketsmbd.toml\fR.
+.TP
+.B \-\-check
+Validate the configuration and exit.
+.TP
+.BR \-\-version " (or " \-V ")"
+Print version and exit.
+.SH CONFIGURATION
+Configuration is TOML, by convention \fI/etc/rocketsmbd.toml\fR.
+.TP
+.B listen
+Bind address, e.g. \f"0.0.0.0:445\fR". Binding 445 needs CAP_NET_BIND_SERVICE.
+.TP
+.B workers
+Worker threads (one io_uring + SO_REUSEPORT listener each). 0 = one per core.
+.TP
+.B server_name
+Advertised server name.
+.TP
+.B log_level
+0 = warn, 1 = info, 2 = debug.
+.TP
+.B allow_guest
+Allow unauthenticated guest sessions. Defaults true only when no users exist.
+.TP
+.B require_signing
+Reject unsigned requests on authenticated sessions.
+.TP
+.B multichannel
+Advertise SMB3 multichannel and accept session binding.
+.TP
+.B advertise_only
+List of IPs to advertise for multichannel (e.g. a storage NIC). Empty = all
+non-loopback interfaces.
+.PP
+Shares are \fB[[share]]\fR tables with \fBname\fR, \fBpath\fR, and optional
+\fBread_only\fR. Users are \fB[[user]]\fR tables with \fBname\fR and either
+\fBpassword\fR or a 32-hex-char \fBnt_hash\fR.
+.SH EXAMPLE
+.nf
+listen = "0.0.0.0:445"
+workers = 0
+multichannel = true
+
+[[share]]
+name = "data"
+path = "/srv/data"
+
+[[user]]
+name = "alice"
+password = "secret"
+.fi
+.PP
+Mount from a client:
+.PP
+.nf
+mount -t cifs //server/data /mnt -o username=alice,password=secret,vers=3.1.1
+.fi
+.SH SECURITY
+Pre-1.0: no SMB3 encryption yet; trusted-LAN use only. Do not expose port 445
+to untrusted networks. See SECURITY.md.
+.SH FILES
+.TP
+.I /etc/rocketsmbd.toml
+Default configuration file.
+.SH SEE ALSO
+.BR mount.cifs (8)
+.SH AUTHORS
+https://github.com/glennswest/rocketsmbd

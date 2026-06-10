@@ -20,6 +20,18 @@ for usage). Record every run here — newest at the top of each section.
 
 ## Results
 
+### 2026-06-10 — Windows Server 2025 client interop
+
+A real Windows Server 2025 SMB client (`smbtest-win`) against rocketsmbd:
+
+- Negotiated **SMB 3.1.1 with signing** (`Get-SmbConnection`: Dialect 3.1.1,
+  Signed=True), NTLMv2 auth — listed the share, read and wrote files. ✔
+- `.NET FileStream.OpenRead` initially failed (FileStreamInformation +
+  security-descriptor QUERY_INFO unsupported); **fixed in v0.4.0**, now streams.
+- Read throughput ~1.8–2.1 Gbps — bound by the `vmbr0` path (MTU 1500,
+  single-queue virtio), not the server (same NIC ceiling as the iperf
+  finding). Scripts: `bench/win-interop.ps1`, `bench/win-read.ps1`.
+
 ### 2026-06-10 — read-path findings (linked zero-copy chain)
 
 Investigated single-channel read headroom: one SMB channel did ~21 Gbps while

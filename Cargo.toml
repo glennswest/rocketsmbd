@@ -1,10 +1,15 @@
 [package]
 name = "rocketsmbd"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "smbd replacement: io_uring end-to-end, zero-copy file-to-socket"
+description = "smbd replacement: io_uring end-to-end, zero-copy file-to-socket, SMB3 multichannel"
 license = "MIT"
 repository = "https://github.com/glennswest/rocketsmbd"
+homepage = "https://github.com/glennswest/rocketsmbd"
+documentation = "https://github.com/glennswest/rocketsmbd/tree/main/docs"
+readme = "README.md"
+keywords = ["smb", "smb3", "io_uring", "fileserver", "samba"]
+categories = ["network-programming", "filesystem"]
 
 [dependencies]
 libc = "0.2"
@@ -25,3 +30,41 @@ io-uring = "0.7"
 lto = true
 codegen-units = 1
 strip = true
+
+# ---------------------------------------------------------------- packaging
+
+[package.metadata.deb]
+maintainer = "Glenn West <glennswest@neuralcloudcomputing.com>"
+section = "net"
+priority = "optional"
+extended-description = """
+rocketsmbd is a from-scratch SMB2/SMB3 file server built on Linux io_uring:
+accept, recv, send, and file I/O flow through one ring per worker, and file
+reads are served zero-copy from page cache to socket via splice. Supports
+NTLMv2 auth, SMB2/3 signing, SMB 3.1.1, and SMB3 multichannel. Pre-1.0,
+trusted-LAN use (no encryption yet)."""
+depends = "$auto"
+conf-files = ["/etc/rocketsmbd.toml"]
+assets = [
+    ["target/release/rocketsmbd", "usr/bin/", "755"],
+    ["rocketsmbd.toml.example", "etc/rocketsmbd.toml", "644"],
+    ["packaging/rocketsmbd.service", "lib/systemd/system/", "644"],
+    ["docs/rocketsmbd.8", "usr/share/man/man8/", "644"],
+    ["README.md", "usr/share/doc/rocketsmbd/", "644"],
+    ["SECURITY.md", "usr/share/doc/rocketsmbd/", "644"],
+]
+systemd-units = { unit-name = "rocketsmbd", enable = false, start = false }
+
+[package.metadata.generate-rpm]
+summary = "io_uring SMB2/SMB3 file server (zero-copy, multichannel)"
+assets = [
+    { source = "target/release/rocketsmbd", dest = "/usr/bin/rocketsmbd", mode = "755" },
+    { source = "rocketsmbd.toml.example", dest = "/etc/rocketsmbd.toml", mode = "644", config = true },
+    { source = "packaging/rocketsmbd.service", dest = "/usr/lib/systemd/system/rocketsmbd.service", mode = "644" },
+    { source = "docs/rocketsmbd.8", dest = "/usr/share/man/man8/rocketsmbd.8", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/rocketsmbd/README.md", mode = "644", doc = true },
+    { source = "SECURITY.md", dest = "/usr/share/doc/rocketsmbd/SECURITY.md", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+# runtime: static musl binary, no shared-lib deps

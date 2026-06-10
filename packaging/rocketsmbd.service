@@ -1,0 +1,26 @@
+[Unit]
+Description=rocketsmbd — io_uring SMB3 file server
+Documentation=man:rocketsmbd(8) https://github.com/glennswest/rocketsmbd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rocketsmbd --config /etc/rocketsmbd.toml
+Restart=on-failure
+RestartSec=2
+# Bind port 445 without running as full root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+NoNewPrivileges=true
+# Hardening that still allows serving arbitrary share paths.
+ProtectSystem=full
+ProtectHome=false
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

@@ -1272,6 +1272,7 @@ fn put_dir_entry(b: &mut Vec<u8>, class: u8, e: &vfs::DirEnt) -> bool {
 
 const INFO_FILE: u8 = 1;
 const INFO_FILESYSTEM: u8 = 2;
+const INFO_SECURITY: u8 = 3;
 
 fn query_info(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
@@ -1299,9 +1300,14 @@ fn query_info(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain
     let st = match info_type {
         INFO_FILE => file_info(of, class, &mut data),
         INFO_FILESYSTEM => fs_info(srv, of, class, &mut data),
-        _ => status::ACCESS_DENIED, // SECURITY/QUOTA unsupported in phase 1
+        INFO_SECURITY => {
+            security_descriptor(&mut data);
+            status::SUCCESS
+        }
+        _ => status::NOT_SUPPORTED,
     };
     if st != status::SUCCESS {
+        crate::logd!("QUERY_INFO unsupported: info_type={} class={} -> {:#x}", info_type, class, st);
         err_resp(tx, h, st, chain);
         return;
     }
@@ -1386,9 +1392,66 @@ fn file_info(of: &vfs::OpenFile, class: u8, b: &mut Vec<u8>) -> u32 {
             b.p32(attrs);
             b.p32(0);
         }
+        22 => {
+            // FileStreamInformation: a regular file has one data stream
+            // (the default ::$DATA); a directory has none. .NET's FileStream
+            // queries this on open, so returning NOT_SUPPORTED broke it.
+            if !m.is_dir {
+                let name = utf16le("::$DATA");
+                b.p32(0); // NextEntryOffset (single entry)
+                b.p32(name.len() as u32); // StreamNameLength
+                b.p64(m.size); // StreamSize
+                b.p64(m.alloc); // StreamAllocationSize
+                b.pbytes(&name);
+            }
+            // directory → zero entries (empty buffer, SUCCESS)
+        }
         _ => return status::NOT_SUPPORTED,
     }
     status::SUCCESS
+}
+
+/// Minimal self-relative SECURITY_DESCRIPTOR: owner/group = BUILTIN
+/// Administrators (S-1-5-32-544), a DACL granting Everyone (S-1-1-0) full
+/// access. We don't enforce ACLs, but Windows/.NET query the descriptor on
+/// open and choke on an error reply, so we synthesize a permissive one.
+fn security_descriptor(b: &mut Vec<u8>) {
+    // SID S-1-5-32-544 (Administrators), 16 bytes.
+    let admins: [u8; 16] = [
+        1, 2, 0, 0, 0, 0, 0, 5, // rev=1, subauth=2, idauth=5
+        32, 0, 0, 0, // 0x20
+        32, 2, 0, 0, // 0x220 = 544
+    ];
+    // SID S-1-1-0 (Everyone), 12 bytes.
+    let everyone: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+
+    // Layout: header(20) | DACL(28) | owner(16) | group(16) = 80 bytes.
+    let off_dacl = 20u32;
+    let off_owner = 48u32;
+    let off_group = 64u32;
+    // Header (self-relative).
+    b.p8(1); // Revision
+    b.p8(0); // Sbz1
+    b.p16(0x8004); // Control: SE_DACL_PRESENT | SE_SELF_RELATIVE
+    b.p32(off_owner);
+    b.p32(off_group);
+    b.p32(0); // OffsetSacl
+    b.p32(off_dacl);
+    // DACL: ACL header(8) + one ACCESS_ALLOWED_ACE(8 + 12 SID = 20) = 28.
+    b.p8(2); // AclRevision
+    b.p8(0); // Sbz1
+    b.p16(28); // AclSize
+    b.p16(1); // AceCount
+    b.p16(0); // Sbz2
+    // ACE
+    b.p8(0); // ACCESS_ALLOWED_ACE_TYPE
+    b.p8(0); // AceFlags
+    b.p16(20); // AceSize (8 + 12)
+    b.p32(0x001F_01FF); // FILE_ALL_ACCESS
+    b.pbytes(&everyone);
+    // Owner + Group SIDs
+    b.pbytes(&admins);
+    b.pbytes(&admins);
 }
 
 fn fs_info(srv: &Srv, of: &vfs::OpenFile, class: u8, b: &mut Vec<u8>) -> u32 {

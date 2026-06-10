@@ -1,19 +1,34 @@
 # rocketsmbd
 
+[![CI](https://github.com/glennswest/rocketsmbd/actions/workflows/ci.yml/badge.svg)](https://github.com/glennswest/rocketsmbd/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A from-scratch SMB2/SMB3 file server (smbd replacement) written in Rust, built
 on **io_uring end-to-end** — accept, receive, send, and file I/O all flow
 through a single ring per worker. File reads are served **zero-copy** from page
 cache to socket using linked `splice` operations (file → pipe → socket); file
-data never enters userspace.
+data never enters userspace. A single client mount stripes across cores via
+**SMB3 multichannel**.
 
 ## Status
 
-Pre-release (`0.2.x`). Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
-authentication, SMB2/3 signing, and SMB 3.1.1 preauth integrity**. Supports a
-user database, optional guest access, byte-range locks, and directory change
-notification. Not yet implemented: SMB3 encryption and oplocks/leases —
-phase 3. **No encryption yet, so treat as trusted-LAN only.** See `CLAUDE.md`
-for the full roadmap.
+Pre-release (`0.4.x`). Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
+authentication, SMB2/3 signing, SMB 3.1.1 preauth integrity, and SMB3
+multichannel**. Supports a user database, optional guest access, byte-range
+locks, and directory change notification. Not yet implemented: SMB3 encryption
+and oplocks/leases. **No encryption yet, so treat as trusted-LAN only** —
+see [SECURITY.md](SECURITY.md). Roadmap: [ROADMAP.md](ROADMAP.md).
+
+## Performance (vs Samba, same host)
+
+| | rocketsmbd | Samba |
+|---|---|---|
+| 1 GiB sequential read | **5.7–6.2 GB/s** | 1.4 GB/s |
+| 512 MiB sequential write | **1.0 GB/s** | 0.64 GB/s |
+| single mount, 4 channels (multichannel) | **21 GB/s (169 Gbps), loopback** | n/a |
+
+Full method + cross-VM (real-network) numbers: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Tuning for 100GbE+: [docs/TUNING.md](docs/TUNING.md).
 
 ## Requirements
 

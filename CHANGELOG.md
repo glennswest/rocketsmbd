@@ -1,11 +1,25 @@
 # Changelog
 
 ## [Unreleased]
+<!-- New unreleased changes go here -->
 
-### 2026-06-10
+## [v0.4.0] — 2026-06-10
+
+### Added
 - **feat:** `advertise_only` config — restrict SMB3 multichannel interface advertisement to specific IPs (e.g. a dedicated storage NIC).
-- **perf:** Full reads (offset+length ≤ file size) submit splice-in → send-header → splice-out as one io_uring IO_LINK chain, cutting two userspace round-trips (and syscalls/CPU) per read. EOF-region reads keep the sequential, partial-safe path. Integrity verified over the linked path; throughput is network-bound on the test fabric so wire speed is unchanged, but CPU-per-read drops (matters at 400/800GbE).
+- **feat:** Distro packaging — `.deb` + `.rpm` via `cargo-deb`/`cargo-generate-rpm`, systemd unit (`packaging/rocketsmbd.service`), man page (`docs/rocketsmbd.8`), and a tag-triggered GitHub Release workflow that builds x86_64 + aarch64 musl binaries and packages.
+- **feat:** GitHub Actions CI (build + test + clippy on x86_64/aarch64 musl).
+- **docs:** SECURITY.md, CONTRIBUTING.md, ROADMAP.md, LICENSE (MIT), README badges + quickstart + benchmark table.
+
+### Changed
+- **perf:** Full reads (offset+length ≤ file size) submit splice-in → send-header → splice-out as one io_uring IO_LINK chain, cutting two userspace round-trips (and syscalls/CPU) per read. EOF-region reads keep the sequential, partial-safe path. Integrity verified; throughput network-bound on the test fabric (unchanged wire speed) but CPU-per-read drops — matters at 400/800GbE.
+
+### Fixed
 - **fix:** Never advertise loopback in FSCTL_QUERY_NETWORK_INTERFACE_INFO (a remote client would try to connect to its own loopback).
+- **fix:** Windows `.NET FileStream` interop (#25) — QUERY_INFO **FileStreamInformation** (class 22) now returns the default `::$DATA` stream, and **security-descriptor** queries (info_type 3) return a minimal permissive descriptor instead of NOT_SUPPORTED/ACCESS_DENIED. Verified against a Windows Server 2025 client (SMB 3.1.1 + signing, read+write).
+
+### Tested
+- **test:** Windows Server 2025 client interop verified (negotiate 3.1.1, NTLMv2, signing, read+write); cross-VM jumbo/multiqueue benchmark; test scripts added under `bench/` and documented in `docs/TESTING.md`.
 
 ## [v0.3.0] — 2026-06-10
 
