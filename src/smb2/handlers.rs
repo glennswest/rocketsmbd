@@ -484,23 +484,37 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
                 // Channel binding: prove the same identity, then derive this
                 // channel's signing key from the session's original key.
                 let mut s = sref.lock().unwrap();
-                let ok = match &auth {
-                    Some(a) if !a.is_anonymous() => {
-                        s.established
-                            && a.user.eq_ignore_ascii_case(&s.user)
-                            && srv
-                                .users
-                                .get(&a.user.to_lowercase())
-                                .map(|nt| ntlm::verify_ntlmv2(nt, a, &pending.challenge).is_some())
-                                .unwrap_or(false)
+                let ok = if !s.established {
+                    false
+                } else if s.guest {
+                    // Guest sessions carry no key; binding is signing-free
+                    // regardless of what the client presents.
+                    true
+                } else {
+                    match &auth {
+                        Some(a) if !a.is_anonymous() => {
+                            a.user.eq_ignore_ascii_case(&s.user)
+                                && srv
+                                    .users
+                                    .get(&a.user.to_lowercase())
+                                    .map(|nt| ntlm::verify_ntlmv2(nt, a, &pending.challenge).is_some())
+                                    .unwrap_or(false)
+                        }
+                        _ => false,
                     }
-                    // Guest sessions have no key; binding them is signing-free.
-                    _ => s.established && s.guest,
                 };
                 if !ok {
+                    crate::logw!(
+                        "session {:x}: channel bind rejected (established={} guest={} sess_user={:?} bind_user={:?} anon={})",
+                        sid,
+                        s.established,
+                        s.guest,
+                        s.user,
+                        auth.as_ref().map(|a| a.user.clone()).unwrap_or_default(),
+                        auth.as_ref().map(|a| a.is_anonymous()).unwrap_or(true),
+                    );
                     drop(s);
                     pc.channels.remove(&sid);
-                    crate::logw!("session {:x}: channel bind rejected", sid);
                     err_resp(tx, h, status::ACCESS_DENIED, chain);
                     return;
                 }
