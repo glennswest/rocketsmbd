@@ -110,13 +110,32 @@ buffers — now teardown waits for completions), and a 3.1.1 signature
 rejection (we only signed when the client set REQUIRED; auth'd sessions must
 always sign).
 
-### Phase 3 — performance & SMB3 (v0.3.0)
-- [ ] SMB3 encryption (AES-128-GCM)
-- [ ] Zero-copy path for signed/encrypted reads (currently buffered)
-- [ ] Oplocks/leases with real caching
-- [ ] True intra-connection request concurrency (multiple zc reads in flight)
-- [ ] Registered buffers + send_zc, multishot accept/recv, SQPOLL mode, core pinning
-- [ ] Benchmarks vs samba smbd (fio over cifs mount)
+### Phase 3 — throughput & scale (v0.3.0)  ← IN PROGRESS
+Goal: saturate high-speed NICs (target: fill 100GbE from a single client).
+100GbE = 12.5 GB/s; a single TCP/core tops ~45 Gbps (our loopback single-stream
+read). Filling the pipe requires spreading across cores = multiple connections.
+
+Network reality (jumbo frames etc.): MTU is an OS/NIC setting, not app-level;
+the app already does the things that matter (LARGE_MTU cap, 1 MiB reads/4 MiB
+writes, zero-copy splice, TCP_NODELAY). Jumbo frames help real links via fewer
+packets; document as a deployment knob (docs/TUNING.md).
+
+Order:
+- [ ] 1. Measure multi-stream aggregate on loopback (does SO_REUSEPORT scale
+      across cores today?) — establishes the baseline before optimizing
+- [ ] 2. docs/TUNING.md: jumbo frames, TCP buffers (rmem/wmem), core pinning,
+      multichannel guidance for 100GbE
+- [ ] 3. TCP send/recv buffer headroom on accepted sockets (high-BDP links)
+- [ ] 4. SMB3 multichannel: advertise MULTI_CHANNEL cap, FSCTL_QUERY_NETWORK_
+      INTERFACE_INFO (report server NICs+speed), session binding (bind a new
+      connection to an existing session, signed with the session key) — THE
+      lever for a single client to fill 100GbE
+- [ ] 5. send_zc (MSG_ZEROCOPY) for the buffered send path; registered buffers
+- [ ] 6. multishot accept/recv, SQPOLL mode, worker core pinning
+- [ ] 7. Intra-connection request concurrency (multiple zc reads in flight)
+- [ ] 8. SMB3 encryption (AES-128-GCM) + zero-copy-friendly signed/enc reads
+- [ ] 9. Oplocks/leases with real caching
+- [ ] 10. Benchmarks vs samba (fio over cifs), incl. multi-stream + multichannel
 
 ## Testing
 
