@@ -20,6 +20,21 @@ for usage). Record every run here — newest at the top of each section.
 
 ## Results
 
+### 2026-06-09 — multi-connection scaling (phase 3 baseline)
+
+Loopback, 8 workers, 1 GiB cached file. Establishes that the architecture
+scales to line rate across connections (see docs/TUNING.md for analysis).
+
+| Scenario | Conns | Aggregate |
+|---|---|---|
+| 1 mount, 1 reader | 1 | 6.0 GB/s (48 Gbps) |
+| 1 mount, 4 parallel readers | 1 | 4.7 GB/s (38 Gbps) |
+| 4 mounts (`nosharesock`), 1 reader each | 4 | **12.5 GB/s (100 Gbps)** |
+
+One TCP connection ≈ one core ≈ ~45 Gbps (zero-copy). Four connections
+saturate 100 Gbps. Single-client line rate needs SMB3 multichannel (one
+mount → many connections), which is the phase-3 headline.
+
 ### 2026-06-09 — v0.2.0 (auth + signing)
 
 Unsigned guest path is unchanged from v0.1.1 (zero-copy splice reads). Signed

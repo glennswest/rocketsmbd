@@ -1,7 +1,9 @@
 # Changelog
 
 ## [Unreleased]
-<!-- New unreleased changes go here -->
+
+### 2026-06-09
+- **docs:** Add docs/TUNING.md — jumbo frames, TCP buffers, NIC/RSS, and the path to 100GbE saturation; record multi-connection scaling baseline (4 connections = 100 Gbps on loopback; single connection ≈ 45 Gbps, motivating SMB3 multichannel).
 
 ## [v0.2.0] — 2026-06-09
 

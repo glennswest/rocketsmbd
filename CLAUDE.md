@@ -121,10 +121,9 @@ writes, zero-copy splice, TCP_NODELAY). Jumbo frames help real links via fewer
 packets; document as a deployment knob (docs/TUNING.md).
 
 Order:
-- [ ] 1. Measure multi-stream aggregate on loopback (does SO_REUSEPORT scale
-      across cores today?) — establishes the baseline before optimizing
-- [ ] 2. docs/TUNING.md: jumbo frames, TCP buffers (rmem/wmem), core pinning,
-      multichannel guidance for 100GbE
+- [x] 1. Measure multi-stream aggregate on loopback: 1 conn ≈ 45 Gbps, 4 conns
+      = 100 Gbps (linear SO_REUSEPORT scaling). Single-client gap = multichannel.
+- [x] 2. docs/TUNING.md: jumbo frames, TCP buffers, NIC/RSS, multichannel path
 - [ ] 3. TCP send/recv buffer headroom on accepted sockets (high-BDP links)
 - [ ] 4. SMB3 multichannel: advertise MULTI_CHANNEL cap, FSCTL_QUERY_NETWORK_
       INTERFACE_INFO (report server NICs+speed), session binding (bind a new
