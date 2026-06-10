@@ -28,6 +28,10 @@ pub struct Config {
     /// client can stripe one share across multiple connections (cores).
     #[serde(default)]
     pub multichannel: bool,
+    /// Restrict multichannel interface advertisement to these IPs (e.g. a
+    /// dedicated storage NIC). Empty = advertise all non-loopback interfaces.
+    #[serde(default)]
+    pub advertise_only: Vec<String>,
     #[serde(rename = "share")]
     pub shares: Vec<ShareCfg>,
     #[serde(rename = "user", default)]

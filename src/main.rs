@@ -74,9 +74,20 @@ fn run(cfg: Config) {
     if !users.is_empty() {
         logi!("{} user(s) loaded, guest {}", users.len(), if allow_guest { "allowed" } else { "denied" });
     }
-    let interfaces = net::interfaces();
+    let mut interfaces = net::interfaces();
+    if !cfg.advertise_only.is_empty() {
+        interfaces.retain(|i| cfg.advertise_only.iter().any(|ip| ip == &i.addr.to_string()));
+    }
     if cfg.multichannel {
-        logi!("multichannel enabled, {} interface(s) advertised", interfaces.len());
+        logi!(
+            "multichannel enabled, advertising {}",
+            interfaces
+                .iter()
+                .filter(|i| !i.loopback)
+                .map(|i| i.addr.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     let srv = Arc::new(Srv {
         cfg,

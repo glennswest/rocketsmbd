@@ -613,6 +613,7 @@ mod tests {
             allow_guest: None,
             require_signing: false,
             multichannel: false,
+            advertise_only: vec![],
             shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
             users: vec![],
         };
