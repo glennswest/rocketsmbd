@@ -615,12 +615,21 @@ mod tests {
             log_level: 0,
             allow_guest: None,
             require_signing: false,
+            multichannel: false,
             shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
             users: vec![],
         };
         let users = cfg.user_db();
         let allow_guest = cfg.guest_allowed();
-        Srv { cfg, guid: [9; 16], max_read: 1 << 20, start_ft: 0, users, allow_guest }
+        Srv {
+            cfg,
+            guid: [9; 16],
+            max_read: 1 << 20,
+            start_ft: 0,
+            users,
+            allow_guest,
+            interfaces: vec![],
+        }
     }
 
     fn req_hdr(cmd: u16, msg_id: u64, tree: u32, sess: u64) -> Vec<u8> {

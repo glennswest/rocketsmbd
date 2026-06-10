@@ -7,6 +7,7 @@
 mod config;
 mod crypto;
 mod log;
+mod net;
 mod ntlm;
 mod smb2;
 mod status;
@@ -72,7 +73,19 @@ fn run(cfg: Config) {
     if !users.is_empty() {
         logi!("{} user(s) loaded, guest {}", users.len(), if allow_guest { "allowed" } else { "denied" });
     }
-    let srv = Arc::new(Srv { cfg, guid, max_read, start_ft: vfs::filetime_now(), users, allow_guest });
+    let interfaces = net::interfaces();
+    if cfg.multichannel {
+        logi!("multichannel enabled, {} interface(s) advertised", interfaces.len());
+    }
+    let srv = Arc::new(Srv {
+        cfg,
+        guid,
+        max_read,
+        start_ft: vfs::filetime_now(),
+        users,
+        allow_guest,
+        interfaces,
+    });
 
     let workers = if srv.cfg.workers > 0 {
         srv.cfg.workers

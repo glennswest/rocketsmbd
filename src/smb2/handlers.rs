@@ -36,9 +36,11 @@ const CREATE_ACTION_CREATED: u32 = 2;
 const CREATE_ACTION_OVERWRITTEN: u32 = 3;
 
 const FSCTL_VALIDATE_NEGOTIATE_INFO: u32 = 0x0014_0204;
+const FSCTL_QUERY_NETWORK_INTERFACE_INFO: u32 = 0x0014_01FC;
 
 const SUPPORTED_DIALECTS: [u16; 5] = [0x0311, 0x0302, 0x0300, 0x0210, 0x0202];
 const CAP_LARGE_MTU: u32 = 0x4;
+const CAP_MULTI_CHANNEL: u32 = 0x8;
 const SECURITY_MODE_SIGNING_ENABLED: u16 = 0x1;
 const SECURITY_MODE_SIGNING_REQUIRED: u16 = 0x2;
 const SESSION_FLAG_IS_GUEST: u16 = 0x1;
@@ -309,7 +311,14 @@ fn negotiate_body(
     tx.p16(dialect);
     tx.p16(0); // NegotiateContextCount, patched below for 3.1.1
     tx.pbytes(&srv.guid);
-    tx.p32(CAP_LARGE_MTU);
+    // MULTI_CHANNEL is an SMB 3.x capability; it lets a client open several
+    // connections to one share and stripe I/O across them (and across our
+    // workers/cores). Advertised only when multichannel is enabled.
+    let mut caps = CAP_LARGE_MTU;
+    if dialect >= 0x0300 && srv.cfg.multichannel {
+        caps |= CAP_MULTI_CHANNEL;
+    }
+    tx.p32(caps);
     tx.p32(MAX_TRANSACT);
     tx.p32(pc.max_read);
     tx.p32(MAX_WRITE);
@@ -1585,22 +1594,33 @@ fn ioctl(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chai
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    if ctl != FSCTL_VALIDATE_NEGOTIATE_INFO {
-        err_resp(tx, h, status::NOT_SUPPORTED, chain);
-        return;
-    }
-    // Echo our negotiated parameters so the client can verify them. The
-    // security mode MUST match what we advertised in NEGOTIATE or the
-    // client aborts with "security settings mismatch".
-    let mut secmode = SECURITY_MODE_SIGNING_ENABLED;
-    if srv.cfg.require_signing {
-        secmode |= SECURITY_MODE_SIGNING_REQUIRED;
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(24);
-    out.p32(CAP_LARGE_MTU);
-    out.pbytes(&srv.guid);
-    out.p16(secmode);
-    out.p16(pc.dialect);
+    let out: Vec<u8> = match ctl {
+        FSCTL_VALIDATE_NEGOTIATE_INFO => {
+            // Echo our negotiated parameters so the client can verify them.
+            // The security mode MUST match what we advertised in NEGOTIATE
+            // or the client aborts with "security settings mismatch".
+            let mut secmode = SECURITY_MODE_SIGNING_ENABLED;
+            if srv.cfg.require_signing {
+                secmode |= SECURITY_MODE_SIGNING_REQUIRED;
+            }
+            let mut o: Vec<u8> = Vec::with_capacity(24);
+            o.p32(CAP_LARGE_MTU);
+            o.pbytes(&srv.guid);
+            o.p16(secmode);
+            o.p16(pc.dialect);
+            o
+        }
+        FSCTL_QUERY_NETWORK_INTERFACE_INFO => {
+            // Report our interfaces so the client knows how many channels to
+            // open. Returning RSS-capable, high-speed links invites the
+            // client to stripe across multiple connections.
+            crate::net::encode_interface_info(&srv.interfaces)
+        }
+        _ => {
+            err_resp(tx, h, status::NOT_SUPPORTED, chain);
+            return;
+        }
+    };
 
     begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
     tx.p16(49);

@@ -24,6 +24,10 @@ pub struct Config {
     /// Require SMB2 signing from authenticated sessions.
     #[serde(default)]
     pub require_signing: bool,
+    /// Advertise SMB3 multichannel and accept session binding so a single
+    /// client can stripe one share across multiple connections (cores).
+    #[serde(default)]
+    pub multichannel: bool,
     #[serde(rename = "share")]
     pub shares: Vec<ShareCfg>,
     #[serde(rename = "user", default)]
@@ -156,6 +160,8 @@ pub struct Srv {
     /// lowercased user name → NT hash
     pub users: std::collections::HashMap<String, [u8; 16]>,
     pub allow_guest: bool,
+    /// Network interfaces reported for SMB3 multichannel.
+    pub interfaces: Vec<crate::net::Iface>,
 }
 
 pub fn urandom(buf: &mut [u8]) {
