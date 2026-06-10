@@ -1756,8 +1756,12 @@ fn ioctl(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chai
         FSCTL_QUERY_NETWORK_INTERFACE_INFO => {
             // Report our interfaces so the client knows how many channels to
             // open. Returning RSS-capable, high-speed links invites the
-            // client to stripe across multiple connections.
-            crate::net::encode_interface_info(&srv.interfaces)
+            // client to stripe across multiple connections. Loopback is never
+            // advertised — a remote client would try to connect to its OWN
+            // loopback; same-IP multichannel still works via the RSS flag.
+            let ifaces: Vec<_> =
+                srv.interfaces.iter().filter(|i| !i.loopback).cloned().collect();
+            crate::net::encode_interface_info(&ifaces)
         }
         _ => {
             err_resp(tx, h, status::NOT_SUPPORTED, chain);
