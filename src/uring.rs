@@ -55,6 +55,21 @@ fn ud_parts(v: u64) -> (u8, usize, u16) {
     ((v >> 56) as u8, ((v >> 32) & 0xFF_FFFF) as usize, (v >> 16) as u16)
 }
 
+/// Verify the kernel actually provides io_uring before we spawn workers.
+/// rocketsmbd is a static binary with no library dependencies, but it has a
+/// hard *kernel* dependency: io_uring (Linux ≥ 5.15). Surface that here with
+/// a clear message instead of a cryptic per-worker failure.
+pub fn probe_io_uring() -> Result<(), String> {
+    match IoUring::new(8) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!(
+            "io_uring is unavailable: {e}. rocketsmbd requires a Linux kernel \
+             with io_uring (≥ 5.15; ≥ 6.0 recommended) and io_uring not \
+             disabled (check sysctl kernel.io_uring_disabled / seccomp)."
+        )),
+    }
+}
+
 /// Determine the largest pipe capacity we can get; the advertised
 /// MaxReadSize is bounded by it so a zero-copy READ always fits the pipe.
 pub fn probe_pipe_size(want: u32) -> u32 {

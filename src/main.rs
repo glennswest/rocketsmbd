@@ -63,6 +63,10 @@ fn die(msg: &str) -> ! {
 
 #[cfg(target_os = "linux")]
 fn run(cfg: Config) {
+    // Hard kernel dependency: io_uring. Fail fast with a clear message.
+    if let Err(e) = uring::probe_io_uring() {
+        die(&e);
+    }
     // splice()d sends must not raise SIGPIPE on dead sockets.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
 

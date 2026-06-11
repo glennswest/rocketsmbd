@@ -18,6 +18,8 @@
 - **fix:** Never advertise loopback in FSCTL_QUERY_NETWORK_INTERFACE_INFO (a remote client would try to connect to its own loopback).
 - **fix:** Windows `.NET FileStream` interop (#25) — QUERY_INFO **FileStreamInformation** (class 22) now returns the default `::$DATA` stream, and **security-descriptor** queries (info_type 3) return a minimal permissive descriptor instead of NOT_SUPPORTED/ACCESS_DENIED. Verified against a Windows Server 2025 client (SMB 3.1.1 + signing, read+write).
 
+- **feat:** Startup io_uring probe — fail fast with a clear message ("requires kernel ≥ 5.15") instead of cryptic per-worker errors. rocketsmbd is statically linked (no library deps); its only hard dependency is the kernel's io_uring, so the `.deb`/`.rpm` declare no package deps and document the kernel requirement.
+
 ### Tested
 - **test:** Windows Server 2025 client interop verified (negotiate 3.1.1, NTLMv2, signing, read+write); cross-VM jumbo/multiqueue benchmark; test scripts added under `bench/` and documented in `docs/TESTING.md`.
 
