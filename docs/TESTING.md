@@ -34,6 +34,23 @@ Run: `cargo test` (anywhere); `cargo clippy --target x86_64-unknown-linux-musl
 | `win-interop.ps1` | Windows SMB client: `net use`, dir, read, write, `Get-SmbConnection` (dialect/signing). |
 | `win-read.ps1` | Windows `.NET` `FileStream` streamed read throughput. |
 
+## Fuzzing (`cargo-fuzz`)
+
+Two libFuzzer targets in `fuzz/fuzz_targets/` (run with nightly; also a CI
+workflow `fuzz.yml` — per-push 90s smoke + weekly):
+
+- `process_frame` — the SMB2 wire entry point: NetBIOS framing → `parse_hdr`
+  → compound dispatch → every command's offset/length parsing (read-only temp
+  share, fresh state per input).
+- `ntlm` — the NTLMSSP token/AUTHENTICATE field parser.
+
+First run (2026-06-11, dev host): **`process_frame` ~5.7M execs, `ntlm` ~7.0M
+execs, zero crashes/panics.** Run locally:
+```sh
+cargo +nightly fuzz run process_frame -- -max_total_time=60
+cargo +nightly fuzz run ntlm -- -max_total_time=60
+```
+
 ## Environments
 
 - **Loopback** on a Linux host — server-bound measurement, no network limit.
