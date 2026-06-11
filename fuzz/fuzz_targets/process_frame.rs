@@ -19,6 +19,7 @@ fn make_srv() -> Srv {
         allow_guest: Some(true),
         require_signing: false,
         multichannel: true,
+        encrypt: false,
         advertise_only: vec![],
         shares: vec![ShareCfg { name: "f".into(), path: dir, read_only: true }],
         users: vec![UserCfg { name: "u".into(), password: Some("p".into()), nt_hash: None }],

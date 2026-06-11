@@ -123,6 +123,17 @@ pub struct SignCtx {
     pub key: [u8; 16],
 }
 
+/// SMB3 encryption keys for one channel. `c2s` decrypts inbound transform
+/// frames; `s2c` encrypts outbound; `nonce_ctr` is the per-connection GCM
+/// nonce counter (never reused for a given key).
+#[derive(Debug, Clone)]
+pub struct EncCtx {
+    pub cipher: u16,
+    pub c2s: [u8; 16],
+    pub s2c: [u8; 16],
+    pub nonce_ctr: u64,
+}
+
 /// Auth state stashed between the NTLM challenge and the AUTHENTICATE.
 #[derive(Debug)]
 pub struct PendingAuth {
@@ -144,6 +155,11 @@ pub struct ChannelState {
     pub pending: Option<PendingAuth>,
     /// This connection's running preauth hash for this session's setup.
     pub preauth: [u8; 64],
+    /// SMB3 encryption keys, set once the session negotiates encryption.
+    pub enc: Option<EncCtx>,
+    /// Encrypt responses on this session (client requested or server/share
+    /// requires). When set, signing is implied by the AEAD tag.
+    pub encrypt: bool,
 }
 
 impl Default for ChannelState {
@@ -154,6 +170,8 @@ impl Default for ChannelState {
             sign: None,
             pending: None,
             preauth: [0; 64],
+            enc: None,
+            encrypt: false,
         }
     }
 }
@@ -194,6 +212,8 @@ pub struct AsyncMeta {
 /// `channels` holds this connection's per-session signing/preauth state.
 pub struct ProtoConn {
     pub dialect: u16,
+    /// Negotiated SMB3 cipher (0 = none). Currently AES-128-GCM only.
+    pub cipher: u16,
     pub channels: HashMap<u64, ChannelState>,
     pub max_read: u32,
     /// SMB 3.1.1 connection preauth hash (negotiate exchange).
@@ -213,6 +233,7 @@ impl ProtoConn {
     pub fn new(srv: &Srv, _conn_seed: u64) -> Self {
         Self {
             dialect: 0,
+            cipher: 0,
             channels: HashMap::new(),
             max_read: srv.max_read,
             preauth_neg: [0; 64],
@@ -462,11 +483,112 @@ fn finish_nbt_with(tx: &mut [u8], len: u32) {
     tx[3] = (len & 0xFF) as u8;
 }
 
+// ----------------------------------------------------- SMB3 TRANSFORM_HEADER
+
+/// SMB2_TRANSFORM_HEADER ProtocolId: 0xFD 'S' 'M' 'B'.
+pub const TRANSFORM_PROTO: [u8; 4] = [0xFD, b'S', b'M', b'B'];
+const TRANSFORM_HDR_LEN: usize = 52;
+
+/// True if a (de-NBT'd) frame is an SMB3 encrypted transform message.
+pub fn is_transform(frame: &[u8]) -> bool {
+    frame.len() >= 4 && frame[..4] == TRANSFORM_PROTO
+}
+
+/// Decrypt a transform-wrapped frame into the inner plaintext SMB2 message(s).
+/// Returns None on malformed input or AEAD authentication failure.
+pub fn decrypt_transform(frame: &[u8], enc: &EncCtx) -> Option<Vec<u8>> {
+    if frame.len() < TRANSFORM_HDR_LEN || frame[..4] != TRANSFORM_PROTO {
+        return None;
+    }
+    let tag: [u8; 16] = frame[4..20].try_into().ok()?;
+    let orig_size = u32::from_le_bytes(frame[36..40].try_into().ok()?) as usize;
+    // AAD is the header from the Nonce field to the end (Signature excluded).
+    let aad = frame[20..TRANSFORM_HDR_LEN].to_vec();
+    let nonce12: [u8; 12] = frame[20..32].try_into().ok()?;
+    let ct = &frame[TRANSFORM_HDR_LEN..];
+    if ct.len() != orig_size {
+        return None;
+    }
+    let mut buf = ct.to_vec();
+    if !crypto::aes128_gcm_open(&enc.c2s, &nonce12, &aad, &mut buf, &tag) {
+        return None;
+    }
+    Some(buf)
+}
+
+/// Wrap a plaintext SMB2 message/compound in a transform header, encrypting
+/// with the s2c key. Writes NBT prefix + transform header + ciphertext to tx
+/// (which is cleared first).
+pub fn wrap_transform(plain: &[u8], enc: &mut EncCtx, session_id: u64, tx: &mut Vec<u8>) {
+    tx.clear();
+    tx.zeros(4); // NBT placeholder
+    let hdr = tx.len();
+    tx.pbytes(&TRANSFORM_PROTO);
+    let sig_off = tx.len();
+    tx.zeros(16); // Signature (AEAD tag) — filled after encryption
+    enc.nonce_ctr += 1;
+    let mut nonce16 = [0u8; 16];
+    nonce16[..8].copy_from_slice(&enc.nonce_ctr.to_le_bytes());
+    tx.pbytes(&nonce16); // Nonce (12 used for GCM)
+    tx.p32(plain.len() as u32); // OriginalMessageSize
+    tx.p16(0); // Reserved
+    tx.p16(1); // Flags: SMB2_ENCRYPTION (3.1.1)
+    tx.p64(session_id);
+    debug_assert_eq!(tx.len() - hdr, TRANSFORM_HDR_LEN);
+    let aad_start = hdr + 20;
+    let ct_off = tx.len();
+    tx.pbytes(plain);
+    let nonce12: [u8; 12] = nonce16[..12].try_into().unwrap();
+    let (head, tail) = tx.split_at_mut(ct_off);
+    let tag = crypto::aes128_gcm_seal(&enc.s2c, &nonce12, &head[aad_start..ct_off], tail);
+    tx[sig_off..sig_off + 16].copy_from_slice(&tag);
+    let total = (tx.len() - 4) as u32;
+    finish_nbt_with(tx, total);
+}
+
 /// Process one NetBIOS-framed message (without the 4-byte NBT prefix).
-/// The response — including its NBT prefix — is **appended** to `tx`, so a
-/// reactor can batch several frames' responses into one send. If `tx` does
-/// not grow, the frame produced no response (e.g. CANCEL).
+/// Transparently handles SMB3 encryption: a transform-wrapped frame is
+/// decrypted, the inner message processed, and the response re-encrypted.
+/// The response (with NBT prefix) is appended to `tx`.
 pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u8>) -> FrameAction {
+    if is_transform(frame) {
+        // Session id lives at bytes 44..52 of the transform header.
+        let sid = if frame.len() >= TRANSFORM_HDR_LEN {
+            u64::from_le_bytes(frame[44..52].try_into().unwrap())
+        } else {
+            return FrameAction::Respond; // malformed → drop (tx unchanged)
+        };
+        let Some(enc) = pc.channels.get(&sid).and_then(|c| c.enc.clone()) else {
+            return FrameAction::Respond; // no key for this session → drop
+        };
+        let Some(plain) = decrypt_transform(frame, &enc) else {
+            return FrameAction::Respond; // auth failure → drop
+        };
+        // This session is actively encrypting — make reads take the buffered
+        // path (responses are wrapped, so they can't be spliced).
+        if let Some(c) = pc.channels.get_mut(&sid) {
+            c.encrypt = true;
+        }
+        // Process the decrypted message(s); encrypted sessions never splice
+        // (read() forces the buffered path), so this won't be a ZcRead.
+        let mut inner = Vec::new();
+        let _ = process_plain(srv, pc, &plain, &mut inner);
+        if inner.len() <= 4 {
+            tx.clear();
+            return FrameAction::Respond; // no response (e.g. CANCEL)
+        }
+        // Re-encrypt the plaintext response (strip its NBT prefix first).
+        let mut enc2 = pc.channels.get(&sid).and_then(|c| c.enc.clone()).unwrap();
+        wrap_transform(&inner[4..], &mut enc2, sid, tx);
+        if let Some(c) = pc.channels.get_mut(&sid) {
+            c.enc = Some(enc2); // persist the bumped nonce counter
+        }
+        return FrameAction::Respond;
+    }
+    process_plain(srv, pc, frame, tx)
+}
+
+fn process_plain(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u8>) -> FrameAction {
     let base = tx.len();
     tx.zeros(4); // NBT placeholder
 
@@ -614,6 +736,7 @@ mod tests {
             allow_guest: None,
             require_signing: false,
             multichannel: false,
+            encrypt: false,
             advertise_only: vec![],
             shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
             users: vec![],
@@ -1268,6 +1391,34 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transform_roundtrip_and_tamper() {
+        // Same key for c2s/s2c so the wrap (s2c) round-trips through
+        // decrypt_transform (c2s) in one process.
+        let mut enc = EncCtx {
+            cipher: crate::crypto::CIPHER_AES128_GCM,
+            c2s: [3u8; 16],
+            s2c: [3u8; 16],
+            nonce_ctr: 0,
+        };
+        let plain = b"\xfeSMBplaintext-inner-smb2-message-bytes-0123456789".to_vec();
+        let mut tx = Vec::new();
+        wrap_transform(&plain, &mut enc, 0xABCD, &mut tx);
+        let frame = &tx[4..]; // strip NBT prefix
+        assert!(is_transform(frame));
+        assert_eq!(u64::from_le_bytes(frame[44..52].try_into().unwrap()), 0xABCD);
+        assert_eq!(enc.nonce_ctr, 1, "nonce counter advances per message");
+
+        let dec = decrypt_transform(frame, &enc).expect("decrypt ok");
+        assert_eq!(dec, plain, "decrypt recovers the inner message");
+
+        // Tampering any ciphertext byte must fail the AEAD tag check.
+        let mut bad = frame.to_vec();
+        let n = bad.len();
+        bad[n - 1] ^= 1;
+        assert!(decrypt_transform(&bad, &enc).is_none());
     }
 
     #[test]

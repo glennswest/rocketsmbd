@@ -44,6 +44,7 @@ const CAP_MULTI_CHANNEL: u32 = 0x8;
 const SECURITY_MODE_SIGNING_ENABLED: u16 = 0x1;
 const SECURITY_MODE_SIGNING_REQUIRED: u16 = 0x2;
 const SESSION_FLAG_IS_GUEST: u16 = 0x1;
+const SESSION_FLAG_ENCRYPT_DATA: u16 = 0x4;
 const MAXIMAL_ACCESS_ALL: u32 = 0x001F_01FF;
 /// Max credits a connection may hold (window accounting).
 const CREDIT_WINDOW: i64 = 512;
@@ -255,9 +256,9 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
         return;
     };
 
-    // For 3.1.1, require the preauth integrity context (SHA-512) and note
-    // whether the client offered ciphers (we answer "none").
-    let mut cipher_offered = false;
+    // For 3.1.1, require the preauth integrity context (SHA-512) and pick a
+    // cipher from the client's encryption-capabilities (AES-128-GCM only).
+    let mut cipher: u16 = 0;
     if chosen == 0x0311 {
         let mut have_preauth = false;
         let mut off = ctx_off;
@@ -286,7 +287,19 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
                     })();
                     have_preauth = ok == Some(true);
                 }
-                2 => cipher_offered = true,
+                2 => {
+                    // SMB2_ENCRYPTION_CAPABILITIES: CipherCount + CipherIds.
+                    let _ = (|| {
+                        let mut r = Rdr::new(msg.get(off + 8..off + 8 + data_len)?);
+                        let n = r.u16()? as usize;
+                        for _ in 0..n.min(8) {
+                            if r.u16()? == crate::crypto::CIPHER_AES128_GCM {
+                                cipher = crate::crypto::CIPHER_AES128_GCM;
+                            }
+                        }
+                        Some(())
+                    })();
+                }
                 _ => {}
             }
             off += 8 + data_len;
@@ -299,8 +312,9 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
     }
 
     pc.dialect = chosen;
+    pc.cipher = cipher;
     let start = begin_resp(tx, h, status::SUCCESS, false, 0, 0);
-    negotiate_body(srv, pc, chosen, cipher_offered, start, tx);
+    negotiate_body(srv, pc, chosen, cipher, start, tx);
 }
 
 pub fn negotiate_resp_smb1_wildcard(srv: &Srv, pc: &mut ProtoConn, tx: &mut Vec<u8>) {
@@ -316,14 +330,14 @@ pub fn negotiate_resp_smb1_wildcard(srv: &Srv, pc: &mut ProtoConn, tx: &mut Vec<
         async_id: None,
     };
     let start = begin_resp(tx, &h, status::SUCCESS, false, 0, 0);
-    negotiate_body(srv, pc, 0x02FF, false, start, tx);
+    negotiate_body(srv, pc, 0x02FF, 0, start, tx);
 }
 
 fn negotiate_body(
     srv: &Srv,
     pc: &ProtoConn,
     dialect: u16,
-    cipher_offered: bool,
+    cipher: u16,
     resp_start: usize,
     tx: &mut Vec<u8>,
 ) {
@@ -371,15 +385,15 @@ fn negotiate_body(
         tx.p16(32);
         tx.p16(1); // SHA-512
         tx.pbytes(&salt);
-        if cipher_offered {
+        if cipher != 0 {
             tx.pad8(resp_start);
-            // Cipher 0: encryption not supported yet (phase 3).
+            // SMB2_ENCRYPTION_CAPABILITIES: select AES-128-GCM.
             count += 1;
             tx.p16(2);
             tx.p16(4);
             tx.p32(0);
-            tx.p16(1);
-            tx.p16(0);
+            tx.p16(1); // CipherCount
+            tx.p16(cipher);
         }
         tx.patch32(body + 60, ctx_off as u32);
         let cnt_off = body + 6;
@@ -479,6 +493,7 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
             let wrapped = pending.spnego || spnego;
             let done = if wrapped { ntlm::spnego_accept_completed() } else { Vec::new() };
             let dialect = pc.dialect;
+            let cipher = pc.cipher;
 
             let Some(sref) = srv.sessions.get(sid) else {
                 err_resp(tx, h, status::USER_SESSION_DELETED, chain);
@@ -536,8 +551,17 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
                 } else {
                     Some(crate::smb2::derive_sign_ctx(dialect, &key, &ch_preauth))
                 };
+                // This channel's own encryption keys (per-connection preauth).
+                let mut flags = if guest { SESSION_FLAG_IS_GUEST } else { 0 };
+                if !guest && cipher != 0 && dialect == 0x0311 {
+                    let (c2s, s2c) = crate::crypto::smb311_encryption_keys(&key, &ch_preauth);
+                    chm.enc = Some(crate::smb2::EncCtx { cipher, c2s, s2c, nonce_ctr: 0 });
+                    if srv.cfg.encrypt {
+                        chm.encrypt = true;
+                        flags |= SESSION_FLAG_ENCRYPT_DATA;
+                    }
+                }
                 crate::logi!("session {:x}: channel bound (now striping)", sid);
-                let flags = if guest { SESSION_FLAG_IS_GUEST } else { 0 };
                 ss_resp(tx, h, status::SUCCESS, chain.related, sid, flags, &done);
                 return;
             }
@@ -575,13 +599,27 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
                     chm.established = true;
                     chm.signing_required = signing_required;
                     chm.sign = Some(crate::smb2::derive_sign_ctx(dialect, &key, &ch_preauth));
+                    // SMB3 encryption: derive keys when a cipher is negotiated.
+                    // If the server requires encryption, set ENCRYPT_DATA so the
+                    // client seals all subsequent traffic; otherwise stay ready
+                    // to honor client-initiated encryption (e.g. cifs `seal`).
+                    let mut ss_flags = 0u16;
+                    if cipher != 0 && dialect == 0x0311 {
+                        let (c2s, s2c) = crate::crypto::smb311_encryption_keys(&key, &ch_preauth);
+                        chm.enc = Some(crate::smb2::EncCtx { cipher, c2s, s2c, nonce_ctr: 0 });
+                        if srv.cfg.encrypt {
+                            chm.encrypt = true;
+                            ss_flags |= SESSION_FLAG_ENCRYPT_DATA;
+                        }
+                    }
                     crate::logi!(
-                        "session {:x}: user {:?} authenticated (signing {})",
+                        "session {:x}: user {:?} authenticated (signing {}, encryption {})",
                         sid,
                         user,
-                        if signing_required { "required" } else { "optional" }
+                        if signing_required { "required" } else { "optional" },
+                        if chm.enc.is_some() { "ready" } else { "off" }
                     );
-                    ss_resp(tx, h, status::SUCCESS, chain.related, sid, 0, &done);
+                    ss_resp(tx, h, status::SUCCESS, chain.related, sid, ss_flags, &done);
                 }
                 Verdict::Guest => {
                     {
@@ -988,12 +1026,17 @@ fn read(
         return None;
     };
     let max_read = pc.max_read;
-    // A signed response covers the payload, which rules out splicing —
-    // signed channels always take the buffered path. Signing is per-channel.
+    // A signed or encrypted response covers the payload, which rules out
+    // splicing — those channels always take the buffered path (the reactor
+    // can't splice file pages into an encrypted/MAC'd frame). Per-channel.
     let must_sign = pc
         .channels
         .get(&chain.session_id)
-        .map(|c| c.sign.is_some() && (c.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
+        .map(|c| {
+            c.encrypt
+                || (c.sign.is_some()
+                    && (c.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
+        })
         .unwrap_or(false);
 
     // Hold the session lock only long enough to validate the handle and dup

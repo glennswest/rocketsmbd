@@ -28,6 +28,11 @@ pub struct Config {
     /// client can stripe one share across multiple connections (cores).
     #[serde(default)]
     pub multichannel: bool,
+    /// Require SMB3 encryption (AES-128-GCM): the server tells clients to seal
+    /// all post-auth traffic. When false, client-initiated encryption (e.g.
+    /// cifs `seal`) is still honored if a cipher is negotiated.
+    #[serde(default)]
+    pub encrypt: bool,
     /// Restrict multichannel interface advertisement to these IPs (e.g. a
     /// dedicated storage NIC). Empty = advertise all non-loopback interfaces.
     #[serde(default)]
