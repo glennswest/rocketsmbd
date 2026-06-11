@@ -20,6 +20,25 @@ for usage). Record every run here — newest at the top of each section.
 
 ## Results
 
+### 2026-06-11 — send_zc on the buffered/encrypted send path (#15)
+
+`IORING_OP_SEND_ZC` for buffered responses ≥ 64 KiB (encrypted reads can't
+splice, so they take the buffered path). Loopback, authenticated SMB 3.1.1
+`seal`, server page cache warm, client cache dropped per run, 256 MiB file:
+
+| | per-run (MB/s) | median |
+|---|---|---|
+| plain `Send` (copy) | 571, 611, 590, 597 | ~594 |
+| **`send_zc` (zero-copy tx)** | 620, 637, 603, 638 | **~628** |
+
+~**6%** single-stream on loopback, no regression (256 MiB md5 verified, plain +
+encrypted). Loopback understates the win: the copy it removes is cheap with no
+NIC, and the real payoff is CPU saved per send under many-channel load (frees
+cores for AES-GCM). Falls back to copying `Send` on kernels < 5.19 (probed at
+startup). **Note:** guest + `seal` hangs (guest sessions have no session key to
+derive cipher keys) — pre-existing, tracked separately; use an authenticated
+user for encryption.
+
 ### 2026-06-11 — SMB3 encryption (AES-128-GCM, v1.1.0)
 
 Jumbo net, single client, sealed (encrypted) reads:

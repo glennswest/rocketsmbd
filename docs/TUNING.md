@@ -117,6 +117,9 @@ Implemented:
 - **Lock-free read I/O** — the session lock is held only to dup the fd, so
   reads on different channels run truly in parallel.
 - **Server read-ahead** — `POSIX_FADV_SEQUENTIAL`.
+- **send_zc (`MSG_ZEROCOPY`)** on the buffered send path (≥ 64 KiB responses,
+  e.g. encrypted reads); kernel pins tx pages instead of copying. Probed at
+  startup; copying `Send` on kernels < 5.19. See the bullet below for numbers.
 - **Frame batching, TCP_NODELAY, 4 MiB writes, 1 MiB reads** (see other entries).
 
 Planned, in rough value order for 400/800GbE:
@@ -124,8 +127,6 @@ Planned, in rough value order for 400/800GbE:
   batch; meaningful at high IOPS / many channels.
 - **Registered files + registered buffers** (`IORING_REGISTER_*`) — drops
   per-op fd refcount and buffer-pinning overhead on the hot path.
-- **send_zc (`MSG_ZEROCOPY`)** for the buffered send path (small/compound/
-  signed responses); the splice read path is already zero-copy.
 - **Intra-connection read concurrency** — multiple splices in flight per
   connection (pool of pipes) so even one channel exceeds ~45 Gbps and fewer
   channels are needed to fill the link.
@@ -153,7 +154,11 @@ encrypt-in-place → send) instead of `splice`. So:
   `RUSTFLAGS="-C target-cpu=native" cargo build --release`.
 - **Scale encrypted throughput across cores with multichannel** — each channel
   encrypts on its own core; aggregate scales like plaintext.
-- **`send_zc`** (planned, #15) cuts the send-side copy, the main remaining cost.
+- **`send_zc`** (landed, #15) sends buffered responses ≥ 64 KiB via
+  `MSG_ZEROCOPY` (the kernel pins tx pages instead of copying). ~6% on a
+  loopback single stream; the larger win is CPU saved per send under
+  many-channel load, which frees cores for the cipher. Auto-detected; copying
+  `Send` on kernels < 5.19.
 
 ## Comparison vs other SMB servers
 
