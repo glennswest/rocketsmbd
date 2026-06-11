@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### 2026-06-11
+- **docs:** SMB Direct (RDMA/RoCE) design — `docs/SMBDIRECT.md` (#19): RoCEv2 target, libibverbs+rdma-cm as a second transport wired into io_uring via a CQ event-fd, registered buffers as a hard prerequisite (splice doesn't carry to RDMA), `RDMA_CAPABLE` multichannel advertisement reusing channel binding, NIC-offloaded encryption (MACsec/IPsec-over-RoCE/PSP), and the dynamic-link/feature-flag packaging split.
+- **feat:** Oplock/lease **foundation** (#18) — oplock-level and lease-state constants; CREATE now parses `RequestedOplockLevel` and the `RqLs` lease create context (v1 32-byte / v2 52-byte) into `CreateReq` (unit-tested). Still grants **none** (unchanged, safe): leases are not granted until cross-worker break delivery is built, because a lease without a correct break would let a client serve stale cached data. Design + increment plan in `docs/OPLOCKS.md`.
 - **perf:** `send_zc` (MSG_ZEROCOPY) on the buffered send path (#15) — buffered responses ≥ 64 KiB (notably encrypted reads, which can't splice) are sent via `IORING_OP_SEND_ZC`, so the kernel pins the tx pages instead of copying them. Measured (jumbo cross-VM, 4 parallel encrypted streams): **+10% aggregate throughput, −12% server CPU per GiB**. The two-CQE semantics are handled in the reactor: a send completion (`F_MORE`) parks tx in a new `Drain` state and the buffer is only reused/cleared after the buffer-release notification (`F_NOTIF`); both CQEs are counted toward in-flight accounting so teardown waits for the notification (no use-after-free of pinned tx). Probed at startup via `register_probe`; kernels < 5.19 transparently fall back to the copying `Send`.
 
 ## [v1.1.0] — 2026-06-11

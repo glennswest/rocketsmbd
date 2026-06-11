@@ -721,20 +721,42 @@ fn tree_connect(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chai
 
 // ------------------------------------------------------------------- CREATE
 
+/// A parsed lease request from the `RqLs` create context (v1 = 32-byte data,
+/// v2 = 52-byte data, distinguished by `v2`/`parent`/`epoch`). Parsed now;
+/// consumed by the grant path once cross-worker lease-break delivery lands.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct LeaseReq {
+    key: [u8; 16],
+    state: u32,
+    v2: bool,
+    parent: [u8; 16],
+    epoch: u16,
+}
+
 struct CreateReq {
     desired: u32,
     disposition: u32,
     options: u32,
     name: String,
+    /// RequestedOplockLevel byte (OPLOCK_NONE/LEVEL_II/EXCLUSIVE/BATCH, or
+    /// OPLOCK_LEASE=0xFF when a lease is requested via the RqLs context).
+    #[allow(dead_code)]
+    oplock: u8,
+    /// Parsed RqLs lease request, if present.
+    #[allow(dead_code)]
+    lease: Option<LeaseReq>,
 }
 
 fn parse_create(msg: &[u8]) -> Option<CreateReq> {
-    let body = &msg[64..];
+    let body = msg.get(64..)?;
     let mut r = Rdr::new(body);
     if r.u16()? != 57 {
         return None;
     }
-    r.skip(1 + 1 + 4 + 8 + 8)?; // secflags, oplock, impersonation, smbflags, reserved
+    r.skip(1)?; // SecurityFlags
+    let oplock = r.u8()?; // RequestedOplockLevel
+    r.skip(4 + 8 + 8)?; // ImpersonationLevel, SmbCreateFlags, Reserved
     let desired = r.u32()?;
     let _attrs = r.u32()?;
     let _share_access = r.u32()?;
@@ -742,12 +764,59 @@ fn parse_create(msg: &[u8]) -> Option<CreateReq> {
     let options = r.u32()?;
     let name_off = r.u16()? as usize;
     let name_len = r.u16()? as usize;
+    let cc_off = r.u32()? as usize; // CreateContextsOffset (from header start)
+    let cc_len = r.u32()? as usize; // CreateContextsLength
     let name = if name_len == 0 {
         String::new()
     } else {
         from_utf16le(msg.get(name_off..name_off + name_len)?)
     };
-    Some(CreateReq { desired, disposition, options, name })
+    let lease = if cc_len > 0 {
+        msg.get(cc_off..cc_off.checked_add(cc_len)?)
+            .and_then(parse_lease_ctx)
+    } else {
+        None
+    };
+    Some(CreateReq { desired, disposition, options, name, oplock, lease })
+}
+
+/// Walk the chained SMB2_CREATE_CONTEXT list and return the parsed `RqLs`
+/// lease request if one is present.
+fn parse_lease_ctx(mut buf: &[u8]) -> Option<LeaseReq> {
+    loop {
+        if buf.len() < 16 {
+            return None;
+        }
+        let next = u32::from_le_bytes(buf[0..4].try_into().ok()?) as usize;
+        let name_off = u16::from_le_bytes(buf[4..6].try_into().ok()?) as usize;
+        let name_len = u16::from_le_bytes(buf[6..8].try_into().ok()?) as usize;
+        let data_off = u16::from_le_bytes(buf[10..12].try_into().ok()?) as usize;
+        let data_len = u32::from_le_bytes(buf[12..16].try_into().ok()?) as usize;
+        if name_len == 4 {
+            if let (Some(nm), Some(data)) = (
+                buf.get(name_off..name_off + 4),
+                buf.get(data_off..data_off.checked_add(data_len)?),
+            ) {
+                if nm == CTX_NAME_RQLS && data.len() >= 32 {
+                    let mut key = [0u8; 16];
+                    key.copy_from_slice(&data[0..16]);
+                    let state = u32::from_le_bytes(data[16..20].try_into().ok()?);
+                    let v2 = data.len() >= 52;
+                    let mut parent = [0u8; 16];
+                    let mut epoch = 0u16;
+                    if v2 {
+                        parent.copy_from_slice(&data[32..48]);
+                        epoch = u16::from_le_bytes(data[48..50].try_into().ok()?);
+                    }
+                    return Some(LeaseReq { key, state, v2, parent, epoch });
+                }
+            }
+        }
+        if next == 0 || next >= buf.len() {
+            return None;
+        }
+        buf = &buf[next..];
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1900,4 +1969,79 @@ fn ioctl(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chai
     tx.p32(0); // Flags
     tx.p32(0);
     tx.pbytes(&out);
+}
+
+#[cfg(test)]
+mod oplock_tests {
+    use super::*;
+
+    /// Build one SMB2_CREATE_CONTEXT carrying an RqLs lease request.
+    fn rqls_ctx(data: &[u8]) -> Vec<u8> {
+        // header is 16 bytes; name "RqLs" at off 16 (len 4), pad to 8-align,
+        // data at off 24.
+        let name_off = 16u16;
+        let data_off = 24u16;
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes()); // Next = 0 (last)
+        v.extend_from_slice(&name_off.to_le_bytes());
+        v.extend_from_slice(&4u16.to_le_bytes()); // NameLength
+        v.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+        v.extend_from_slice(&data_off.to_le_bytes());
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(CTX_NAME_RQLS); // off 16
+        v.extend_from_slice(&[0, 0, 0, 0]); // pad to off 24
+        v.extend_from_slice(data); // off 24
+        v
+    }
+
+    #[test]
+    fn lease_ctx_v1() {
+        let mut data = Vec::new();
+        let key = [0xABu8; 16];
+        data.extend_from_slice(&key);
+        data.extend_from_slice(&(LEASE_READ_CACHING | LEASE_HANDLE_CACHING).to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // flags
+        data.extend_from_slice(&0u64.to_le_bytes()); // duration
+        assert_eq!(data.len(), 32);
+        let l = parse_lease_ctx(&rqls_ctx(&data)).expect("v1 lease");
+        assert_eq!(l.key, key);
+        assert_eq!(l.state, LEASE_READ_CACHING | LEASE_HANDLE_CACHING);
+        assert!(!l.v2);
+    }
+
+    #[test]
+    fn lease_ctx_v2() {
+        let mut data = Vec::new();
+        let key = [0x11u8; 16];
+        let parent = [0x22u8; 16];
+        data.extend_from_slice(&key);
+        data.extend_from_slice(
+            &(LEASE_READ_CACHING | LEASE_WRITE_CACHING | LEASE_HANDLE_CACHING).to_le_bytes(),
+        );
+        data.extend_from_slice(&0u32.to_le_bytes()); // flags
+        data.extend_from_slice(&0u64.to_le_bytes()); // duration
+        data.extend_from_slice(&parent);
+        data.extend_from_slice(&7u16.to_le_bytes()); // epoch
+        data.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        assert_eq!(data.len(), 52);
+        let l = parse_lease_ctx(&rqls_ctx(&data)).expect("v2 lease");
+        assert_eq!(l.key, key);
+        assert!(l.v2);
+        assert_eq!(l.parent, parent);
+        assert_eq!(l.epoch, 7);
+    }
+
+    #[test]
+    fn no_lease_ctx() {
+        // A non-RqLs context (name "MxAc") must yield None.
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&16u16.to_le_bytes());
+        v.extend_from_slice(&4u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes()); // data off
+        v.extend_from_slice(&0u32.to_le_bytes()); // data len
+        v.extend_from_slice(b"MxAc");
+        assert!(parse_lease_ctx(&v).is_none());
+    }
 }

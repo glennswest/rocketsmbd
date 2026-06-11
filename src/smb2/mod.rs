@@ -38,6 +38,23 @@ pub const CMD_SET_INFO: u16 = 17;
 #[allow(dead_code)]
 pub const CMD_OPLOCK_BREAK: u16 = 18;
 
+// SMB2 oplock levels (RequestedOplockLevel / granted OplockLevel byte).
+pub const OPLOCK_NONE: u8 = 0x00;
+pub const OPLOCK_LEVEL_II: u8 = 0x01;
+pub const OPLOCK_EXCLUSIVE: u8 = 0x08;
+pub const OPLOCK_BATCH: u8 = 0x09;
+/// RequestedOplockLevel sentinel meaning "a lease is requested via the RqLs
+/// create context" rather than a legacy oplock.
+pub const OPLOCK_LEASE: u8 = 0xFF;
+
+// SMB2 lease state caching bits (LeaseState in the RqLs create context).
+pub const LEASE_READ_CACHING: u32 = 0x01;
+pub const LEASE_HANDLE_CACHING: u32 = 0x02;
+pub const LEASE_WRITE_CACHING: u32 = 0x04;
+
+/// Create-context name "RqLs" (lease request/response).
+pub const CTX_NAME_RQLS: &[u8; 4] = b"RqLs";
+
 pub const FLAG_RESPONSE: u32 = 0x1;
 pub const FLAG_ASYNC: u32 = 0x2;
 pub const FLAG_RELATED: u32 = 0x4;

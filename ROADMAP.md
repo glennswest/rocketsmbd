@@ -42,4 +42,5 @@ Tracking the path from a fast LAN file server to a hardened, distro-packaged
 
 ## Beyond
 
-- SMB Direct (RDMA) transport for 400/800GbE (#19).
+- SMB Direct (RDMA) transport for 400/800GbE (#19) —
+  design: [docs/SMBDIRECT.md](docs/SMBDIRECT.md) (RoCEv2 target).
