@@ -34,11 +34,16 @@ startup. Pre-1.0: no SMB3 encryption yet — intended for trusted networks.
 
 %prep
 %autosetup -n %{name}-%{version}
-%cargo_prep -V 1 2>/dev/null || { \
-  tar -xf %{SOURCE1}; \
-  mkdir -p .cargo; \
-  printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml; \
-}
+# Use the bundled vendored crates (offline, reproducible) — avoids depending
+# on the rust-packaging macros so this builds on COPR and plain rpmbuild alike.
+tar -xf %{SOURCE1}
+mkdir -p .cargo
+cat > .cargo/config.toml <<'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+[source.vendored-sources]
+directory = "vendor"
+EOF
 
 %build
 cargo build --release --offline
