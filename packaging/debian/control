@@ -1,0 +1,25 @@
+Source: rocketsmbd
+Section: net
+Priority: optional
+Maintainer: Glenn West <glennswest@neuralcloudcomputing.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cargo,
+ rustc (>= 1.74)
+Standards-Version: 4.6.2
+Homepage: https://github.com/glennswest/rocketsmbd
+Vcs-Git: https://github.com/glennswest/rocketsmbd.git
+Vcs-Browser: https://github.com/glennswest/rocketsmbd
+Rules-Requires-Root: no
+
+Package: rocketsmbd
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: io_uring SMB2/SMB3 file server (zero-copy, multichannel)
+ A from-scratch SMB2/SMB3 file server built on Linux io_uring: accept, recv,
+ send, and file I/O flow through one ring per worker, and file reads are served
+ zero-copy from page cache to socket via splice. Supports NTLMv2 auth, SMB2/3
+ signing, SMB 3.1.1, and SMB3 multichannel.
+ .
+ Requires a Linux kernel with io_uring (5.15+; 6.0+ recommended), checked at
+ startup. Pre-1.0: no SMB3 encryption yet, intended for trusted networks.

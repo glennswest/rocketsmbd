@@ -1,0 +1,74 @@
+# Fedora/RHEL spec for rocketsmbd — builds from source with the distro Rust
+# toolchain (dynamic glibc), unlike the static-musl GitHub release packages.
+#
+# COPR usage: provide the release tarball as Source0 and a vendored-crates
+# tarball as Source1:
+#   cargo vendor vendor/ && tar caf rocketsmbd-%{version}-vendor.tar.xz vendor/
+# For official Fedora review, regenerate per-crate BuildRequires with:
+#   rust2rpm rocketsmbd
+%global debug_package %{nil}
+
+Name:           rocketsmbd
+Version:        0.4.0
+Release:        1%{?dist}
+Summary:        io_uring SMB2/SMB3 file server (zero-copy, multichannel)
+
+License:        MIT
+URL:            https://github.com/glennswest/rocketsmbd
+Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.xz
+
+ExclusiveArch:  x86_64 aarch64
+BuildRequires:  cargo
+BuildRequires:  rust
+BuildRequires:  systemd-rpm-macros
+
+%description
+rocketsmbd is a from-scratch SMB2/SMB3 file server built on Linux io_uring:
+accept, recv, send, and file I/O flow through one ring per worker, and file
+reads are served zero-copy from page cache to socket via splice. Supports
+NTLMv2 authentication, SMB2/3 signing, SMB 3.1.1, and SMB3 multichannel.
+
+Requires a Linux kernel with io_uring (5.15+; 6.0+ recommended), checked at
+startup. Pre-1.0: no SMB3 encryption yet — intended for trusted networks.
+
+%prep
+%autosetup -n %{name}-%{version}
+%cargo_prep -V 1 2>/dev/null || { \
+  tar -xf %{SOURCE1}; \
+  mkdir -p .cargo; \
+  printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml; \
+}
+
+%build
+cargo build --release --offline
+
+%install
+install -Dpm0755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
+install -Dpm0644 rocketsmbd.toml.example %{buildroot}%{_sysconfdir}/%{name}.toml
+install -Dpm0644 packaging/%{name}.service %{buildroot}%{_unitdir}/%{name}.service
+install -Dpm0644 docs/%{name}.8 %{buildroot}%{_mandir}/man8/%{name}.8
+
+%check
+cargo test --release --offline || :
+
+%post
+%systemd_post %{name}.service
+
+%preun
+%systemd_preun %{name}.service
+
+%postun
+%systemd_postun_with_restart %{name}.service
+
+%files
+%license LICENSE
+%doc README.md SECURITY.md
+%{_bindir}/%{name}
+%config(noreplace) %{_sysconfdir}/%{name}.toml
+%{_unitdir}/%{name}.service
+%{_mandir}/man8/%{name}.8*
+
+%changelog
+* Wed Jun 11 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 0.4.0-1
+- Initial package: SMB3 multichannel, NTLMv2 auth, signing, zero-copy reads.

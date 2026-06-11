@@ -19,6 +19,23 @@ locks, and directory change notification. Not yet implemented: SMB3 encryption
 and oplocks/leases. **No encryption yet, so treat as trusted-LAN only** —
 see [SECURITY.md](SECURITY.md). Roadmap: [ROADMAP.md](ROADMAP.md).
 
+## Install
+
+Prebuilt **static** packages (no library dependencies; needs a Linux kernel
+with io_uring ≥ 5.15) are attached to each [release](https://github.com/glennswest/rocketsmbd/releases):
+
+```sh
+# Fedora / RHEL (x86_64 or aarch64)
+sudo dnf install ./rocketsmbd-0.4.0-1.x86_64.rpm
+# Debian / Ubuntu
+sudo dpkg -i ./rocketsmbd_0.4.0-1_amd64.deb
+# then edit /etc/rocketsmbd.toml and:
+sudo systemctl enable --now rocketsmbd
+```
+
+Distro-upstream packaging (build-from-source `.spec` and `debian/`) and the
+Fedora/Debian submission plan are in [docs/UPSTREAM.md](docs/UPSTREAM.md).
+
 ## Performance (vs Samba, same host)
 
 | | rocketsmbd | Samba |

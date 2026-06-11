@@ -1,0 +1,6 @@
+rocketsmbd (0.4.0-1) unstable; urgency=medium
+
+  * Initial Debian packaging (ITP: see GitHub issue #23).
+  * SMB3 multichannel, NTLMv2 auth, SMB2/3 signing, zero-copy reads.
+
+ -- Glenn West <glennswest@neuralcloudcomputing.com>  Wed, 11 Jun 2026 00:00:00 +0000

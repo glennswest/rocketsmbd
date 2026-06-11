@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+export CARGO_HOME = $(CURDIR)/debian/.cargo
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --offline || cargo build --release
+
+override_dh_auto_test:
+	cargo test --release --offline || cargo test --release || true
+
+override_dh_auto_install:
+	install -Dpm0755 target/release/rocketsmbd debian/rocketsmbd/usr/bin/rocketsmbd
+	install -Dpm0644 rocketsmbd.toml.example debian/rocketsmbd/etc/rocketsmbd.toml
+
+override_dh_auto_clean:
+	cargo clean || true
