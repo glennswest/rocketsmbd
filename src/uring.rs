@@ -96,6 +96,10 @@ enum Tx {
     Idle,
     /// Sending a batch of buffered responses from tx.
     Send,
+    /// A send_zc completed but its buffer-release notification(s) are still
+    /// pending — tx is fully sent but the kernel still references it, so we
+    /// wait here before reusing/clearing tx and driving the next response.
+    Drain,
     /// Zero-copy read: filling the pipe from the file.
     ZcIn,
     /// Zero-copy read: sending the response header (MSG_MORE).
@@ -147,6 +151,10 @@ struct Conn {
     /// produced a completion. Buffers referenced by in-flight ops must not
     /// be freed, so teardown is deferred until this reaches zero.
     inflight: u32,
+    /// Outstanding send_zc buffer-release notifications (IORING_CQE_F_NOTIF)
+    /// for the current `tx`. The tx buffer is still referenced by the kernel
+    /// until these arrive, so it must not be reused/cleared while > 0.
+    notif_pending: u32,
     /// Set once teardown has begun: stop submitting new ops and drop the
     /// connection when `inflight` drains to zero.
     closing: bool,
@@ -181,6 +189,9 @@ struct Worker {
     gens: Vec<u16>,
     free: Vec<usize>,
     conn_seed: u64,
+    /// Whether the running kernel supports IORING_OP_SEND_ZC (≥ 5.19). Older
+    /// kernels (down to our 5.15 floor) fall back to a plain copying Send.
+    send_zc_ok: bool,
 }
 
 pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
@@ -189,7 +200,19 @@ pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
         .listen_addr()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let listen_fd = listener(&addr)?;
-    let mut ring = IoUring::new(1024)?;
+    let ring = IoUring::new(1024)?;
+    let send_zc_ok = {
+        let mut probe = io_uring::Probe::new();
+        ring.submitter().register_probe(&mut probe).is_ok()
+            && probe.is_supported(opcode::SendZc::CODE)
+    };
+    if wid == 0 {
+        logd!(
+            "send_zc (MSG_ZEROCOPY tx): {}",
+            if send_zc_ok { "supported" } else { "unsupported (kernel < 5.19) — using copying send" }
+        );
+    }
+    let mut ring = ring;
     let mut w = Worker {
         srv,
         wid,
@@ -198,11 +221,12 @@ pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
         gens: Vec::new(),
         free: Vec::new(),
         conn_seed: (wid as u64) << 20,
+        send_zc_ok,
     };
     arm_accept(&mut ring, &w);
     logd!("worker {wid} ready");
 
-    let mut cqes: Vec<(u64, i32)> = Vec::with_capacity(256);
+    let mut cqes: Vec<(u64, i32, u32)> = Vec::with_capacity(256);
     loop {
         match ring.submit_and_wait(1) {
             Ok(_) => {}
@@ -213,14 +237,19 @@ pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
         {
             let cq = ring.completion();
             for c in cq {
-                cqes.push((c.user_data(), c.result()));
+                cqes.push((c.user_data(), c.result(), c.flags()));
             }
         }
-        for &(udata, res) in &cqes {
-            handle_cqe(&mut ring, &mut w, udata, res);
+        for &(udata, res, flags) in &cqes {
+            handle_cqe(&mut ring, &mut w, udata, res, flags);
         }
     }
 }
+
+/// IORING_CQE_F_MORE: another CQE (a zero-copy notification) will follow.
+const CQE_F_MORE: u32 = 1 << 1;
+/// IORING_CQE_F_NOTIF: this CQE is a send_zc buffer-release notification.
+const CQE_F_NOTIF: u32 = 1 << 3;
 
 fn listener(addr: &std::net::SocketAddr) -> std::io::Result<RawFd> {
     let (domain, sa, sa_len) = sockaddr(addr);
@@ -317,7 +346,7 @@ fn arm_accept(ring: &mut IoUring, w: &Worker) {
     sq_push(ring, &e);
 }
 
-fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32) {
+fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32, flags: u32) {
     let (op, idx, gen) = ud_parts(udata);
     if op == OP_ACCEPT {
         arm_accept(ring, w);
@@ -339,11 +368,18 @@ fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32) {
     if conn.gen != gen {
         return;
     }
+    // A send_zc completion with F_MORE will be followed by a buffer-release
+    // notification (F_NOTIF) — account that extra CQE so teardown waits for
+    // it (the tx buffer is still referenced by the kernel until then).
+    if op == OP_SEND && flags & CQE_F_MORE != 0 {
+        conn.inflight += 1;
+        conn.notif_pending += 1;
+    }
     // This completion retires one in-flight op.
     conn.inflight = conn.inflight.saturating_sub(1);
     if conn.closing {
         // Draining: ignore the result, just account it and finalize when the
-        // last in-flight op returns (buffers are now safe to free).
+        // last in-flight op (incl. pending send_zc notifs) returns.
         if conn.inflight == 0 {
             finalize_close(w, idx);
         }
@@ -351,6 +387,7 @@ fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32) {
     }
     match op {
         OP_RECV => on_recv(ring, w, idx, res),
+        OP_SEND if flags & CQE_F_NOTIF != 0 => on_send_notif(ring, w, idx),
         OP_SEND => on_send(ring, w, idx, res),
         OP_SPLICE_IN => on_splice_in(ring, w, idx, res),
         OP_SPLICE_OUT => on_splice_out(ring, w, idx, res),
@@ -401,6 +438,7 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         watches: Vec::new(),
         deferred: std::collections::VecDeque::new(),
         inflight: 0,
+        notif_pending: 0,
         closing: false,
         inotify_cancelled: false,
     });
@@ -738,9 +776,26 @@ fn start_send(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     submit_send(ring, w, idx, 0);
 }
 
+/// Buffered sends at or above this size use send_zc (MSG_ZEROCOPY): the kernel
+/// pins the tx pages instead of copying them, paying back the extra
+/// notification CQE only when the copy it saves is large enough to matter.
+/// Encrypted/compound responses (the buffered path) are the beneficiaries; the
+/// splice read path is already zero-copy and the MSG_MORE header send is tiny.
+const ZC_SEND_MIN: usize = 64 * 1024;
+
 fn submit_send(ring: &mut IoUring, w: &mut Worker, idx: usize, msg_flags: i32) {
+    let send_zc_ok = w.send_zc_ok;
     let c = conn_mut(w, idx);
     let buf = &c.tx[c.tx_off..];
+    // Only the plain buffered path (msg_flags == 0) is eligible; the ZcHdr
+    // send sets MSG_MORE and must stay a regular Send.
+    if send_zc_ok && msg_flags == 0 && buf.len() >= ZC_SEND_MIN {
+        let e = opcode::SendZc::new(types::Fd(c.fd), buf.as_ptr(), buf.len() as u32)
+            .build()
+            .user_data(ud(OP_SEND, idx, c.gen));
+        sq_push_conn(ring, w, idx, &e);
+        return;
+    }
     let e = opcode::Send::new(types::Fd(c.fd), buf.as_ptr(), buf.len() as u32)
         .flags(msg_flags)
         .build()
@@ -776,21 +831,48 @@ fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
         }
         _ => {
             if done {
-                c.tx.clear();
-                c.tx_off = 0;
-                if c.tx.capacity() > TX_KEEP {
-                    c.tx.shrink_to(TX_KEEP);
-                }
-                if let Some(plan) = c.pending_zc.take() {
-                    start_zc(ring, w, idx, plan);
+                // tx fully sent. If this went out via send_zc, the kernel still
+                // references tx until the buffer-release notification(s) land —
+                // park in Drain and finish from on_send_notif. Otherwise tx is
+                // free now.
+                if c.notif_pending > 0 {
+                    c.txm = Tx::Drain;
                 } else {
-                    c.txm = Tx::Idle;
-                    drive(ring, w, idx);
+                    finish_send(ring, w, idx);
                 }
             } else {
                 submit_send(ring, w, idx, 0);
             }
         }
+    }
+}
+
+/// tx is fully sent and no longer referenced by the kernel: release it and
+/// drive the next response (or a read queued behind this send).
+fn finish_send(ring: &mut IoUring, w: &mut Worker, idx: usize) {
+    let c = conn_mut(w, idx);
+    c.tx.clear();
+    c.tx_off = 0;
+    if c.tx.capacity() > TX_KEEP {
+        c.tx.shrink_to(TX_KEEP);
+    }
+    if let Some(plan) = c.pending_zc.take() {
+        start_zc(ring, w, idx, plan);
+    } else {
+        c.txm = Tx::Idle;
+        drive(ring, w, idx);
+    }
+}
+
+/// A send_zc buffer-release notification (IORING_CQE_F_NOTIF) arrived: the
+/// kernel is done with that slice of tx. When the last one for the current
+/// send clears and the send had already fully completed (Drain), tx is safe to
+/// reuse.
+fn on_send_notif(ring: &mut IoUring, w: &mut Worker, idx: usize) {
+    let c = conn_mut(w, idx);
+    c.notif_pending = c.notif_pending.saturating_sub(1);
+    if c.notif_pending == 0 && matches!(c.txm, Tx::Drain) {
+        finish_send(ring, w, idx);
     }
 }
 
