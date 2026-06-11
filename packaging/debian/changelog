@@ -1,3 +1,9 @@
+rocketsmbd (1.0.0-1) unstable; urgency=medium
+
+  * 1.0.0 stable release. Parsers fuzzed; config/wire behavior stable.
+
+ -- Glenn West <glennswest@neuralcloudcomputing.com>  Wed, 11 Jun 2026 00:00:00 +0000
+
 rocketsmbd (0.4.0-1) unstable; urgency=medium
 
   * Initial Debian packaging (ITP: see GitHub issue #23).

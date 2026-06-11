@@ -12,12 +12,16 @@ data never enters userspace. A single client mount stripes across cores via
 
 ## Status
 
-Pre-release (`0.4.x`). Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
+**Stable (`1.0`).** Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
 authentication, SMB2/3 signing, SMB 3.1.1 preauth integrity, and SMB3
 multichannel**. Supports a user database, optional guest access, byte-range
-locks, and directory change notification. Not yet implemented: SMB3 encryption
-and oplocks/leases. **No encryption yet, so treat as trusted-LAN only** —
-see [SECURITY.md](SECURITY.md). Roadmap: [ROADMAP.md](ROADMAP.md).
+locks, and directory change notification. The config format and on-wire
+behavior are stable across the 1.x series. Wire parsers are fuzzed.
+
+**No SMB3 wire encryption yet** — rocketsmbd 1.0 is for **trusted networks**;
+use a VPN/IPsec for untrusted links until encryption lands in a 1.x release.
+SMB3 encryption and oplocks/leases are on the [roadmap](ROADMAP.md). See
+[SECURITY.md](SECURITY.md).
 
 ## Install
 
@@ -26,9 +30,9 @@ with io_uring ≥ 5.15) are attached to each [release](https://github.com/glenns
 
 ```sh
 # Fedora / RHEL (x86_64 or aarch64)
-sudo dnf install ./rocketsmbd-0.4.0-1.x86_64.rpm
+sudo dnf install ./rocketsmbd-1.0.0-1.x86_64.rpm
 # Debian / Ubuntu
-sudo dpkg -i ./rocketsmbd_0.4.0-1_amd64.deb
+sudo dpkg -i ./rocketsmbd_1.0.0-1_amd64.deb
 # then edit /etc/rocketsmbd.toml and:
 sudo systemctl enable --now rocketsmbd
 ```
@@ -52,17 +56,7 @@ Tuning for 100GbE+: [docs/TUNING.md](docs/TUNING.md).
 - Linux kernel ≥ 5.15 (≥ 6.0 recommended for multishot accept/recv)
 - Capability to bind port 445 (`CAP_NET_BIND_SERVICE` or root)
 
-## Performance
-
-Loopback vs samba 4.23 on the same host (kernel 6.17, 8 cores — full data
-and method in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
-
-| | rocketsmbd | samba | |
-|---|---|---|---|
-| 1 GiB sequential read | **5.8–6.2 GB/s** | 1.4 GB/s | 4.3× |
-| 512 MiB sequential write | **836–941 MB/s** | 642 MB/s | 1.3× |
-
-Re-run with `bench/bench.sh` (root, Linux, cifs-utils).
+Re-run benchmarks with `bench/bench.sh` (root, Linux, cifs-utils).
 
 ## Design
 

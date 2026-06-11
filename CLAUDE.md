@@ -6,7 +6,7 @@ thread-per-connection — one io_uring reactor per worker thread.
 
 ## Version
 
-- Current: **0.4.0** (pre-release, in development)
+- Current: **1.0.0** (stable; config/wire-behavior backward-compatible across 1.x)
 - Version locations: `Cargo.toml` (`[package] version`), `src/main.rs` (`VERSION` const via `env!("CARGO_PKG_VERSION")` — single source is Cargo.toml)
 
 ## Platform & Build

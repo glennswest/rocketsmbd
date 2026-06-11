@@ -3,6 +3,32 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.0.0] — 2026-06-11
+
+First stable release. The configuration format and on-wire behavior are now
+stable; the 1.x series stays backward-compatible (SemVer).
+
+### Added
+- Parser fuzzing (cargo-fuzz) for the SMB2 wire entry point and the NTLMSSP
+  parser; both survive millions of executions with zero crashes. Weekly +
+  per-push CI fuzz workflow.
+- Library crate (lib+bin split) enabling fuzzing, integration tests, and reuse.
+
+### Stable feature set
+- SMB 2.0.2 → 3.1.1; NTLMv2 auth + user database; SMB2/3 signing; SMB 3.1.1
+  preauth integrity; **SMB3 multichannel**; byte-range locks; CHANGE_NOTIFY;
+  zero-copy splice reads (linked io_uring chain); server read-ahead.
+- Distro packages (static `.deb`/`.rpm`, x86_64 + aarch64), systemd unit, man
+  page; CI (build/test/clippy) + tag-triggered release pipeline.
+- Verified interop with Linux cifs.ko and Windows Server 2025 (SMB 3.1.1 +
+  signing, read/write).
+
+### Scope & security
+- **No SMB3 wire encryption in 1.0** — rocketsmbd is intended for **trusted
+  networks**. For untrusted links use a VPN/IPsec until encryption lands in a
+  1.x release (#10). Optional `require_signing` enforces signed sessions. See
+  SECURITY.md.
+
 ## [v0.4.0] — 2026-06-10
 
 ### Added

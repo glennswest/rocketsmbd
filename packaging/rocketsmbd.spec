@@ -9,7 +9,7 @@
 %global debug_package %{nil}
 
 Name:           rocketsmbd
-Version:        0.4.0
+Version:        1.0.0
 Release:        1%{?dist}
 Summary:        io_uring SMB2/SMB3 file server (zero-copy, multichannel)
 
