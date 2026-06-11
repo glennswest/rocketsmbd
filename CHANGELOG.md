@@ -3,6 +3,15 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.1.0] — 2026-06-11
+
+### Added
+- **feat:** **SMB3 encryption (AES-128-GCM)** for SMB 3.1.1 — negotiate the cipher, derive per-channel c2s/s2c keys (SMBC2S/S2CCipherKey), and wrap/unwrap SMB2 TRANSFORM_HEADER frames in `process_frame`. New `encrypt` config (require); client-initiated encryption (cifs `seal`) is honored even when not required. Encrypted reads use the buffered path (an AEAD-sealed frame can't be spliced).
+- **test:** Transform roundtrip/tamper unit test; verified end-to-end against Linux cifs.ko (`seal`, md5 integrity) and Windows Server 2025 (`Get-SmbConnection`: Encrypted=True), read+write both directions.
+
+### Notes
+- Backward-compatible (SemVer minor): unencrypted sessions are unchanged. Encryption lifts the trusted-LAN limitation — set `encrypt = true` to require it. AES-256-GCM / AES-CCM (SMB 3.0/3.0.2) remain follow-ups.
+
 ## [v1.0.0] — 2026-06-11
 
 First stable release. The configuration format and on-wire behavior are now

@@ -1,6 +1,6 @@
 [package]
 name = "rocketsmbd"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "smbd replacement: io_uring end-to-end, zero-copy file-to-socket, SMB3 multichannel"
 license = "MIT"
@@ -42,8 +42,8 @@ extended-description = """
 rocketsmbd is a from-scratch SMB2/SMB3 file server built on Linux io_uring:
 accept, recv, send, and file I/O flow through one ring per worker, and file
 reads are served zero-copy from page cache to socket via splice. Supports
-NTLMv2 auth, SMB2/3 signing, SMB 3.1.1, and SMB3 multichannel. Pre-1.0,
-trusted-LAN use (no encryption yet).
+NTLMv2 auth, SMB2/3 signing, SMB 3.1.1, SMB3 multichannel, and SMB3
+encryption (AES-128-GCM).
  .
  Statically linked (no library dependencies), but requires a Linux kernel
  with io_uring: 5.15 or newer (6.0+ recommended). Checked at startup."""

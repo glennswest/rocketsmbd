@@ -18,8 +18,10 @@ aim to acknowledge within a few days.
 rocketsmbd is **pre-1.0 and not yet hardened for hostile networks.** Know the
 following before deploying:
 
-- **No SMB3 encryption yet.** Data is signed (when negotiated) but not
-  encrypted on the wire. Use only on trusted networks.
+- **SMB3 encryption (AES-128-GCM)** is supported (SMB 3.1.1). Set
+  `encrypt = true` to require it, or let clients request it (`seal`). When not
+  encrypting, data is signed (when negotiated) but cleartext on the wire —
+  prefer `encrypt = true` on untrusted networks. AES-256-GCM/CCM are pending.
 - **Authentication** is NTLMv2 against a local user database, or guest. There
   is no Kerberos, no domain integration, and no account lockout.
 - **The SMB2/NTLMSSP wire parsers have not yet been fuzzed.** Treat the

@@ -7,6 +7,7 @@ log_level = 1          # 0 = warn, 1 = info, 2 = debug
 # Security. With no [[user]] entries, guest access is allowed by default.
 # Add users to require authentication; set allow_guest explicitly to override.
 require_signing = false   # true = reject unsigned requests on auth'd sessions
+encrypt = false          # true = require SMB3 encryption (AES-128-GCM)
 # allow_guest = false
 
 [[share]]

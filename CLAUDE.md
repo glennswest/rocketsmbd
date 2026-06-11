@@ -6,7 +6,7 @@ thread-per-connection — one io_uring reactor per worker thread.
 
 ## Version
 
-- Current: **1.0.0** (stable; config/wire-behavior backward-compatible across 1.x)
+- Current: **1.1.0** (stable; config/wire-behavior backward-compatible across 1.x)
 - Version locations: `Cargo.toml` (`[package] version`), `src/main.rs` (`VERSION` const via `env!("CARGO_PKG_VERSION")` — single source is Cargo.toml)
 
 ## Platform & Build
@@ -110,19 +110,16 @@ buffers — now teardown waits for completions), and a 3.1.1 signature
 rejection (we only signed when the client set REQUIRED; auth'd sessions must
 always sign).
 
-### Phase 4 — SMB3 encryption (1.x, #10)  ← IN PROGRESS
-Lifts the trusted-LAN limitation. AES-128-GCM for SMB 3.1.1 first.
-- [x] Crypto: aes-gcm dep, AES-128-GCM seal/open, SMB3 cipher-key derivation
-      (SMBC2SCipherKey/SMBS2CCipherKey), roundtrip/tamper tests
-- [ ] SMB2 TRANSFORM_HEADER codec (0xFD'SMB', nonce, tag, orig size, session id)
-- [ ] NEGOTIATE: advertise AES-128-GCM in the 3.1.1 encryption-capabilities ctx
-- [ ] SESSION_SETUP: derive per-session c2s/s2c encryption keys
-- [ ] Reactor/process_frame: decrypt inbound transform-wrapped frames; encrypt
-      outbound when the session/share requires it (encrypted reads = buffered,
-      like signed — no splice)
-- [ ] Config: `encrypt` (off/allow/require) global + per-share; SHAREFLAG
-- [ ] Test: cifs `seal` mount option + Windows `Get-SmbConnection -Encrypted`
-- [ ] AES-256-GCM + AES-CCM (3.0/3.0.2) as a follow-up
+### Phase 4 — SMB3 encryption (v1.1.0, #10) — COMPLETE
+AES-128-GCM for SMB 3.1.1. Lifts the trusted-LAN limitation.
+- [x] Crypto: AES-128-GCM seal/open, SMB3 cipher-key derivation, tests
+- [x] SMB2 TRANSFORM_HEADER codec (wrap/unwrap, roundtrip test)
+- [x] NEGOTIATE advertises AES-128-GCM; SESSION_SETUP derives c2s/s2c keys
+- [x] process_frame decrypts inbound / encrypts outbound; encrypted reads buffered
+- [x] `encrypt` config (require) + ENCRYPT_DATA flag; signing skipped for
+      encrypted msgs but the SS response that enables it is still signed
+- [x] Verified: cifs `seal` (md5 integrity) + Windows Server 2025 Encrypted=True
+- [ ] AES-256-GCM + AES-CCM (3.0/3.0.2) — follow-up
 
 ### Phase 3 — throughput & scale (v0.3.0)
 Goal: saturate high-speed NICs (target: fill 100GbE from a single client).
