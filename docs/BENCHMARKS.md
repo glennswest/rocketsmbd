@@ -20,6 +20,22 @@ for usage). Record every run here — newest at the top of each section.
 
 ## Results
 
+### 2026-06-11 — SMB3 encryption (AES-128-GCM, v1.1.0)
+
+Jumbo net, single client, sealed (encrypted) reads:
+
+| | throughput |
+|---|---|
+| unencrypted, zero-copy splice (1 stream) | ~2.6 GB/s |
+| **encrypted (AES-128-GCM), 1 stream** | **~0.65 GB/s** |
+| encrypted, +aes target-feature build | ~0.70 GB/s (~7%, noise) |
+
+AES-NI + PCLMULQDQ are detected at runtime (hardware crypto already in use).
+The drop vs plaintext is the loss of zero-copy (encrypted reads buffer), not
+the cipher. Aggregate encrypted throughput scales across cores via
+multichannel; `send_zc` (#15) targets the remaining copy. Verified end-to-end
+against cifs.ko `seal` (md5 integrity) and Windows Server 2025 (`Encrypted=True`).
+
 ### 2026-06-10 — Windows Server 2025 client interop
 
 A real Windows Server 2025 SMB client (`smbtest-win`) against rocketsmbd:

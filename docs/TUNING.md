@@ -136,6 +136,25 @@ Planned, in rough value order for 400/800GbE:
 - **SMB Direct (RDMA)** — the endgame for 100GbE+; Windows uses it to bypass
   TCP/CPU entirely. Large effort (RDMA verbs, separate transport).
 
+## Encryption performance (AES-128-GCM)
+
+The crypto hot path is AES (AES-NI: `AESENC*`) + GHASH (PCLMULQDQ). RustCrypto
+detects both at **runtime** (`cpufeatures`), so the shipped generic/musl binary
+already uses hardware AES on any capable CPU — no special build needed.
+
+Measured (jumbo net, single encrypted read): **~653 MB/s** runtime-detected vs
+**~700 MB/s** built with `-C target-feature=+aes,+pclmulqdq` (~7%, within
+noise). The bottleneck is **not the cipher** (AES-NI does multiple GB/s/core)
+but the loss of zero-copy: encrypted reads buffer (file → userspace →
+encrypt-in-place → send) instead of `splice`. So:
+
+- **AES-NI is already on** — don't compile-pin it for the portable release
+  (it would `SIGILL` on pre-2010 CPUs for ~7%). For a host-specific build:
+  `RUSTFLAGS="-C target-cpu=native" cargo build --release`.
+- **Scale encrypted throughput across cores with multichannel** — each channel
+  encrypts on its own core; aggregate scales like plaintext.
+- **`send_zc`** (planned, #15) cuts the send-side copy, the main remaining cost.
+
 ## Comparison vs other SMB servers
 
 - **vs Samba** (measured, same host): ~4× on unsigned sequential reads
