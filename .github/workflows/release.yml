@@ -7,57 +7,36 @@ on:
 permissions:
   contents: write
 
+env:
+  # The repo .cargo/config.toml names a dev-host (macOS) musl linker; override
+  # it for the CI runner, which provides musl-gcc via musl-tools.
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-musl
       - name: Install build deps
         run: |
           set -e
           sudo apt-get update
           sudo apt-get install -y musl-tools
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-            mkdir -p .cargo
-            printf '[target.aarch64-unknown-linux-musl]\nlinker = "aarch64-linux-gnu-gcc"\n' >> .cargo/config.toml
-          fi
           cargo install cargo-deb cargo-generate-rpm
       - name: Build static binary
-        run: cargo build --release --target ${{ matrix.target }}
-      - name: Build .deb
-        run: cargo deb --no-build --target ${{ matrix.target }} --output dist/
-      - name: Build .rpm
-        run: |
-          cargo generate-rpm --target ${{ matrix.target }} --payload-compress none -o dist/ || \
-          cargo generate-rpm --target ${{ matrix.target }} -o dist/
-      - name: Collect artifacts
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Build .deb and .rpm
         run: |
           set -e
           mkdir -p out
-          cp target/${{ matrix.target }}/release/rocketsmbd "out/rocketsmbd-${{ matrix.target }}"
-          cp dist/*.deb dist/*.rpm out/ 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.target }}
-          path: out/*
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Flatten
-        run: mkdir -p rel && find artifacts -type f -exec cp {} rel/ \;
+          cargo deb --no-build --target x86_64-unknown-linux-musl --output out/
+          cargo generate-rpm --target x86_64-unknown-linux-musl -o out/
+          cp target/x86_64-unknown-linux-musl/release/rocketsmbd out/rocketsmbd-x86_64-linux-musl
+          ls -la out/
       - uses: softprops/action-gh-release@v2
         with:
-          files: rel/*
+          files: out/*
           generate_release_notes: true

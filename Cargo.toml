@@ -43,7 +43,8 @@ accept, recv, send, and file I/O flow through one ring per worker, and file
 reads are served zero-copy from page cache to socket via splice. Supports
 NTLMv2 auth, SMB2/3 signing, SMB 3.1.1, and SMB3 multichannel. Pre-1.0,
 trusted-LAN use (no encryption yet)."""
-depends = "$auto"
+# Static musl binary — no shared-library dependencies.
+depends = ""
 conf-files = ["/etc/rocketsmbd.toml"]
 assets = [
     ["target/release/rocketsmbd", "usr/bin/", "755"],
@@ -53,7 +54,6 @@ assets = [
     ["README.md", "usr/share/doc/rocketsmbd/", "644"],
     ["SECURITY.md", "usr/share/doc/rocketsmbd/", "644"],
 ]
-systemd-units = { unit-name = "rocketsmbd", enable = false, start = false }
 
 [package.metadata.generate-rpm]
 summary = "io_uring SMB2/SMB3 file server (zero-copy, multichannel)"
