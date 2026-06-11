@@ -32,11 +32,24 @@ splice, so they take the buffered path). Loopback, authenticated SMB 3.1.1
 | **`send_zc` (zero-copy tx)** | 620, 637, 603, 638 | **~628** |
 
 ~**6%** single-stream on loopback, no regression (256 MiB md5 verified, plain +
-encrypted). Loopback understates the win: the copy it removes is cheap with no
-NIC, and the real payoff is CPU saved per send under many-channel load (frees
-cores for AES-GCM). Falls back to copying `Send` on kernels < 5.19 (probed at
-startup). **Note:** guest + `seal` hangs (guest sessions have no session key to
-derive cipher keys) — pre-existing, tracked separately; use an authenticated
+encrypted).
+
+**Jumbo cross-VM (the representative test).** `smbtest-srv`→`smbtest-c1` over
+the MTU-9000 internal net, authenticated SMB 3.1.1 `seal`, server cache warm.
+Single stream is cipher/core-bound so the gain is small (~615→~630 MB/s), but
+under **concurrency** the CPU saved on the send copy turns into throughput:
+
+| 4 parallel encrypted streams (4 GiB total) | aggregate | server CPU | CPU/GiB |
+|---|---|---|---|
+| plain `Send` | ~1457 MB/s | 6.98 CPU-s | 1.71 s/GiB |
+| **`send_zc`** | **~1600 MB/s** | **6.14 CPU-s** | **1.54 s/GiB** |
+
+**+10% aggregate, −12% server CPU per GiB.** That is exactly the point of
+send_zc: on a cipher-bound (encrypted) workload, freeing the send-copy CPU
+turns directly into more bytes. The bigger the link and channel count, the more
+the saved CPU matters. Falls back to copying `Send` on kernels < 5.19 (probed
+at startup). **Note:** guest + `seal` hangs (guest sessions have no session key
+to derive cipher keys) — pre-existing, tracked separately; use an authenticated
 user for encryption.
 
 ### 2026-06-11 — SMB3 encryption (AES-128-GCM, v1.1.0)

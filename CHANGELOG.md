@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### 2026-06-11
-- **perf:** `send_zc` (MSG_ZEROCOPY) on the buffered send path (#15) — buffered responses ≥ 64 KiB (notably encrypted reads, which can't splice) are sent via `IORING_OP_SEND_ZC`, so the kernel pins the tx pages instead of copying them. The two-CQE semantics are handled in the reactor: a send completion (`F_MORE`) parks tx in a new `Drain` state and the buffer is only reused/cleared after the buffer-release notification (`F_NOTIF`); both CQEs are counted toward in-flight accounting so teardown waits for the notification (no use-after-free of pinned tx). Probed at startup via `register_probe`; kernels < 5.19 transparently fall back to the copying `Send`.
+- **perf:** `send_zc` (MSG_ZEROCOPY) on the buffered send path (#15) — buffered responses ≥ 64 KiB (notably encrypted reads, which can't splice) are sent via `IORING_OP_SEND_ZC`, so the kernel pins the tx pages instead of copying them. Measured (jumbo cross-VM, 4 parallel encrypted streams): **+10% aggregate throughput, −12% server CPU per GiB**. The two-CQE semantics are handled in the reactor: a send completion (`F_MORE`) parks tx in a new `Drain` state and the buffer is only reused/cleared after the buffer-release notification (`F_NOTIF`); both CQEs are counted toward in-flight accounting so teardown waits for the notification (no use-after-free of pinned tx). Probed at startup via `register_probe`; kernels < 5.19 transparently fall back to the copying `Send`.
 
 ## [v1.1.0] — 2026-06-11
 

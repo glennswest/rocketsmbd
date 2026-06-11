@@ -119,7 +119,9 @@ Implemented:
 - **Server read-ahead** — `POSIX_FADV_SEQUENTIAL`.
 - **send_zc (`MSG_ZEROCOPY`)** on the buffered send path (≥ 64 KiB responses,
   e.g. encrypted reads); kernel pins tx pages instead of copying. Probed at
-  startup; copying `Send` on kernels < 5.19. See the bullet below for numbers.
+  startup; copying `Send` on kernels < 5.19. Jumbo cross-VM, 4 parallel
+  encrypted streams: **+10% aggregate, −12% server CPU/GiB** (the win scales
+  with channel count and link speed). See BENCHMARKS.md.
 - **Frame batching, TCP_NODELAY, 4 MiB writes, 1 MiB reads** (see other entries).
 
 Planned, in rough value order for 400/800GbE:
