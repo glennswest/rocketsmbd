@@ -173,6 +173,9 @@ pub struct Srv {
     pub interfaces: Vec<crate::net::Iface>,
     /// Cross-connection session table (multichannel).
     pub sessions: crate::session::Registry,
+    /// Per-worker wakeable mailboxes for cross-worker lease/oplock break
+    /// delivery (indexed by worker id). See `crate::lease`.
+    pub mailboxes: Vec<crate::lease::Mailbox>,
 }
 
 pub fn urandom(buf: &mut [u8]) {

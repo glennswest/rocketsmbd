@@ -7,7 +7,7 @@ extern crate rocketsmbd;
 use rocketsmbd::config::Config;
 use rocketsmbd::{config, log, vfs};
 #[cfg(target_os = "linux")]
-use rocketsmbd::{config::Srv, net, session, smb2, uring};
+use rocketsmbd::{config::Srv, lease, net, session, smb2, uring};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 
@@ -82,6 +82,19 @@ fn run(cfg: Config) {
                 .join(", ")
         );
     }
+    let workers = if cfg.workers > 0 {
+        cfg.workers
+    } else {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    };
+
+    // One break-delivery mailbox per worker (created before spawn so every
+    // worker can reach every other worker's mailbox through the shared Srv).
+    let mut mailboxes = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        mailboxes.push(lease::Mailbox::new().expect("create worker mailbox"));
+    }
+
     let srv = Arc::new(Srv {
         cfg,
         guid,
@@ -91,13 +104,8 @@ fn run(cfg: Config) {
         allow_guest,
         interfaces,
         sessions: session::Registry::default(),
+        mailboxes,
     });
-
-    let workers = if srv.cfg.workers > 0 {
-        srv.cfg.workers
-    } else {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-    };
     logi!(
         "rocketsmbd {} listening on {} ({} workers, max_read {} KiB)",
         env!("CARGO_PKG_VERSION"),

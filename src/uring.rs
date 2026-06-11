@@ -28,6 +28,8 @@ const OP_SPLICE_IN: u8 = 4;
 const OP_SPLICE_OUT: u8 = 5;
 const OP_INOTIFY: u8 = 6;
 const OP_CANCEL: u8 = 7;
+/// Worker-level op: the per-worker break mailbox eventfd fired.
+const OP_WAKE: u8 = 8;
 
 const IN_MASK: u32 = libc::IN_CREATE
     | libc::IN_DELETE
@@ -192,6 +194,9 @@ struct Worker {
     /// Whether the running kernel supports IORING_OP_SEND_ZC (≥ 5.19). Older
     /// kernels (down to our 5.15 floor) fall back to a plain copying Send.
     send_zc_ok: bool,
+    /// 8-byte landing buffer for the break-mailbox eventfd read (must outlive
+    /// the in-flight Read SQE, so it lives on the worker).
+    wake_buf: u64,
 }
 
 pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
@@ -222,8 +227,10 @@ pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
         free: Vec::new(),
         conn_seed: (wid as u64) << 20,
         send_zc_ok,
+        wake_buf: 0,
     };
     arm_accept(&mut ring, &w);
+    arm_wake(&mut ring, &mut w);
     logd!("worker {wid} ready");
 
     let mut cqes: Vec<(u64, i32, u32)> = Vec::with_capacity(256);
@@ -346,6 +353,47 @@ fn arm_accept(ring: &mut IoUring, w: &Worker) {
     sq_push(ring, &e);
 }
 
+/// Arm a read on this worker's break-mailbox eventfd. When another worker
+/// posts a lease/oplock break, the eventfd fires and `on_wake` drains it.
+fn arm_wake(ring: &mut IoUring, w: &mut Worker) {
+    let efd = w.srv.mailboxes[w.wid].event_fd();
+    if efd < 0 {
+        return;
+    }
+    let e = opcode::Read::new(types::Fd(efd), &mut w.wake_buf as *mut u64 as *mut u8, 8)
+        .build()
+        .user_data(ud(OP_WAKE, 0, 0));
+    sq_push(ring, &e);
+}
+
+/// The break mailbox fired: drain queued breaks and deliver them, then re-arm.
+fn on_wake(ring: &mut IoUring, w: &mut Worker) {
+    let breaks = w.srv.mailboxes[w.wid].drain();
+    for b in breaks {
+        deliver_break(ring, w, b);
+    }
+    arm_wake(ring, w);
+}
+
+/// Deliver a single lease/oplock break to a connection owned by this worker.
+/// The grant path is not yet enabled, so for now this only validates the
+/// target slot/generation; the OPLOCK_BREAK notification frame is built and
+/// pushed onto the connection's deferred queue in the grant/break increment.
+fn deliver_break(_ring: &mut IoUring, w: &mut Worker, b: crate::lease::BreakMsg) {
+    let Some(conn) = w.conns.get_mut(b.conn_idx).and_then(|c| c.as_mut()) else {
+        return; // slot recycled — holder already gone
+    };
+    if conn.gen != b.conn_gen {
+        return; // generation mismatch — different connection now
+    }
+    logd!(
+        "worker {}: lease break for slot {} (state -> {:#x})",
+        w.wid,
+        b.conn_idx,
+        b.new_state
+    );
+}
+
 fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32, flags: u32) {
     let (op, idx, gen) = ud_parts(udata);
     if op == OP_ACCEPT {
@@ -355,6 +403,11 @@ fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32, flags: u
             return;
         }
         on_accept(ring, w, res);
+        return;
+    }
+    if op == OP_WAKE {
+        // eventfd read may be short/interrupted; re-arm regardless and drain.
+        on_wake(ring, w);
         return;
     }
     // Cancel completions carry a sentinel gen and are not counted.

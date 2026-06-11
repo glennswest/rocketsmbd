@@ -783,6 +783,7 @@ mod tests {
             allow_guest,
             interfaces: vec![],
             sessions: crate::session::Registry::default(),
+            mailboxes: vec![],
         }
     }
 

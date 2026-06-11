@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod crypto;
+pub mod lease;
 #[macro_use]
 pub mod log;
 pub mod net;
