@@ -21,15 +21,31 @@ follow each distro's guidelines — that's what the files in `packaging/` target
 - [x] Man page (`docs/rocketsmbd.8`), systemd unit, sample config
 - [x] CI (build + test + clippy), tagged releases
 - [x] No bundled secrets; `.gitignore` clean
-- [ ] **Parser fuzzing** (cargo-fuzz) — strongly wanted for a network service (#20)
-- [ ] **1.0** (distros are wary of `0.x` daemons that listen on the network) (#24)
+- [x] **Parser fuzzing** (cargo-fuzz) — SMB2 + NTLMSSP entry points, in CI (#20)
+- [x] **1.0** released (stable config/wire contract; distros are wary of `0.x`
+  network daemons) (#24)
+- [x] **All direct dependencies already packaged in Fedora** as `rust-*-devel`
+  (io-uring, libc, aes, aes-gcm, cmac, hmac, md-5, md4, sha2, serde, toml) — so
+  the **unbundled** build the Rust SIG prefers is feasible *today* with no new
+  crate packaging. Decisive enabler.
 - [ ] Clear upstream contact / maintainer for the distro bug trackers
+- [ ] A **sponsor** in the Fedora `packager` group (the real remaining gate;
+  social, not technical — engage the Rust SIG, below)
 
 ## Fedora
 
 The Rust SIG packages Rust software with **`rust2rpm`** (generates a spec with
 per-crate `BuildRequires`), or — for a leaf application — by **bundling**
 vendored crates with `Provides: bundled(crate(NAME)) = VER`.
+
+**We can and should go unbundled.** Verified on Fedora 43: every direct
+dependency is already packaged (`rust-io-uring-devel`, `rust-aes-gcm-devel`,
+`rust-cmac-devel`, `rust-hmac-devel`, `rust-md-5-devel`, `rust-md4-devel`,
+`rust-sha2-devel`, `rust-libc-devel`, `rust-serde-devel`, `rust-toml-devel`),
+so a `rust2rpm`-generated spec resolves its `BuildRequires` against system
+crates with no vendoring and no bundling exception — the cleanest path through
+review. (The vendored `packaging/rocketsmbd.spec` stays for COPR/`rpmbuild
+--rebuild` convenience; the official submission uses the unbundled spec.)
 
 Path:
 1. **COPR first** (no review, instant `dnf copr enable`): build from the spec
