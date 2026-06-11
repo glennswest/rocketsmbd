@@ -110,7 +110,21 @@ buffers — now teardown waits for completions), and a 3.1.1 signature
 rejection (we only signed when the client set REQUIRED; auth'd sessions must
 always sign).
 
-### Phase 3 — throughput & scale (v0.3.0)  ← IN PROGRESS
+### Phase 4 — SMB3 encryption (1.x, #10)  ← IN PROGRESS
+Lifts the trusted-LAN limitation. AES-128-GCM for SMB 3.1.1 first.
+- [x] Crypto: aes-gcm dep, AES-128-GCM seal/open, SMB3 cipher-key derivation
+      (SMBC2SCipherKey/SMBS2CCipherKey), roundtrip/tamper tests
+- [ ] SMB2 TRANSFORM_HEADER codec (0xFD'SMB', nonce, tag, orig size, session id)
+- [ ] NEGOTIATE: advertise AES-128-GCM in the 3.1.1 encryption-capabilities ctx
+- [ ] SESSION_SETUP: derive per-session c2s/s2c encryption keys
+- [ ] Reactor/process_frame: decrypt inbound transform-wrapped frames; encrypt
+      outbound when the session/share requires it (encrypted reads = buffered,
+      like signed — no splice)
+- [ ] Config: `encrypt` (off/allow/require) global + per-share; SHAREFLAG
+- [ ] Test: cifs `seal` mount option + Windows `Get-SmbConnection -Encrypted`
+- [ ] AES-256-GCM + AES-CCM (3.0/3.0.2) as a follow-up
+
+### Phase 3 — throughput & scale (v0.3.0)
 Goal: saturate high-speed NICs (target: fill 100GbE from a single client).
 100GbE = 12.5 GB/s; a single TCP/core tops ~45 Gbps (our loopback single-stream
 read). Filling the pipe requires spreading across cores = multiple connections.

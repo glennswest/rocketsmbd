@@ -102,6 +102,47 @@ pub fn smb2_signature(alg: SignAlg, key: &[u8; 16], parts: &[&[u8]]) -> [u8; 16]
     }
 }
 
+// ----------------------------------------------------------- SMB3 encryption
+
+/// SMB3 cipher id for AES-128-GCM (MS-SMB2 SMB2_ENCRYPTION_CAPABILITIES).
+pub const CIPHER_AES128_GCM: u16 = 0x0002;
+
+/// Derive the SMB 3.1.1 encryption keys from the session key and the session
+/// preauth hash: (client→server decrypt key, server→client encrypt key).
+pub fn smb311_encryption_keys(session_key: &[u8; 16], preauth: &[u8; 64]) -> ([u8; 16], [u8; 16]) {
+    let c2s = kdf128(session_key, b"SMBC2SCipherKey\0", preauth);
+    let s2c = kdf128(session_key, b"SMBS2CCipherKey\0", preauth);
+    (c2s, s2c)
+}
+
+/// AES-128-GCM seal: encrypt `buf` in place and return the 16-byte tag.
+/// `nonce` is the 12-byte GCM nonce; `aad` is the SMB2 TRANSFORM_HEADER bytes
+/// that are authenticated but not encrypted (Nonce..end).
+pub fn aes128_gcm_seal(key: &[u8; 16], nonce: &[u8; 12], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
+    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    let cipher = aes_gcm::Aes128Gcm::new(key.into());
+    let tag = cipher
+        .encrypt_in_place_detached(nonce.into(), aad, buf)
+        .expect("aes-gcm encrypt");
+    tag.into()
+}
+
+/// AES-128-GCM open: verify the tag and decrypt `buf` in place. Returns false
+/// (and leaves `buf` modified) on authentication failure.
+pub fn aes128_gcm_open(
+    key: &[u8; 16],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    buf: &mut [u8],
+    tag: &[u8; 16],
+) -> bool {
+    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    let cipher = aes_gcm::Aes128Gcm::new(key.into());
+    cipher
+        .decrypt_in_place_detached(nonce.into(), aad, buf, tag.into())
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +196,39 @@ mod tests {
     #[test]
     fn rc4_known() {
         assert_eq!(rc4(b"Key", b"Plaintext"), hex("bbf316e8d940af0ad3"));
+    }
+
+    #[test]
+    fn aes128_gcm_roundtrip_and_tamper() {
+        let key = [0x11u8; 16];
+        let nonce = [0x22u8; 12];
+        let aad = b"smb2-transform-header-aad";
+        let plain = b"the quick brown fox jumps over the lazy SMB share".to_vec();
+
+        let mut buf = plain.clone();
+        let tag = aes128_gcm_seal(&key, &nonce, aad, &mut buf);
+        assert_ne!(buf, plain, "ciphertext must differ from plaintext");
+
+        let mut dec = buf.clone();
+        assert!(aes128_gcm_open(&key, &nonce, aad, &mut dec, &tag));
+        assert_eq!(dec, plain, "decrypt must recover plaintext");
+
+        // Tampered tag, wrong AAD, and wrong key must all fail to authenticate.
+        let mut t = tag;
+        t[0] ^= 1;
+        assert!(!aes128_gcm_open(&key, &nonce, aad, &mut buf.clone(), &t));
+        assert!(!aes128_gcm_open(&key, &nonce, b"other-aad", &mut buf.clone(), &tag));
+        assert!(!aes128_gcm_open(&[0u8; 16], &nonce, aad, &mut buf.clone(), &tag));
+    }
+
+    #[test]
+    fn enc_keys_deterministic_and_distinct() {
+        let sk = [7u8; 16];
+        let pa = [9u8; 64];
+        let (c2s, s2c) = smb311_encryption_keys(&sk, &pa);
+        assert_ne!(c2s, s2c, "c2s and s2c keys must differ");
+        let (c2s2, _) = smb311_encryption_keys(&sk, &pa);
+        assert_eq!(c2s, c2s2, "derivation must be deterministic");
     }
 
     #[test]
