@@ -75,5 +75,6 @@ cargo test --release --offline || :
 %{_mandir}/man8/%{name}.8*
 
 %changelog
-* Wed Jun 11 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 0.4.0-1
-- Initial package: SMB3 multichannel, NTLMv2 auth, signing, zero-copy reads.
+* Thu Jun 11 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 1.0.0-1
+- 1.0.0 stable: SMB 2.0.2-3.1.1, NTLMv2 auth, SMB2/3 signing, multichannel,
+  zero-copy reads. Parsers fuzzed. Trusted-LAN scope (no encryption yet).
