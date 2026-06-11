@@ -572,7 +572,7 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
         // Process the decrypted message(s); encrypted sessions never splice
         // (read() forces the buffered path), so this won't be a ZcRead.
         let mut inner = Vec::new();
-        let _ = process_plain(srv, pc, &plain, &mut inner);
+        let _ = process_plain(srv, pc, &plain, &mut inner, true);
         if inner.len() <= 4 {
             tx.clear();
             return FrameAction::Respond; // no response (e.g. CANCEL)
@@ -585,10 +585,18 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
         }
         return FrameAction::Respond;
     }
-    process_plain(srv, pc, frame, tx)
+    process_plain(srv, pc, frame, tx, false)
 }
 
-fn process_plain(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u8>) -> FrameAction {
+/// `encrypted` is true when these messages arrived inside a transform (so the
+/// response will be wrapped, not signed).
+fn process_plain(
+    srv: &Srv,
+    pc: &mut ProtoConn,
+    frame: &[u8],
+    tx: &mut Vec<u8>,
+    encrypted: bool,
+) -> FrameAction {
     let base = tx.len();
     tx.zeros(4); // NBT placeholder
 
@@ -680,6 +688,12 @@ fn process_plain(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u8>) 
         let Some(ch) = pc.channels.get(&rec.sess_id) else {
             continue;
         };
+        // Responses to encrypted requests are wrapped (AEAD tag = integrity),
+        // so they're not separately signed. Plaintext-path responses — incl.
+        // the session-setup response that *enables* encryption — are signed.
+        if encrypted {
+            continue;
+        }
         if let Some(sc) = ch.sign.clone() {
             sign_in_place(tx, rec.start, end, &sc);
         }

@@ -84,19 +84,24 @@ pub fn dispatch(
     let h = &h;
 
     // Verify signatures on signed requests; reject unsigned requests on
-    // signing-required channels. Signing state is connection-local.
+    // signing-required channels. Signing state is connection-local. Skipped
+    // entirely for encrypted sessions — an SMB3-encrypted message is not
+    // separately signed; the AEAD tag provides integrity (and it already
+    // verified during decryption).
     if let Some(ch) = pc.channels.get(&chain.session_id) {
-        if let Some(sc) = &ch.sign {
-            if h.flags & FLAG_SIGNED != 0 {
-                if !verify_signature(msg, sc) {
+        if !ch.encrypt {
+            if let Some(sc) = &ch.sign {
+                if h.flags & FLAG_SIGNED != 0 {
+                    if !verify_signature(msg, sc) {
+                        err_resp(tx, h, status::ACCESS_DENIED, chain);
+                        return None;
+                    }
+                } else if ch.signing_required
+                    && !matches!(h.command, CMD_NEGOTIATE | CMD_SESSION_SETUP | CMD_CANCEL)
+                {
                     err_resp(tx, h, status::ACCESS_DENIED, chain);
                     return None;
                 }
-            } else if ch.signing_required
-                && !matches!(h.command, CMD_NEGOTIATE | CMD_SESSION_SETUP | CMD_CANCEL)
-            {
-                err_resp(tx, h, status::ACCESS_DENIED, chain);
-                return None;
             }
         }
     }
