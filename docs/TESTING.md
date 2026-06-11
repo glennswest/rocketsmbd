@@ -87,6 +87,17 @@ self-relative descriptor (Administrators owner/group, Everyone-full DACL — we
 don't enforce ACLs but clients query the descriptor on open). `.NET FileStream`
 now opens and streams correctly. Tracked as a GitHub issue.
 
+### Concurrent multi-stream from Windows
+`win-multistream.ps1` runs N read + M write streams from the Windows client
+**concurrently** (PowerShell background jobs) against rocketsmbd and reports
+aggregate. 4 reads + 4 writes all run and complete together; throughput is
+~2–4 Gbps, again the `vmbr0` (MTU 1500, single-queue) ceiling shared across
+streams — not the server. (Harness caveat: PowerShell `Receive-Job` only
+tallies ~half the streams' byte counts reliably; the streams still all run, so
+the real aggregate is roughly 8 GiB / wall-time.) Putting the Windows VM on the
+jumbo/multiqueue bridge (virtio-win NIC on `vmbr1`) is the follow-up to scale
+it like the Linux client (47 Gbps).
+
 ### "1.3 GB/s" explained
 A Windows `.NET`/copy read measured ~1.8–2.1 Gbps over `vmbr0` (MTU 1500,
 single-queue). That is the **network path**, not the server — the same NIC
