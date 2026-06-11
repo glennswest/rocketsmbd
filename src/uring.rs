@@ -19,7 +19,7 @@ use io_uring::{opcode, squeue, types, IoUring};
 
 use crate::config::Srv;
 use crate::smb2::{self, FrameAction, ProtoConn, ZcReadPlan};
-use crate::{logd, logw, status};
+use crate::status;
 
 const OP_ACCEPT: u8 = 1;
 const OP_RECV: u8 = 2;

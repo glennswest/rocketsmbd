@@ -1,26 +1,15 @@
 //! rocketsmbd — smbd replacement: io_uring end-to-end, zero-copy file→socket.
+//! Thin binary wrapper around the `rocketsmbd` library.
 
-// Off-Linux the reactor is compiled out, so most protocol code is "dead";
-// dev hosts (macOS) still run the unit tests.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[macro_use]
+extern crate rocketsmbd;
 
-mod config;
-mod crypto;
-mod log;
-mod net;
-mod session;
-mod ntlm;
-mod smb2;
-mod status;
-mod vfs;
-mod wire;
-
+use rocketsmbd::config::Config;
+use rocketsmbd::{config, log, vfs};
 #[cfg(target_os = "linux")]
-mod uring;
-
-use config::Config;
+use rocketsmbd::{config::Srv, net, session, smb2, uring};
 #[cfg(target_os = "linux")]
-use {config::Srv, std::sync::Arc};
+use std::sync::Arc;
 
 const USAGE: &str = "usage: rocketsmbd [--config <path>] [--check] [--version]";
 

@@ -27,3 +27,9 @@ temp/
 
 # Claude session-local
 .claude/settings.local.json
+
+# cargo-fuzz
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/

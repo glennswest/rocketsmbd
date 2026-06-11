@@ -1,0 +1,28 @@
+[package]
+name = "rocketsmbd-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.rocketsmbd]
+path = ".."
+
+[[bin]]
+name = "process_frame"
+path = "fuzz_targets/process_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntlm"
+path = "fuzz_targets/ntlm.rs"
+test = false
+doc = false
+bench = false
