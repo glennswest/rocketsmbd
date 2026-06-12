@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-06-12
+- **fix:** **Guest + SMB3 encryption no longer hangs the mount (#26).** Guest/anonymous sessions carry no session key, so SMB3 cipher keys can't be derived — encryption is invalid for them (matching Windows). Two parts: (1) session-setup now denies a guest/anonymous logon with `STATUS_ACCESS_DENIED` when `encrypt = true` is required, instead of granting a session the client then can't seal; (2) the reactor disconnects on an undecryptable `TRANSFORM` frame (`FrameAction::Close`) rather than silently dropping it — the silent drop left the client waiting forever. Net: `mount -o guest,seal` now fails fast/cleanly instead of hanging; use an authenticated user for encrypted mounts.
 - **chore:** Published `rocketsmbd` 1.1.0 to [crates.io](https://crates.io/crates/rocketsmbd) — canonical source for the future unbundled Fedora spec and `cargo install rocketsmbd`. README gains a crates.io badge + install path.
 - **packaging:** Fedora package made review-clean — aggregate license `MIT AND BSD-3-Clause AND Unicode-3.0`, 47 `bundled(crate())` Provides, debuginfo subpackage, `rocketsmbd.rpmlintrc`; rpmlint 0/0/0. Submission runbook in `docs/fedora-submission.md` (review bug + sponsor message drafted).
 

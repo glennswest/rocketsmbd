@@ -285,6 +285,10 @@ pub struct ZcReadPlan {
 pub enum FrameAction {
     Respond,
     ZcRead(ZcReadPlan),
+    /// Tear down the connection. Used when an encrypted (TRANSFORM) frame
+    /// cannot be decrypted — per MS-SMB2 the server disconnects rather than
+    /// leaving the client waiting for a response it will never get.
+    Close,
 }
 
 /// State threaded through a compound chain.
@@ -573,13 +577,17 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
         let sid = if frame.len() >= TRANSFORM_HDR_LEN {
             u64::from_le_bytes(frame[44..52].try_into().unwrap())
         } else {
-            return FrameAction::Respond; // malformed → drop (tx unchanged)
+            return FrameAction::Close; // malformed transform → disconnect
         };
         let Some(enc) = pc.channels.get(&sid).and_then(|c| c.enc.clone()) else {
-            return FrameAction::Respond; // no key for this session → drop
+            // No decryption key for this session (e.g. a guest/anonymous
+            // session, which cannot be encrypted). The client sealed traffic we
+            // can't decrypt — disconnect instead of silently dropping, which
+            // would hang the client forever (#26).
+            return FrameAction::Close;
         };
         let Some(plain) = decrypt_transform(frame, &enc) else {
-            return FrameAction::Respond; // auth failure → drop
+            return FrameAction::Close; // auth/decrypt failure → disconnect
         };
         // This session is actively encrypting — make reads take the buffered
         // path (responses are wrapped, so they can't be spliced).
@@ -817,6 +825,7 @@ mod tests {
         match process_frame(srv, pc, &frame, &mut tx) {
             FrameAction::Respond => {}
             FrameAction::ZcRead(_) => panic!("unexpected zc plan"),
+            FrameAction::Close => panic!("unexpected close"),
         }
         assert!(tx.len() > 68, "no response produced");
         let nbt = ((tx[1] as usize) << 16) | ((tx[2] as usize) << 8) | tx[3] as usize;
@@ -1042,6 +1051,7 @@ mod tests {
                 assert_eq!(nbt, 80 + 11);
             }
             FrameAction::Respond => panic!("expected zero-copy plan for 64K read"),
+            FrameAction::Close => panic!("unexpected close"),
         }
 
         let _ = std::fs::remove_dir_all(&dir);

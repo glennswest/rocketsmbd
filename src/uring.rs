@@ -652,6 +652,12 @@ fn drive(ring: &mut IoUring, w: &mut Worker, idx: usize) {
         }
         match action {
             FrameAction::Respond => {}
+            FrameAction::Close => {
+                // Undecryptable encrypted frame (e.g. guest + seal): disconnect
+                // rather than leave the client hanging (#26).
+                close_conn_ring(ring, w, idx);
+                return;
+            }
             FrameAction::ZcRead(plan) => {
                 if conn_mut(w, idx).tx.is_empty() {
                     start_zc(ring, w, idx, plan);

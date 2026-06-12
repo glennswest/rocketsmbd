@@ -626,6 +626,18 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
                     );
                     ss_resp(tx, h, status::SUCCESS, chain.related, sid, ss_flags, &done);
                 }
+                Verdict::Guest if srv.cfg.encrypt => {
+                    // Guest/anonymous sessions carry no key and cannot be
+                    // encrypted; refuse rather than let the client seal traffic
+                    // the server can't decrypt (which would hang it, #26).
+                    crate::logw!(
+                        "session {:x}: guest denied — encryption is required but guest sessions cannot be encrypted",
+                        sid
+                    );
+                    pc.channels.remove(&sid);
+                    srv.sessions.remove(sid);
+                    err_resp(tx, h, status::ACCESS_DENIED, chain);
+                }
                 Verdict::Guest => {
                     {
                         let mut s = sref.lock().unwrap();
@@ -648,7 +660,15 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
         }
         ntlm::Token::Other => {
             // No NTLMSSP token at all (e.g. pure anonymous): guest if allowed.
-            if srv.allow_guest {
+            // Guest/anonymous sessions carry no key, so they cannot be
+            // encrypted — if encryption is required, deny rather than let the
+            // client seal traffic we can't decrypt (#26).
+            if srv.allow_guest && srv.cfg.encrypt {
+                crate::logw!(
+                    "anonymous session denied: encryption is required but guest sessions cannot be encrypted"
+                );
+                err_resp(tx, h, status::ACCESS_DENIED, chain);
+            } else if srv.allow_guest {
                 let (sid, sref) = srv.sessions.create();
                 {
                     let mut s = sref.lock().unwrap();
