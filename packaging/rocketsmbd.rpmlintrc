@@ -2,9 +2,8 @@
 # expected vendored-tarball Source.
 from rpmlint.filter import Filter  # noqa
 
-# "io_uring" / "recv" are correct technical terms, not misspellings.
+# "io_uring" is a correct technical term, not a misspelling.
 addFilter(r"spelling-error.* uring ")
-addFilter(r"spelling-error.* recv ")
 # Source1 is a vendored-crates tarball produced at release time, not a URL.
 # rocketsmbd needs io-uring 0.7, newer than the rust-io-uring Fedora ships,
 # so the dependency tree is bundled (see the spec header).
