@@ -63,6 +63,29 @@ textbook case. The offline build also confirmed the **rest** of the tree
 resolves unbundled, so if/when `rust-io-uring` reaches 0.7 (we can offer to
 help bump it) we flip to the unbundled `rust2rpm` spec with a one-line change.
 
+### Review-readiness — done
+
+The bundled spec is **review-clean** (validated on Fedora 43):
+
+- **License** tag is the aggregate of the bundled crates' effective licenses,
+  `MIT AND BSD-3-Clause AND Unicode-3.0` (MIT chosen for dual MIT/Apache crates;
+  `subtle` forces BSD-3-Clause, `unicode-ident` forces Unicode-3.0). Per-crate
+  audited — all three are Fedora-allowed.
+- **`Provides: bundled(crate(NAME)) = VER`** for all 47 vendored crates
+  (verified emitted by `rpm -q --provides`).
+- **`%check`** runs the test suite; **debuginfo** is kept
+  (`CARGO_PROFILE_RELEASE_DEBUG=2`/`STRIP=false`) so a proper `-debuginfo`
+  subpackage is produced (no unstripped-binary warning).
+- **`packaging/rocketsmbd.rpmlintrc`** (shipped as `Source2`) filters only the
+  `io_uring` domain-term spelling false-positive and the expected
+  vendored-`Source1`-is-not-a-URL note.
+- **`rpmlint`** over SRPM + RPM + `-debuginfo` together (how `fedora-review`
+  runs it): **0 errors, 0 warnings, 0 badness.**
+
+Remaining before filing: run `fedora-review -b <bug>` (full mock build; the
+`rpmbuild --rebuild` offline build + `%check` already pass), then file the
+Package Review bug and ping the Rust SIG for a sponsor.
+
 Path:
 1. **COPR first** (no review, instant `dnf copr enable`): build from the spec
    in `packaging/rocketsmbd.spec`. Gets real users now. (#22)
