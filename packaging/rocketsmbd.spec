@@ -10,12 +10,11 @@
 #
 # COPR usage: provide the release tarball as Source0 and a vendored-crates
 # tarball as Source1 (packaging/build-srpm.sh produces both).
-%global debug_package %{nil}
 
 Name:           rocketsmbd
 Version:        1.1.0
 Release:        1%{?dist}
-Summary:        io_uring SMB2/SMB3 file server (zero-copy, multichannel)
+Summary:        SMB2/SMB3 file server built on Linux io_uring (zero-copy, multichannel)
 
 # Effective license of the built binary = AND of all bundled crates' licenses,
 # choosing MIT where a crate is dual MIT/Apache-2.0 (rocketsmbd itself is MIT).
@@ -23,7 +22,9 @@ Summary:        io_uring SMB2/SMB3 file server (zero-copy, multichannel)
 License:        MIT AND BSD-3-Clause AND Unicode-3.0
 URL:            https://github.com/glennswest/rocketsmbd
 Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
+# Vendored crates (not a URL): rocketsmbd needs io-uring 0.7, newer than Fedora.
 Source1:        %{name}-%{version}-vendor.tar.xz
+Source2:        %{name}.rpmlintrc
 
 ExclusiveArch:  x86_64 aarch64
 BuildRequires:  cargo
@@ -81,7 +82,7 @@ Provides:       bundled(crate(winnow)) = 1.0.3
 
 %description
 rocketsmbd is a from-scratch SMB2/SMB3 file server built on Linux io_uring:
-accept, recv, send, and file I/O flow through one ring per worker, and file
+accept, receive, send, and file I/O flow through one ring per worker, and file
 reads are served zero-copy from page cache to socket via splice. Supports
 NTLMv2 authentication, SMB2/3 signing, SMB 3.1.1, SMB3 multichannel, and SMB3
 encryption (AES-128-GCM).
@@ -103,7 +104,10 @@ directory = "vendor"
 EOF
 
 %build
-cargo build --release --offline
+# Keep debuginfo (override the upstream profile's strip=true) so Fedora can
+# extract a -debuginfo subpackage instead of shipping an unstripped binary.
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=false \
+    cargo build --release --offline
 
 %install
 install -Dpm0755 target/release/%{name} %{buildroot}%{_bindir}/%{name}

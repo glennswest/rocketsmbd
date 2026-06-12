@@ -20,6 +20,7 @@ echo "==> vendoring crates"
 cargo vendor vendor >/dev/null
 tar caf "$top/SOURCES/$NAME-$V-vendor.tar.xz" vendor
 
+cp packaging/$NAME.rpmlintrc "$top/SOURCES/"
 cp packaging/$NAME.spec "$top/SPECS/"
 echo "==> building SRPM"
 rpmbuild -bs "$top/SPECS/$NAME.spec"
