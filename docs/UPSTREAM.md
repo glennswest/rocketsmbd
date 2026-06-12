@@ -24,10 +24,10 @@ follow each distro's guidelines — that's what the files in `packaging/` target
 - [x] **Parser fuzzing** (cargo-fuzz) — SMB2 + NTLMSSP entry points, in CI (#20)
 - [x] **1.0** released (stable config/wire contract; distros are wary of `0.x`
   network daemons) (#24)
-- [x] **All direct dependencies already packaged in Fedora** as `rust-*-devel`
-  (io-uring, libc, aes, aes-gcm, cmac, hmac, md-5, md4, sha2, serde, toml) — so
-  the **unbundled** build the Rust SIG prefers is feasible *today* with no new
-  crate packaging. Decisive enabler.
+- [x] **All direct dependencies packaged in Fedora** as `rust-*-devel` — but
+  one (`io-uring`) is too old (0.6.4 vs our required 0.7), so the official
+  submission uses the **bundled** spec for now (see Fedora section). The rest
+  of the tree resolves unbundled (offline-build verified).
 - [ ] Clear upstream contact / maintainer for the distro bug trackers
 - [ ] A **sponsor** in the Fedora `packager` group (the real remaining gate;
   social, not technical — engage the Rust SIG, below)
@@ -38,14 +38,30 @@ The Rust SIG packages Rust software with **`rust2rpm`** (generates a spec with
 per-crate `BuildRequires`), or — for a leaf application — by **bundling**
 vendored crates with `Provides: bundled(crate(NAME)) = VER`.
 
-**We can and should go unbundled.** Verified on Fedora 43: every direct
-dependency is already packaged (`rust-io-uring-devel`, `rust-aes-gcm-devel`,
-`rust-cmac-devel`, `rust-hmac-devel`, `rust-md-5-devel`, `rust-md4-devel`,
-`rust-sha2-devel`, `rust-libc-devel`, `rust-serde-devel`, `rust-toml-devel`),
-so a `rust2rpm`-generated spec resolves its `BuildRequires` against system
-crates with no vendoring and no bundling exception — the cleanest path through
-review. (The vendored `packaging/rocketsmbd.spec` stays for COPR/`rpmbuild
---rebuild` convenience; the official submission uses the unbundled spec.)
+**Unbundled is blocked on one crate — go bundled for now.** All direct
+dependencies *are* packaged in Fedora, but an unbundled build also requires the
+**versions** to line up (Fedora ships exactly one version per crate). Verified
+on Fedora 43 + rawhide with a fully-offline build against
+`/usr/share/cargo/registry`:
+
+| crate | we require | Fedora ships | ok? |
+|---|---|---|---|
+| toml | `1` (was 0.8) | 1.1.2 | ✅ (bumped to match) |
+| aes-gcm, cmac, hmac, sha2, md-5, md4, serde, libc | as-is | match | ✅ |
+| **io-uring** | **`0.7`** (need `SendZc`) | **0.6.4** (F43 *and* rawhide) | ❌ |
+
+`io-uring` is the blocker: we depend on 0.7-only API (`send_zc`, #15) and
+Fedora is two minor versions behind in both stable and rawhide. Downgrading is
+off the table — it would revert the zero-copy send work.
+
+So **the official Fedora submission uses the bundled (vendored) spec**
+(`packaging/rocketsmbd.spec`, already COPR-validated) with
+`Provides: bundled(crate(NAME)) = VER` and a justification: *the package
+requires a newer `io-uring` than Fedora ships and rides current io_uring
+features*. Fedora permits bundling for leaf applications with cause; this is a
+textbook case. The offline build also confirmed the **rest** of the tree
+resolves unbundled, so if/when `rust-io-uring` reaches 0.7 (we can offer to
+help bump it) we flip to the unbundled `rust2rpm` spec with a one-line change.
 
 Path:
 1. **COPR first** (no review, instant `dnf copr enable`): build from the spec
