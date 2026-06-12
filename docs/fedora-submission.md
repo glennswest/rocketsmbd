@@ -12,8 +12,14 @@ URLs the review uses:
 
 ## 1. Package Review bug
 
-File at Red Hat Bugzilla → product **Fedora**, component **Package Review**
-(<https://bugzilla.redhat.com/enter_bug.cgi?product=Fedora&component=Package%20Review>).
+**One-click pre-filled form** (must be submitted while logged in to
+bugzilla.redhat.com as glennswest — the reporter becomes the package
+maintainer). Open it, review, and click *Submit Bug*:
+
+<https://bugzilla.redhat.com/enter_bug.cgi?product=Fedora&component=Package%20Review&version=rawhide&bug_severity=medium&short_desc=Review%20Request%3A%20rocketsmbd%20-%20SMB2%2FSMB3%20file%20server%20built%20on%20Linux%20io_uring&comment=Spec%20URL%3A%20https%3A%2F%2Fraw.githubusercontent.com%2Fglennswest%2Frocketsmbd%2Fmain%2Fpackaging%2Frocketsmbd.spec%0ASRPM%20URL%3A%20https%3A%2F%2Fgithub.com%2Fglennswest%2Frocketsmbd%2Freleases%2Fdownload%2Fv1.1.0%2Frocketsmbd-1.1.0-1.fc43.src.rpm%0A%0ADescription%3A%0Arocketsmbd%20is%20a%20from-scratch%20SMB2%2FSMB3%20file%20server%20built%20on%20Linux%20io_uring%3A%20accept%2C%20receive%2C%20send%2C%20and%20file%20I%2FO%20flow%20through%20one%20ring%20per%20worker%2C%20reads%20zero-copy%20via%20splice.%20SMB%202.0.2-3.1.1%2C%20NTLMv2%2C%20SMB2%2F3%20signing%2C%203.1.1%20preauth%2C%20multichannel%2C%20AES-128-GCM%20encryption.%20Rust%3B%20parsers%20fuzzed%20in%20CI.%0A%0AFAS%3A%20glennswest%0ACOPR%3A%20https%3A%2F%2Fcopr.fedorainfracloud.org%2Fcoprs%2Fglennswest%2Frocketsmbd%2F%0Acrates.io%3A%20https%3A%2F%2Fcrates.io%2Fcrates%2Frocketsmbd%0A%0ABUNDLING%3A%20vendored%20because%20it%20needs%20io-uring%200.7%20%28IORING_OP_SEND_ZC%29%20and%20Fedora%20ships%200.6.4%20in%20stable%2Brawhide%3B%20every%20other%20dep%20resolves%20unbundled.%2047%20bundled%28crate%28%29%29%20Provides%20listed.%20License%3A%20MIT%20AND%20BSD-3-Clause%20AND%20Unicode-3.0%20%28all%20Fedora-allowed%29.%20fedora-review%20%28rawhide%20mock%29%20passes%3B%20rpmlint%20clean%20with%20shipped%20rpmlintrc.%20First%20package%2C%20seeking%20a%20sponsor.&status_whiteboard=needs-sponsor>
+
+(Full untruncated text below if you prefer to paste manually.) File at product
+**Fedora**, component **Package Review**.
 
 **Summary:**
 
