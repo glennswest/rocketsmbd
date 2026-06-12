@@ -100,6 +100,26 @@ FAS: glennswest. Thanks!
 The io-uring-bump offer is deliberate: helping a SIG package is a common fast
 path to sponsorship and clears the unbundling blocker for everyone.
 
+### Internal (Red Hat Slack) — short version for a colleague
+
+For DMing a Red Hat colleague who's a Fedora packager/sponsor (target the Rust
+SIG — they sponsor Rust packagers and own rust-io-uring):
+
+```
+Hey — I'm submitting my first Fedora package and need a reviewer + sponsor into
+the packager group. It's rocketsmbd, a from-scratch SMB2/3 server in Rust on
+io_uring (zero-copy splice, multichannel, AES-GCM). Already fedora-review clean
+and building in COPR (F41/rawhide/EPEL9, x86_64+aarch64).
+
+Review bug: <link once filed>
+COPR: https://copr.fedorainfracloud.org/coprs/glennswest/rocketsmbd/
+
+It's bundled for now only because it needs io-uring 0.7 (SEND_ZC) and Fedora
+ships rust-io-uring 0.6.4 — happy to help bump rust-io-uring to 0.7 so it (and
+anything else) can go unbundled. Could you review/sponsor, or point me at the
+right person? FAS: glennswest. Thanks!
+```
+
 ---
 
 ## 3. Publish the crate to crates.io — DONE
