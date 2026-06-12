@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-06-12
+- **chore:** Published `rocketsmbd` 1.1.0 to [crates.io](https://crates.io/crates/rocketsmbd) — canonical source for the future unbundled Fedora spec and `cargo install rocketsmbd`. README gains a crates.io badge + install path.
+- **packaging:** Fedora package made review-clean — aggregate license `MIT AND BSD-3-Clause AND Unicode-3.0`, 47 `bundled(crate())` Provides, debuginfo subpackage, `rocketsmbd.rpmlintrc`; rpmlint 0/0/0. Submission runbook in `docs/fedora-submission.md` (review bug + sponsor message drafted).
+
 ### 2026-06-11
 - **chore:** Bump `toml` 0.8 → 1 to match the version Fedora packages (`rust-toml` 1.1.2) — only `toml::from_str` is used, so the API is unchanged. Removes one of two dependency-version mismatches found while validating an unbundled Fedora build (the remaining one is `io-uring`: Fedora ships 0.6.4, we require 0.7 for `send_zc`).
 - **docs:** SMB Direct (RDMA/RoCE) design — `docs/SMBDIRECT.md` (#19): RoCEv2 target, libibverbs+rdma-cm as a second transport wired into io_uring via a CQ event-fd, registered buffers as a hard prerequisite (splice doesn't carry to RDMA), `RDMA_CAPABLE` multichannel advertisement reusing channel binding, NIC-offloaded encryption (MACsec/IPsec-over-RoCE/PSP), and the dynamic-link/feature-flag packaging split.

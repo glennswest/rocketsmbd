@@ -96,19 +96,12 @@ path to sponsorship and clears the unbundling blocker for everyone.
 
 ---
 
-## 3. Publish the crate to crates.io (optional now, needed for unbundled later)
+## 3. Publish the crate to crates.io — DONE
 
-Not required for the bundled submission (Source0 is the GitHub tarball), but
-publishing makes rocketsmbd the canonical source for a future rust2rpm spec and
-for `cargo install`. Verify, then publish under your account:
-
-```sh
-cargo publish --dry-run        # validates packaging (already passing)
-cargo login                    # paste your crates.io API token (from crates.io/me)
-cargo publish                  # IRREVERSIBLE — a version can be yanked but not deleted
-```
-
-`rocketsmbd` is an available name on crates.io.
+Published: <https://crates.io/crates/rocketsmbd> (v1.1.0). This makes rocketsmbd
+the canonical source for a future unbundled rust2rpm spec and enables
+`cargo install rocketsmbd`. Future releases: bump the version, then
+`cargo publish` (token in the environment as `CARGO_REGISTRY_TOKEN`).
 
 ---
 

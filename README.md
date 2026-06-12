@@ -1,6 +1,7 @@
 # rocketsmbd
 
 [![CI](https://github.com/glennswest/rocketsmbd/actions/workflows/ci.yml/badge.svg)](https://github.com/glennswest/rocketsmbd/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/rocketsmbd.svg)](https://crates.io/crates/rocketsmbd)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A from-scratch SMB2/SMB3 file server (smbd replacement) written in Rust, built
@@ -37,6 +38,15 @@ sudo dpkg -i ./rocketsmbd_1.1.0-1_amd64.deb
 # then edit /etc/rocketsmbd.toml and:
 sudo systemctl enable --now rocketsmbd
 ```
+
+Or build from source via [crates.io](https://crates.io/crates/rocketsmbd)
+(Linux; needs a Rust toolchain):
+
+```sh
+cargo install rocketsmbd
+```
+
+Fedora users can also `dnf copr enable glennswest/rocketsmbd && dnf install rocketsmbd`.
 
 Distro-upstream packaging (build-from-source `.spec` and `debian/`) and the
 Fedora/Debian submission plan are in [docs/UPSTREAM.md](docs/UPSTREAM.md).
