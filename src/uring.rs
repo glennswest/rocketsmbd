@@ -205,7 +205,20 @@ pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
         .listen_addr()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let listen_fd = listener(&addr)?;
-    let ring = IoUring::new(1024)?;
+    if srv.cfg.core_pinning {
+        pin_to_core(wid);
+    }
+    let ring = if srv.cfg.sqpoll {
+        // SQPOLL: a kernel thread polls the SQ (1s idle before it sleeps), so
+        // submissions need no syscall. Falls back to a normal ring if the
+        // kernel rejects the flag (e.g. lacks CAP_SYS_NICE).
+        IoUring::builder()
+            .setup_sqpoll(1000)
+            .build(1024)
+            .or_else(|_| IoUring::new(1024))?
+    } else {
+        IoUring::new(1024)?
+    };
     let send_zc_ok = {
         let mut probe = io_uring::Probe::new();
         ring.submitter().register_probe(&mut probe).is_ok()
@@ -257,6 +270,23 @@ pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
 const CQE_F_MORE: u32 = 1 << 1;
 /// IORING_CQE_F_NOTIF: this CQE is a send_zc buffer-release notification.
 const CQE_F_NOTIF: u32 = 1 << 3;
+
+/// Pin this worker thread to one CPU core (worker N → core N mod ncpu). Keeps
+/// each ring, its NIC softirqs, and its cache footprint on a single core,
+/// avoiding cross-core traffic under SO_REUSEPORT. Best-effort.
+fn pin_to_core(wid: usize) {
+    let ncpu = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    if ncpu <= 0 {
+        return;
+    }
+    let core = wid % ncpu as usize;
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_ZERO(&mut set);
+        libc::CPU_SET(core, &mut set);
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+    }
+}
 
 fn listener(addr: &std::net::SocketAddr) -> std::io::Result<RawFd> {
     let (domain, sa, sa_len) = sockaddr(addr);

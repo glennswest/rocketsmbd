@@ -37,6 +37,15 @@ pub struct Config {
     /// dedicated storage NIC). Empty = advertise all non-loopback interfaces.
     #[serde(default)]
     pub advertise_only: Vec<String>,
+    /// Pin each worker thread to a CPU core (worker N → core N mod ncpu) so a
+    /// connection's ring, softirqs, and cache stay on one core. Default on.
+    #[serde(default = "default_true")]
+    pub core_pinning: bool,
+    /// Enable io_uring SQPOLL: a kernel thread polls the submission queue so
+    /// submits need no syscall. Helps at high IOPS / many channels; costs a
+    /// busy kernel thread per worker, so it is opt-in. Default off.
+    #[serde(default)]
+    pub sqpoll: bool,
     #[serde(rename = "share")]
     pub shares: Vec<ShareCfg>,
     #[serde(rename = "user", default)]
@@ -72,6 +81,10 @@ fn default_server_name() -> String {
 
 fn default_log_level() -> u8 {
     1
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Config {

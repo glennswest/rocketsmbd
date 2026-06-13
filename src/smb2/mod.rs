@@ -777,6 +777,8 @@ mod tests {
             multichannel: false,
             encrypt: false,
             advertise_only: vec![],
+            core_pinning: false,
+            sqpoll: false,
             shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
             users: vec![],
         };
