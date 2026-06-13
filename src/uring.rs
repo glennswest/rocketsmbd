@@ -377,10 +377,21 @@ fn sq_push_conn(ring: &mut IoUring, w: &mut Worker, idx: usize, e: &squeue::Entr
 }
 
 fn arm_accept(ring: &mut IoUring, w: &Worker) {
-    let e = opcode::Accept::new(types::Fd(w.listen_fd), std::ptr::null_mut(), std::ptr::null_mut())
-        .build()
-        .user_data(ud(OP_ACCEPT, 0, 0));
-    sq_push(ring, &e);
+    let ud = ud(OP_ACCEPT, 0, 0);
+    // Multishot accept stays armed and posts a CQE per connection (no SQE per
+    // accept). It's a modern-kernel feature; gate it on the same probe as
+    // send_zc (≥ 6.0 covers multishot accept's 5.19 floor) and fall back to a
+    // re-armed oneshot Accept on older kernels.
+    if w.send_zc_ok {
+        let e = opcode::AcceptMulti::new(types::Fd(w.listen_fd)).build().user_data(ud);
+        sq_push(ring, &e);
+    } else {
+        let e =
+            opcode::Accept::new(types::Fd(w.listen_fd), std::ptr::null_mut(), std::ptr::null_mut())
+                .build()
+                .user_data(ud);
+        sq_push(ring, &e);
+    }
 }
 
 /// Arm a read on this worker's break-mailbox eventfd. When another worker
@@ -427,7 +438,11 @@ fn deliver_break(_ring: &mut IoUring, w: &mut Worker, b: crate::lease::BreakMsg)
 fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32, flags: u32) {
     let (op, idx, gen) = ud_parts(udata);
     if op == OP_ACCEPT {
-        arm_accept(ring, w);
+        // Multishot accept stays armed (F_MORE set); only re-arm when it has
+        // terminated. Oneshot accept never sets F_MORE, so it always re-arms.
+        if flags & CQE_F_MORE == 0 {
+            arm_accept(ring, w);
+        }
         if res < 0 {
             logw!("worker {}: accept failed: errno {}", w.wid, -res);
             return;
