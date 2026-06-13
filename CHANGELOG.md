@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-06-13
+- **feat:** Worker **core pinning** (#17) — `core_pinning` config (default on) pins worker N to core N mod ncpu (`sched_setaffinity`), keeping each ring, its NIC softirqs, and cache on one core under `SO_REUSEPORT`. Validated (read md5 on/off).
+- **feat:** Opt-in io_uring **SQPOLL** (#13) — `sqpoll = true` builds the ring with `setup_sqpoll` (1s idle) so submissions need no syscall; falls back to a normal ring if the kernel rejects it. Opt-in (spins a kernel thread per worker; a win only at high IOPS / many channels).
+
 ### 2026-06-12
 - **fix:** **Guest + SMB3 encryption no longer hangs the mount (#26).** Guest/anonymous sessions carry no session key, so SMB3 cipher keys can't be derived — encryption is invalid for them (matching Windows). Two parts: (1) session-setup now denies a guest/anonymous logon with `STATUS_ACCESS_DENIED` when `encrypt = true` is required, instead of granting a session the client then can't seal; (2) the reactor disconnects on an undecryptable `TRANSFORM` frame (`FrameAction::Close`) rather than silently dropping it — the silent drop left the client waiting forever. Net: `mount -o guest,seal` now fails fast/cleanly instead of hanging; use an authenticated user for encrypted mounts.
 - **chore:** Published `rocketsmbd` 1.1.0 to [crates.io](https://crates.io/crates/rocketsmbd) — canonical source for the future unbundled Fedora spec and `cargo install rocketsmbd`. README gains a crates.io badge + install path.

@@ -124,9 +124,14 @@ Implemented:
   with channel count and link speed). See BENCHMARKS.md.
 - **Frame batching, TCP_NODELAY, 4 MiB writes, 1 MiB reads** (see other entries).
 
+Implemented (more):
+- **Worker core-pinning** — `core_pinning` (default on) pins worker N to core
+  N mod ncpu, so each ring + its NIC softirqs + cache stay on one core.
+- **SQPOLL** — opt-in `sqpoll = true`; a kernel thread polls the SQ so submits
+  need no syscall. Worth it only at high IOPS / many channels (it spins a
+  kernel thread per worker), hence off by default.
+
 Planned, in rough value order for 400/800GbE:
-- **SQPOLL** — kernel-side submission-queue polling removes a syscall per
-  batch; meaningful at high IOPS / many channels.
 - **Registered files + registered buffers** (`IORING_REGISTER_*`) — drops
   per-op fd refcount and buffer-pinning overhead on the hot path.
 - **Intra-connection read concurrency** — multiple splices in flight per

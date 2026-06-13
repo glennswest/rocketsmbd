@@ -4,6 +4,10 @@ workers = 0            # 0 = one worker per CPU core
 server_name = "ROCKETSMBD"
 log_level = 1          # 0 = warn, 1 = info, 2 = debug
 
+# Performance tuning (sane defaults; usually leave as-is).
+core_pinning = true    # pin worker N to core N (ring + softirqs + cache locality)
+sqpoll = false         # kernel-thread SQ polling; only helps at high IOPS/many channels
+
 # Security. With no [[user]] entries, guest access is allowed by default.
 # Add users to require authentication; set allow_guest explicitly to override.
 require_signing = false   # true = reject unsigned requests on auth'd sessions
