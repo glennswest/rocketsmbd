@@ -6,6 +6,22 @@ Files: *
 Copyright: 2026 Glenn West <glennswest@neuralcloudcomputing.com>
 License: MIT
 
+Comment:
+ This convenience package statically links its Rust dependencies (the binary
+ is built with cargo). Their licenses, choosing MIT where a crate is dual
+ MIT/Apache-2.0, reduce to: MIT and BSD-3-Clause (subtle) and Unicode-3.0
+ (unicode-ident). An official Debian package would instead use dh-cargo /
+ debcargo with each crate packaged separately (no bundling).
+
+License: BSD-3-Clause
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the conditions of the 3-clause BSD
+ license are met. See https://spdx.org/licenses/BSD-3-Clause.html
+
+License: Unicode-3.0
+ Permission is granted under the Unicode License v3. See
+ https://spdx.org/licenses/Unicode-3.0.html
+
 License: MIT
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal

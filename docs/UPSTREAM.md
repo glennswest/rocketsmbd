@@ -134,8 +134,45 @@ Path:
 3. Build with the `debian/` dir here (`dh $@ --buildsystem cargo`).
 4. Find a **DD/DM sponsor** to review and upload (mentors.debian.net).
 
-`packaging/debian/` here is a working skeleton (control, rules, changelog,
-copyright, install, manpages). Crate-dependency resolution is the main work.
+`packaging/debian/` here is current (1.1.0; control/rules/changelog/copyright/
+install/manpages; Standards-Version 4.7.2; copyright notes the bundled crate
+licenses). Crate-dependency resolution is the main work — like Fedora, our code
+builds against older `io-uring`, so debcargo (separate `librust-*` packages) is
+feasible if Debian's `librust-io-uring-dev` is recent enough; otherwise vendor.
+
+### ITP bug — ready to file
+
+`reportbug wnpp` (or email `submit@bugs.debian.org`), severity **wishlist**:
+
+```
+Subject: ITP: rocketsmbd -- SMB2/SMB3 file server built on Linux io_uring
+
+Package: wnpp
+Severity: wishlist
+Owner: Glenn West <glennswest@neuralcloudcomputing.com>
+X-Debbugs-Cc: debian-devel@lists.debian.org, debian-rust@lists.debian.org
+
+* Package name    : rocketsmbd
+  Version         : 1.1.0
+  Upstream Author : Glenn West <glennswest@neuralcloudcomputing.com>
+* URL             : https://github.com/glennswest/rocketsmbd
+* License         : MIT
+  Programming Lang: Rust
+  Description     : SMB2/SMB3 file server built on Linux io_uring
+
+ A from-scratch SMB2/SMB3 file server in Rust on io_uring: accept, receive,
+ send and file I/O flow through one ring per worker, and reads are served
+ zero-copy from page cache to socket via splice. SMB 2.0.2-3.1.1 with NTLMv2
+ auth, SMB2/3 signing, SMB 3.1.1 preauth, SMB3 multichannel, and SMB3
+ encryption (AES-128-GCM). Wire parsers are fuzzed in CI.
+
+ Packaging via the Debian Rust team (dh-cargo). I am looking for a DD/DM
+ sponsor; I'll upload to mentors.debian.net. It is also on crates.io
+ (https://crates.io/crates/rocketsmbd) and in a Fedora COPR.
+```
+
+After filing, upload the source package to **mentors.debian.net** and request a
+sponsor on **debian-mentors@** / the Rust team list.
 
 ## Interim: ship a repo now
 
@@ -146,7 +183,11 @@ Until official inclusion, users can install today from:
 
 ## Status
 
-- GitHub releases: **live** (v0.4.0, x86_64 + aarch64 `.deb`/`.rpm`/binary).
-- Fedora COPR: spec ready (`packaging/rocketsmbd.spec`); COPR project TODO (#22).
-- Debian: skeleton ready (`packaging/debian/`); ITP + sponsor TODO (#23).
-- Blocking for *official* 1.0-quality submission: fuzzing (#20), 1.0 (#24).
+- GitHub releases: **live** (v1.1.0, x86_64 + aarch64 `.deb`/`.rpm`/binary + SRPM).
+- crates.io: **published** (<https://crates.io/crates/rocketsmbd>, v1.1.0).
+- Fedora COPR: **live** (<https://copr.fedorainfracloud.org/coprs/glennswest/rocketsmbd/>).
+  Official review: package is review-clean + `fedora-review`-passing; needs a
+  Rust SIG sponsor + the Package Review bug filed (#22, see docs/fedora-submission.md).
+- Debian: `packaging/debian/` current (1.1.0); ITP drafted above; needs the ITP
+  filed + a DD/DM sponsor (#23).
+- 1.0 ✅, fuzzing in CI ✅ — no longer blocking.

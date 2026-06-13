@@ -1,3 +1,11 @@
+rocketsmbd (1.1.0-1) unstable; urgency=medium
+
+  * SMB3 encryption (AES-128-GCM); send_zc zero-copy buffered send path;
+    worker core pinning and opt-in io_uring SQPOLL.
+  * Fix: guest + SMB3 encryption (seal) no longer hangs the mount.
+
+ -- Glenn West <glennswest@neuralcloudcomputing.com>  Sat, 13 Jun 2026 00:00:00 +0000
+
 rocketsmbd (1.0.0-1) unstable; urgency=medium
 
   * 1.0.0 stable release. Parsers fuzzed; config/wire behavior stable.
