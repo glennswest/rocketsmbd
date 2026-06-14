@@ -1011,6 +1011,7 @@ fn create(
                 conn_gen: cid.2,
             },
         );
+        crate::logd!("oplock: granted Level II (share {share_idx}, ino {})", meta.ino);
     }
 
     begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
