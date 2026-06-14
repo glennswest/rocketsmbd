@@ -1318,17 +1318,19 @@ fn write(
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
     }
-    // Break read-caching leases held by *other* clients (different lease key)
-    // on this file before the write lands, so their cached reads invalidate.
-    // The write handle's own lease key is exempt. Read → none needs no ack.
     let writer_key = of.lease_key;
-    if let Ok(m) = vfs::fstat_meta(of.fd) {
-        for b in srv.leases.break_conflicts((share_idx, m.ino), writer_key) {
-            srv.mailboxes[b.wid].post(b);
-        }
-    }
+    let ino = vfs::fstat_meta(of.fd).ok().map(|m| m.ino);
     match vfs::pwrite_all(of.fd, data, offset) {
         Ok(()) => {
+            // Break read-caching leases held by *other* clients (different lease
+            // key) AFTER the data is durable, so a broken holder's re-read sees
+            // the final content rather than racing a mid-write partial. The
+            // write handle's own lease key is exempt; read → none needs no ack.
+            if let Some(ino) = ino {
+                for b in srv.leases.break_conflicts((share_idx, ino), writer_key) {
+                    srv.mailboxes[b.wid].post(b);
+                }
+            }
             begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
             tx.p16(17);
             tx.p16(0);
