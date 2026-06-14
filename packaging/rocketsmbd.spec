@@ -85,7 +85,8 @@ Provides:       bundled(crate(winnow)) = 1.0.3
 rocketsmbd is a from-scratch SMB2/SMB3 file server built on Linux io_uring:
 accept, receive, send, and file I/O flow through one ring per worker, and file
 reads are served zero-copy from page cache to socket via splice. Supports
-NTLMv2 authentication, SMB2/3 signing, SMB 3.1.1, SMB3 multichannel, SMB3 encryption (AES-128/256-GCM, AES-CCM), and opt-in read-caching leases.
+NTLMv2 authentication, SMB2/3 signing, SMB 3.1.1, SMB3 multichannel, SMB3
+encryption (AES-128/256-GCM and AES-CCM), and opt-in read-caching leases.
 
 Requires a Linux kernel with io_uring (5.15+; 6.0+ recommended), checked at
 startup.
