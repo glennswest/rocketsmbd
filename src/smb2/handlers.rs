@@ -991,6 +991,15 @@ fn create(
         && allow_oplock
         && !is_dir
         && lease_req.as_ref().is_some_and(|l| l.state & LEASE_READ_CACHING != 0);
+    crate::logd!(
+        "create dbg: oplock_byte={:#x} lease={:?} oplocks_cfg={} allow={} is_dir={} grant={}",
+        req.oplock,
+        lease_req.as_ref().map(|l| l.state),
+        srv.cfg.oplocks,
+        allow_oplock,
+        is_dir,
+        grant_lease
+    );
     let fid = sess.handles.insert(OpenFile {
         fd,
         path,
