@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-06-14
+- **feat(#28):** **AES-256-GCM and AES-CCM (128/256)** for SMB 3.1.1 encryption, alongside AES-128-GCM. Generic SP800-108 KDF derives 16/32-byte keys; the transform codec dispatches per cipher with the right nonce length (GCM 12B, CCM 11B). NEGOTIATE picks the first cipher in the client's preference order that we support; new `prefer_aes256` config selects AES-256 when offered. Validated: cifs `seal` negotiates AES-128-GCM and (with `prefer_aes256`) AES-256-GCM — encrypted reads md5-verified both ways; all four ciphers unit-tested (AEAD + transform roundtrip/tamper). CCM via the `ccm` crate.
+
 ### 2026-06-13
 - **feat(#18):** Oplock infrastructure — Level II (read-caching) oplock grant, cross-worker break delivery (per-worker eventfd mailbox), `OPLOCK_BREAK` notification builder, and lease-table release on CLOSE *and* connection teardown. Unit + integration tested (grant, cross-worker break delivery, no-crash, no-leak).
 - **feat(#18):** **Working read-caching leases** (opt-in `oplocks = true`). Server advertises `CAP_LEASING`; CREATE grants a read-caching lease (echoes the `RqLs` response context, OplockLevel 0xFF), and a conflicting WRITE sends a proper **lease-break** (keyed by LeaseKey) to other clients *after* the write is durable, so their cache invalidates and re-reads the final data. Release on CLOSE and connection teardown. Deterministically validated with cifs.ko: guest + signed sessions, single + multi-holder breaks, 256 MiB read md5, no stale reads, no crash. Read-caching only (the safe subset — no dirty client data); write/handle caching and Windows lease interop are follow-ups, so it stays **default-off** pending Windows validation.

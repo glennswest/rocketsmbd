@@ -119,7 +119,7 @@ AES-128-GCM for SMB 3.1.1. Lifts the trusted-LAN limitation.
 - [x] `encrypt` config (require) + ENCRYPT_DATA flag; signing skipped for
       encrypted msgs but the SS response that enables it is still signed
 - [x] Verified: cifs `seal` (md5 integrity) + Windows Server 2025 Encrypted=True
-- [ ] AES-256-GCM + AES-CCM (3.0/3.0.2) — follow-up
+- [x] AES-256-GCM + AES-CCM (128/256) — done (#28); GCM e2e-validated, CCM unit-validated
 
 ### Phase 3 — throughput & scale (v0.3.0)
 Goal: saturate high-speed NICs (target: fill 100GbE from a single client).

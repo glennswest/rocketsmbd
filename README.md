@@ -15,15 +15,17 @@ data never enters userspace. A single client mount stripes across cores via
 
 **Stable (`1.1`).** Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
 authentication, SMB2/3 signing, SMB 3.1.1 preauth integrity, SMB3
-multichannel, and SMB3 encryption (AES-128-GCM)**. Supports a user database,
+multichannel, and SMB3 encryption (AES-128/256-GCM, AES-CCM)**. Supports a user database,
 optional guest access, byte-range locks, and directory change notification.
 The config format and on-wire behavior are stable across the 1.x series; wire
 parsers are fuzzed.
 
 Set `encrypt = true` to require encryption, or just mount with `seal` (Linux)
 / an encrypted share (Windows) — verified against cifs.ko and Windows Server
-2025 (`Encrypted=True`). Oplocks/leases and AES-256-GCM/CCM are on the
-[roadmap](ROADMAP.md). See [SECURITY.md](SECURITY.md).
+2025 (`Encrypted=True`). Ciphers: AES-128/256-GCM and AES-128/256-CCM (set
+`prefer_aes256` to favor 256-bit). Read-caching leases are available opt-in
+(`oplocks = true`); SMB Direct (RDMA) is on the [roadmap](ROADMAP.md). See
+[SECURITY.md](SECURITY.md).
 
 ## Install
 

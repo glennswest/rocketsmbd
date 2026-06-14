@@ -32,3 +32,6 @@ read_only = false
 # Experimental: grant Level II oplocks. OFF — cifs caches but ignores the
 # legacy oplock-break (it wants a lease-break), so this can serve stale reads.
 oplocks = false
+
+# Prefer AES-256 ciphers (GCM then CCM) when the client offers them.
+prefer_aes256 = false
