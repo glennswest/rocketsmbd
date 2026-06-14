@@ -104,44 +104,125 @@ pub fn smb2_signature(alg: SignAlg, key: &[u8; 16], parts: &[&[u8]]) -> [u8; 16]
 
 // ----------------------------------------------------------- SMB3 encryption
 
-/// SMB3 cipher id for AES-128-GCM (MS-SMB2 SMB2_ENCRYPTION_CAPABILITIES).
+// SMB3 cipher ids (MS-SMB2 SMB2_ENCRYPTION_CAPABILITIES), in preference order.
+pub const CIPHER_AES128_CCM: u16 = 0x0001;
 pub const CIPHER_AES128_GCM: u16 = 0x0002;
+pub const CIPHER_AES256_CCM: u16 = 0x0003;
+pub const CIPHER_AES256_GCM: u16 = 0x0004;
 
-/// Derive the SMB 3.1.1 encryption keys from the session key and the session
-/// preauth hash: (client→server decrypt key, server→client encrypt key).
-pub fn smb311_encryption_keys(session_key: &[u8; 16], preauth: &[u8; 64]) -> ([u8; 16], [u8; 16]) {
-    let c2s = kdf128(session_key, b"SMBC2SCipherKey\0", preauth);
-    let s2c = kdf128(session_key, b"SMBS2CCipherKey\0", preauth);
-    (c2s, s2c)
+/// AES key length for a cipher (16 = 128-bit, 32 = 256-bit).
+pub fn cipher_key_len(cipher: u16) -> usize {
+    match cipher {
+        CIPHER_AES256_GCM | CIPHER_AES256_CCM => 32,
+        _ => 16,
+    }
 }
 
-/// AES-128-GCM seal: encrypt `buf` in place and return the 16-byte tag.
-/// `nonce` is the 12-byte GCM nonce; `aad` is the SMB2 TRANSFORM_HEADER bytes
-/// that are authenticated but not encrypted (Nonce..end).
-pub fn aes128_gcm_seal(key: &[u8; 16], nonce: &[u8; 12], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
+/// AEAD nonce length: GCM uses 12 bytes, CCM uses 11 (MS-SMB2 3.1.1).
+pub fn cipher_nonce_len(cipher: u16) -> usize {
+    match cipher {
+        CIPHER_AES128_CCM | CIPHER_AES256_CCM => 11,
+        _ => 12,
+    }
+}
+
+/// SP800-108 counter-mode KDF (HMAC-SHA256) producing `out_bits/8` bytes.
+fn kdf(key: &[u8], label: &[u8], context: &[u8], out_bits: u32) -> Vec<u8> {
+    let out_bytes = (out_bits / 8) as usize;
+    let mut out = Vec::with_capacity(out_bytes + 32);
+    let mut counter = 1u32;
+    while out.len() < out_bytes {
+        let mut m = HmacSha256::new_from_slice(key).expect("hmac accepts any key length");
+        m.update(&counter.to_be_bytes());
+        m.update(label);
+        m.update(&[0]);
+        m.update(context);
+        m.update(&out_bits.to_be_bytes());
+        out.extend_from_slice(&m.finalize().into_bytes());
+        counter += 1;
+    }
+    out.truncate(out_bytes);
+    out
+}
+
+/// Derive the SMB 3.1.1 encryption keys for `cipher` from the session key and
+/// preauth hash: (client→server decrypt key, server→client encrypt key). Keys
+/// are returned in 32-byte buffers; only the first `cipher_key_len` bytes are
+/// used (16 for AES-128, 32 for AES-256).
+pub fn smb311_encryption_keys(
+    cipher: u16,
+    session_key: &[u8; 16],
+    preauth: &[u8; 64],
+) -> ([u8; 32], [u8; 32]) {
+    let bits = (cipher_key_len(cipher) * 8) as u32;
+    let c2s = kdf(session_key, b"SMBC2SCipherKey\0", preauth, bits);
+    let s2c = kdf(session_key, b"SMBS2CCipherKey\0", preauth, bits);
+    let mut c = [0u8; 32];
+    let mut s = [0u8; 32];
+    c[..c2s.len()].copy_from_slice(&c2s);
+    s[..s2c.len()].copy_from_slice(&s2c);
+    (c, s)
+}
+
+/// SMB3 AEAD seal: encrypt `buf` in place for `cipher` and return the 16-byte
+/// tag. `key`/`nonce` must be the cipher's correct length (see cipher_key_len /
+/// cipher_nonce_len); `aad` is the authenticated TRANSFORM_HEADER bytes.
+pub fn aead_seal(cipher: u16, key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
     use aes_gcm::aead::{AeadInPlace, KeyInit};
-    let cipher = aes_gcm::Aes128Gcm::new(key.into());
-    let tag = cipher
-        .encrypt_in_place_detached(nonce.into(), aad, buf)
-        .expect("aes-gcm encrypt");
-    tag.into()
+    use ccm::aead::generic_array::GenericArray;
+    match cipher {
+        CIPHER_AES128_GCM => aes_gcm::Aes128Gcm::new(GenericArray::from_slice(key))
+            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
+            .expect("gcm")
+            .into(),
+        CIPHER_AES256_GCM => aes_gcm::Aes256Gcm::new(GenericArray::from_slice(key))
+            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
+            .expect("gcm")
+            .into(),
+        CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
+            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
+            .expect("ccm")
+            .into(),
+        CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
+            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
+            .expect("ccm")
+            .into(),
+        _ => panic!("unknown cipher {cipher:#x}"),
+    }
 }
 
-/// AES-128-GCM open: verify the tag and decrypt `buf` in place. Returns false
-/// (and leaves `buf` modified) on authentication failure.
-pub fn aes128_gcm_open(
-    key: &[u8; 16],
-    nonce: &[u8; 12],
+/// SMB3 AEAD open: verify the tag and decrypt `buf` in place. Returns false on
+/// authentication failure.
+pub fn aead_open(
+    cipher: u16,
+    key: &[u8],
+    nonce: &[u8],
     aad: &[u8],
     buf: &mut [u8],
     tag: &[u8; 16],
 ) -> bool {
     use aes_gcm::aead::{AeadInPlace, KeyInit};
-    let cipher = aes_gcm::Aes128Gcm::new(key.into());
-    cipher
-        .decrypt_in_place_detached(nonce.into(), aad, buf, tag.into())
-        .is_ok()
+    use ccm::aead::generic_array::GenericArray;
+    match cipher {
+        CIPHER_AES128_GCM => aes_gcm::Aes128Gcm::new(GenericArray::from_slice(key))
+            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
+            .is_ok(),
+        CIPHER_AES256_GCM => aes_gcm::Aes256Gcm::new(GenericArray::from_slice(key))
+            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
+            .is_ok(),
+        CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
+            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
+            .is_ok(),
+        CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
+            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
+            .is_ok(),
+        _ => false,
+    }
 }
+
+// AES-CCM with SMB3 parameters: 16-byte tag, 11-byte nonce.
+type Ccm128 = ccm::Ccm<aes::Aes128, ccm::consts::U16, ccm::consts::U11>;
+type Ccm256 = ccm::Ccm<aes::Aes256, ccm::consts::U16, ccm::consts::U11>;
 
 #[cfg(test)]
 mod tests {
@@ -199,36 +280,45 @@ mod tests {
     }
 
     #[test]
-    fn aes128_gcm_roundtrip_and_tamper() {
-        let key = [0x11u8; 16];
-        let nonce = [0x22u8; 12];
+    fn aead_roundtrip_and_tamper() {
         let aad = b"smb2-transform-header-aad";
         let plain = b"the quick brown fox jumps over the lazy SMB share".to_vec();
-
-        let mut buf = plain.clone();
-        let tag = aes128_gcm_seal(&key, &nonce, aad, &mut buf);
-        assert_ne!(buf, plain, "ciphertext must differ from plaintext");
-
-        let mut dec = buf.clone();
-        assert!(aes128_gcm_open(&key, &nonce, aad, &mut dec, &tag));
-        assert_eq!(dec, plain, "decrypt must recover plaintext");
-
-        // Tampered tag, wrong AAD, and wrong key must all fail to authenticate.
-        let mut t = tag;
-        t[0] ^= 1;
-        assert!(!aes128_gcm_open(&key, &nonce, aad, &mut buf.clone(), &t));
-        assert!(!aes128_gcm_open(&key, &nonce, b"other-aad", &mut buf.clone(), &tag));
-        assert!(!aes128_gcm_open(&[0u8; 16], &nonce, aad, &mut buf.clone(), &tag));
+        for &cipher in &[
+            CIPHER_AES128_GCM,
+            CIPHER_AES256_GCM,
+            CIPHER_AES128_CCM,
+            CIPHER_AES256_CCM,
+        ] {
+            let key = vec![0x11u8; cipher_key_len(cipher)];
+            let nonce = vec![0x22u8; cipher_nonce_len(cipher)];
+            let mut buf = plain.clone();
+            let tag = aead_seal(cipher, &key, &nonce, aad, &mut buf);
+            assert_ne!(buf, plain, "ct must differ ({cipher:#x})");
+            let mut dec = buf.clone();
+            assert!(aead_open(cipher, &key, &nonce, aad, &mut dec, &tag), "open {cipher:#x}");
+            assert_eq!(dec, plain, "recover {cipher:#x}");
+            // Tampered tag, wrong AAD, and wrong key must all fail.
+            let mut t = tag;
+            t[0] ^= 1;
+            assert!(!aead_open(cipher, &key, &nonce, aad, &mut buf.clone(), &t));
+            assert!(!aead_open(cipher, &key, &nonce, b"other", &mut buf.clone(), &tag));
+            let bad = vec![0u8; cipher_key_len(cipher)];
+            assert!(!aead_open(cipher, &bad, &nonce, aad, &mut buf.clone(), &tag));
+        }
     }
 
     #[test]
     fn enc_keys_deterministic_and_distinct() {
         let sk = [7u8; 16];
         let pa = [9u8; 64];
-        let (c2s, s2c) = smb311_encryption_keys(&sk, &pa);
-        assert_ne!(c2s, s2c, "c2s and s2c keys must differ");
-        let (c2s2, _) = smb311_encryption_keys(&sk, &pa);
-        assert_eq!(c2s, c2s2, "derivation must be deterministic");
+        // AES-128 keys use 16 bytes; AES-256 keys use 32.
+        let (c2s, s2c) = smb311_encryption_keys(CIPHER_AES128_GCM, &sk, &pa);
+        assert_ne!(c2s, s2c);
+        let (c2s2, _) = smb311_encryption_keys(CIPHER_AES128_GCM, &sk, &pa);
+        assert_eq!(c2s, c2s2, "deterministic");
+        let (c256, _) = smb311_encryption_keys(CIPHER_AES256_GCM, &sk, &pa);
+        assert_ne!(&c256[..32], &[0u8; 32], "256-bit key fills 32 bytes");
+        assert_ne!(c256, c2s, "128 and 256 derivations differ");
     }
 
     #[test]

@@ -146,8 +146,10 @@ pub struct SignCtx {
 #[derive(Debug, Clone)]
 pub struct EncCtx {
     pub cipher: u16,
-    pub c2s: [u8; 16],
-    pub s2c: [u8; 16],
+    /// Cipher keys in 32-byte buffers; only the first `cipher_key_len(cipher)`
+    /// bytes are used (16 for AES-128, 32 for AES-256).
+    pub c2s: [u8; 32],
+    pub s2c: [u8; 32],
     pub nonce_ctr: u64,
 }
 
@@ -583,13 +585,15 @@ pub fn decrypt_transform(frame: &[u8], enc: &EncCtx) -> Option<Vec<u8>> {
     let orig_size = u32::from_le_bytes(frame[36..40].try_into().ok()?) as usize;
     // AAD is the header from the Nonce field to the end (Signature excluded).
     let aad = frame[20..TRANSFORM_HDR_LEN].to_vec();
-    let nonce12: [u8; 12] = frame[20..32].try_into().ok()?;
+    let klen = crypto::cipher_key_len(enc.cipher);
+    let nlen = crypto::cipher_nonce_len(enc.cipher);
+    let nonce = &frame[20..20 + nlen];
     let ct = &frame[TRANSFORM_HDR_LEN..];
     if ct.len() != orig_size {
         return None;
     }
     let mut buf = ct.to_vec();
-    if !crypto::aes128_gcm_open(&enc.c2s, &nonce12, &aad, &mut buf, &tag) {
+    if !crypto::aead_open(enc.cipher, &enc.c2s[..klen], nonce, &aad, &mut buf, &tag) {
         return None;
     }
     Some(buf)
@@ -617,9 +621,11 @@ pub fn wrap_transform(plain: &[u8], enc: &mut EncCtx, session_id: u64, tx: &mut 
     let aad_start = hdr + 20;
     let ct_off = tx.len();
     tx.pbytes(plain);
-    let nonce12: [u8; 12] = nonce16[..12].try_into().unwrap();
+    let klen = crypto::cipher_key_len(enc.cipher);
+    let nlen = crypto::cipher_nonce_len(enc.cipher);
+    let nonce = nonce16[..nlen].to_vec();
     let (head, tail) = tx.split_at_mut(ct_off);
-    let tag = crypto::aes128_gcm_seal(&enc.s2c, &nonce12, &head[aad_start..ct_off], tail);
+    let tag = crypto::aead_seal(enc.cipher, &enc.s2c[..klen], &nonce, &head[aad_start..ct_off], tail);
     tx[sig_off..sig_off + 16].copy_from_slice(&tag);
     let total = (tx.len() - 4) as u32;
     finish_nbt_with(tx, total);
@@ -1499,30 +1505,31 @@ mod tests {
 
     #[test]
     fn transform_roundtrip_and_tamper() {
-        // Same key for c2s/s2c so the wrap (s2c) round-trips through
-        // decrypt_transform (c2s) in one process.
-        let mut enc = EncCtx {
-            cipher: crate::crypto::CIPHER_AES128_GCM,
-            c2s: [3u8; 16],
-            s2c: [3u8; 16],
-            nonce_ctr: 0,
+        use crate::crypto::{
+            CIPHER_AES128_CCM, CIPHER_AES128_GCM, CIPHER_AES256_CCM, CIPHER_AES256_GCM,
         };
-        let plain = b"\xfeSMBplaintext-inner-smb2-message-bytes-0123456789".to_vec();
-        let mut tx = Vec::new();
-        wrap_transform(&plain, &mut enc, 0xABCD, &mut tx);
-        let frame = &tx[4..]; // strip NBT prefix
-        assert!(is_transform(frame));
-        assert_eq!(u64::from_le_bytes(frame[44..52].try_into().unwrap()), 0xABCD);
-        assert_eq!(enc.nonce_ctr, 1, "nonce counter advances per message");
+        for cipher in [CIPHER_AES128_GCM, CIPHER_AES256_GCM, CIPHER_AES128_CCM, CIPHER_AES256_CCM] {
+            // Same key for c2s/s2c so wrap (s2c) round-trips through
+            // decrypt_transform (c2s) in one process. 32-byte buffers; the
+            // codec uses the first cipher_key_len bytes.
+            let mut enc =
+                EncCtx { cipher, c2s: [3u8; 32], s2c: [3u8; 32], nonce_ctr: 0 };
+            let plain = b"\xfeSMBplaintext-inner-smb2-message-bytes-0123456789".to_vec();
+            let mut tx = Vec::new();
+            wrap_transform(&plain, &mut enc, 0xABCD, &mut tx);
+            let frame = &tx[4..]; // strip NBT prefix
+            assert!(is_transform(frame));
+            assert_eq!(u64::from_le_bytes(frame[44..52].try_into().unwrap()), 0xABCD);
+            assert_eq!(enc.nonce_ctr, 1, "nonce counter advances ({cipher:#x})");
 
-        let dec = decrypt_transform(frame, &enc).expect("decrypt ok");
-        assert_eq!(dec, plain, "decrypt recovers the inner message");
+            let dec = decrypt_transform(frame, &enc).expect("decrypt ok");
+            assert_eq!(dec, plain, "decrypt recovers inner ({cipher:#x})");
 
-        // Tampering any ciphertext byte must fail the AEAD tag check.
-        let mut bad = frame.to_vec();
-        let n = bad.len();
-        bad[n - 1] ^= 1;
-        assert!(decrypt_transform(&bad, &enc).is_none());
+            let mut bad = frame.to_vec();
+            let n = bad.len();
+            bad[n - 1] ^= 1;
+            assert!(decrypt_transform(&bad, &enc).is_none(), "tamper detected ({cipher:#x})");
+        }
     }
 
     #[test]

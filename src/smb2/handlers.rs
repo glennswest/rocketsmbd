@@ -302,12 +302,26 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
                 }
                 2 => {
                     // SMB2_ENCRYPTION_CAPABILITIES: CipherCount + CipherIds.
+                    // Pick the first cipher in the client's (preference-ordered)
+                    // list that we support: AES-128/256-GCM and AES-128/256-CCM.
+                    use crate::crypto::{
+                        CIPHER_AES128_CCM, CIPHER_AES128_GCM, CIPHER_AES256_CCM, CIPHER_AES256_GCM,
+                    };
                     let _ = (|| {
                         let mut r = Rdr::new(msg.get(off + 8..off + 8 + data_len)?);
                         let n = r.u16()? as usize;
                         for _ in 0..n.min(8) {
-                            if r.u16()? == crate::crypto::CIPHER_AES128_GCM {
-                                cipher = crate::crypto::CIPHER_AES128_GCM;
+                            let c = r.u16()?;
+                            if cipher == 0
+                                && matches!(
+                                    c,
+                                    CIPHER_AES128_GCM
+                                        | CIPHER_AES256_GCM
+                                        | CIPHER_AES128_CCM
+                                        | CIPHER_AES256_CCM
+                                )
+                            {
+                                cipher = c;
                             }
                         }
                         Some(())
@@ -572,7 +586,7 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
                 // This channel's own encryption keys (per-connection preauth).
                 let mut flags = if guest { SESSION_FLAG_IS_GUEST } else { 0 };
                 if !guest && cipher != 0 && dialect == 0x0311 {
-                    let (c2s, s2c) = crate::crypto::smb311_encryption_keys(&key, &ch_preauth);
+                    let (c2s, s2c) = crate::crypto::smb311_encryption_keys(cipher, &key, &ch_preauth);
                     chm.enc = Some(crate::smb2::EncCtx { cipher, c2s, s2c, nonce_ctr: 0 });
                     if srv.cfg.encrypt {
                         chm.encrypt = true;
@@ -623,7 +637,7 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
                     // to honor client-initiated encryption (e.g. cifs `seal`).
                     let mut ss_flags = 0u16;
                     if cipher != 0 && dialect == 0x0311 {
-                        let (c2s, s2c) = crate::crypto::smb311_encryption_keys(&key, &ch_preauth);
+                        let (c2s, s2c) = crate::crypto::smb311_encryption_keys(cipher, &key, &ch_preauth);
                         chm.enc = Some(crate::smb2::EncCtx { cipher, c2s, s2c, nonce_ctr: 0 });
                         if srv.cfg.encrypt {
                             chm.encrypt = true;
