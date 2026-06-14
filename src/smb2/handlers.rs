@@ -310,20 +310,29 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
                     let _ = (|| {
                         let mut r = Rdr::new(msg.get(off + 8..off + 8 + data_len)?);
                         let n = r.u16()? as usize;
+                        let mut offered = Vec::new();
                         for _ in 0..n.min(8) {
                             let c = r.u16()?;
-                            if cipher == 0
-                                && matches!(
-                                    c,
-                                    CIPHER_AES128_GCM
-                                        | CIPHER_AES256_GCM
-                                        | CIPHER_AES128_CCM
-                                        | CIPHER_AES256_CCM
-                                )
-                            {
-                                cipher = c;
+                            if matches!(
+                                c,
+                                CIPHER_AES128_GCM
+                                    | CIPHER_AES256_GCM
+                                    | CIPHER_AES128_CCM
+                                    | CIPHER_AES256_CCM
+                            ) {
+                                offered.push(c);
                             }
                         }
+                        cipher = if srv.cfg.prefer_aes256 {
+                            // server preference: strongest GCM, then CCM
+                            [CIPHER_AES256_GCM, CIPHER_AES256_CCM, CIPHER_AES128_GCM, CIPHER_AES128_CCM]
+                                .into_iter()
+                                .find(|c| offered.contains(c))
+                                .unwrap_or(0)
+                        } else {
+                            // honor the client's preference order
+                            offered.first().copied().unwrap_or(0)
+                        };
                         Some(())
                     })();
                 }

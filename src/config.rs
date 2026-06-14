@@ -46,6 +46,11 @@ pub struct Config {
     /// busy kernel thread per worker, so it is opt-in. Default off.
     #[serde(default)]
     pub sqpoll: bool,
+    /// Prefer AES-256 ciphers (GCM then CCM) when the client offers them,
+    /// instead of honoring the client's preference order (which usually picks
+    /// AES-128-GCM for speed). Default off.
+    #[serde(default)]
+    pub prefer_aes256: bool,
     /// Grant Level II (read-caching) oplocks. **Experimental, default off.**
     /// The grant + cross-worker break path works, but cifs requests *leases*
     /// and does not invalidate its cache on a legacy oplock-break notification
