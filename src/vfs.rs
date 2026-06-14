@@ -266,6 +266,9 @@ pub struct OpenFile {
     pub writable: bool,
     pub delete_on_close: bool,
     pub dir: Option<DirState>,
+    /// Inode of the file this handle holds a Level II oplock on (for releasing
+    /// the grant on CLOSE); `None` when no oplock was granted.
+    pub oplock_ino: Option<u64>,
 }
 
 impl Drop for OpenFile {
@@ -385,6 +388,7 @@ mod tests {
             writable: false,
             delete_on_close: false,
             dir: None,
+            oplock_ino: None,
         };
         let id = t.insert(of);
         assert!(t.get(id).is_some());

@@ -513,6 +513,44 @@ fn finish_nbt_with(tx: &mut [u8], len: u32) {
     tx[3] = (len & 0xFF) as u8;
 }
 
+/// Build a complete NBT-framed SMB2 OPLOCK_BREAK *notification* (server→client,
+/// MS-SMB2 2.2.23.1): a synchronous response with MessageId = -1 carrying the
+/// holder's FileId and the new oplock level (0 = none). Signed if the channel
+/// has a signing context. A Level II → none break is not acknowledged by the
+/// client, so this is the whole exchange.
+pub fn build_oplock_break(fid: u64, new_level: u8, session_id: u64, sign: Option<&SignCtx>) -> Vec<u8> {
+    let mut tx = Vec::with_capacity(4 + 64 + 24);
+    tx.zeros(4); // NBT length placeholder
+    let start = tx.len();
+    tx.pbytes(&[0xFE, b'S', b'M', b'B']);
+    tx.p16(64); // header StructureSize
+    tx.p16(0); // CreditCharge
+    tx.p32(0); // Status
+    tx.p16(CMD_OPLOCK_BREAK);
+    tx.p16(0); // CreditResponse
+    tx.p32(FLAG_RESPONSE);
+    tx.p32(0); // NextCommand
+    tx.p64(0xFFFF_FFFF_FFFF_FFFF); // MessageId (notification sentinel)
+    tx.p32(0); // ProcessId
+    tx.p32(0); // TreeId
+    tx.p64(session_id);
+    tx.zeros(16); // signature
+    // Body (StructureSize 24).
+    tx.p16(24);
+    tx.p8(new_level); // OplockLevel
+    tx.p8(0); // Reserved
+    tx.p32(0); // Reserved2
+    tx.p64(fid); // FileId persistent
+    tx.p64(fid); // FileId volatile
+    if let Some(sc) = sign {
+        let end = tx.len();
+        sign_in_place(&mut tx, start, end, sc);
+    }
+    let total = (tx.len() - 4) as u32;
+    finish_nbt_with(&mut tx, total);
+    tx
+}
+
 // ----------------------------------------------------- SMB3 TRANSFORM_HEADER
 
 /// SMB2_TRANSFORM_HEADER ProtocolId: 0xFD 'S' 'M' 'B'.

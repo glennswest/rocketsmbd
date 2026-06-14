@@ -149,9 +149,16 @@ pub fn dispatch(
                 return None;
             }
             let share = &srv.cfg.shares[tree.share_idx as usize];
+            // This connection's reactor location, for routing oplock breaks.
+            let cid = (pc.wid, pc.conn_idx, pc.conn_gen);
+            // Only grant oplocks on non-encrypted sessions: a break notification
+            // on an encrypted session would need to be sealed too (a follow-up).
+            let allow_oplock = !pc.channels.get(&h.session_id).map(|c| c.encrypt).unwrap_or(false);
             match h.command {
-                CMD_CREATE => create(&mut sess, h, msg, chain, tx, share, tree.share_idx),
-                CMD_CLOSE => close(pc, &mut sess, h, body, chain, tx),
+                CMD_CREATE => {
+                    create(srv, &mut sess, h, msg, chain, tx, share, tree.share_idx, cid, allow_oplock)
+                }
+                CMD_CLOSE => close(srv, pc, &mut sess, h, body, chain, tx),
                 CMD_FLUSH => flush(&mut sess, h, body, chain, tx),
                 CMD_READ => {
                     // Read briefly re-locks the session itself (dup the fd,
@@ -160,7 +167,7 @@ pub fn dispatch(
                     drop(sess);
                     return read(pc, &sref, h, body, chain, tx);
                 }
-                CMD_WRITE => write(&mut sess, h, msg, chain, tx, share),
+                CMD_WRITE => write(srv, &mut sess, h, msg, chain, tx, share, tree.share_idx, cid),
                 CMD_QUERY_DIRECTORY => query_directory(&mut sess, h, msg, chain, tx),
                 CMD_QUERY_INFO => query_info(srv, &mut sess, h, body, chain, tx),
                 CMD_SET_INFO => set_info(&mut sess, h, msg, chain, tx, share),
@@ -841,6 +848,7 @@ fn parse_lease_ctx(mut buf: &[u8]) -> Option<LeaseReq> {
 
 #[allow(clippy::too_many_arguments)]
 fn create(
+    srv: &Srv,
     sess: &mut SessionInner,
     h: &ReqHdr,
     msg: &[u8],
@@ -848,6 +856,8 @@ fn create(
     tx: &mut Vec<u8>,
     share: &ShareCfg,
     share_idx: u32,
+    cid: (usize, usize, u16),
+    allow_oplock: bool,
 ) {
     let Some(req) = parse_create(msg) else {
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
@@ -971,6 +981,12 @@ fn create(
     }
     let leaf = rel.rsplit('\\').next().unwrap_or("").to_string();
     let attrs = vfs::finalize_attrs(meta.attrs, &leaf);
+    // Grant a Level II (read-caching) oplock when the client asks for an oplock
+    // or lease on a file. Level II is the safe subset: multiple readers share
+    // it, there's no dirty client data, and a conflicting write breaks it to
+    // none with no acknowledgement required.
+    let want_oplock = allow_oplock && !is_dir && req.oplock != OPLOCK_NONE;
+    let granted_oplock = if want_oplock { OPLOCK_LEVEL_II } else { OPLOCK_NONE };
     let fid = sess.handles.insert(OpenFile {
         fd,
         path,
@@ -981,12 +997,25 @@ fn create(
         writable,
         delete_on_close,
         dir: None,
+        oplock_ino: if want_oplock { Some(meta.ino) } else { None },
     });
     chain.last_fid = Some(fid);
+    if want_oplock {
+        srv.leases.grant(
+            (share_idx, meta.ino),
+            crate::lease::OplockGrant {
+                fid,
+                session_id: chain.session_id,
+                wid: cid.0,
+                conn_idx: cid.1,
+                conn_gen: cid.2,
+            },
+        );
+    }
 
     begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
     tx.p16(89);
-    tx.p8(0); // OplockLevel: none
+    tx.p8(granted_oplock); // OplockLevel (Level II read-caching, or none)
     tx.p8(0);
     tx.p32(action);
     tx.p64(meta.crtime);
@@ -1004,7 +1033,7 @@ fn create(
 
 // -------------------------------------------------------------------- CLOSE
 
-fn close(pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+fn close(srv: &Srv, pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let mut r = Rdr::new(body);
         if r.u16()? != 24 {
@@ -1022,6 +1051,10 @@ fn close(pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], c
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
+    // Release any Level II oplock this handle held.
+    if let Some(ino) = of.oplock_ino {
+        srv.leases.release((of.share_idx, ino), fid);
+    }
     // Complete any CHANGE_NOTIFY pended on this handle.
     let mut i = 0;
     while i < pc.notify_active.len() {
@@ -1203,7 +1236,18 @@ fn read(
 
 // -------------------------------------------------------------------- WRITE
 
-fn write(sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>, share: &ShareCfg) {
+#[allow(clippy::too_many_arguments)]
+fn write(
+    srv: &Srv,
+    sess: &mut SessionInner,
+    h: &ReqHdr,
+    msg: &[u8],
+    chain: &mut Chain,
+    tx: &mut Vec<u8>,
+    share: &ShareCfg,
+    share_idx: u32,
+    cid: (usize, usize, u16),
+) {
     let parsed = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);
@@ -1232,6 +1276,15 @@ fn write(sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx:
     if !of.writable {
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
+    }
+    // Break any Level II oplocks held by *other* connections on this file
+    // before the write lands, so their cached reads are invalidated. A Level
+    // II → none break needs no acknowledgement, so we post and proceed.
+    if let Ok(m) = vfs::fstat_meta(of.fd) {
+        let breaks = srv.leases.break_conflicts((share_idx, m.ino), cid.0, cid.1, cid.2);
+        for b in breaks {
+            srv.mailboxes[b.wid].post(b);
+        }
     }
     match vfs::pwrite_all(of.fd, data, offset) {
         Ok(()) => {

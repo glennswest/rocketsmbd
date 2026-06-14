@@ -416,23 +416,26 @@ fn on_wake(ring: &mut IoUring, w: &mut Worker) {
     arm_wake(ring, w);
 }
 
-/// Deliver a single lease/oplock break to a connection owned by this worker.
-/// The grant path is not yet enabled, so for now this only validates the
-/// target slot/generation; the OPLOCK_BREAK notification frame is built and
-/// pushed onto the connection's deferred queue in the grant/break increment.
-fn deliver_break(_ring: &mut IoUring, w: &mut Worker, b: crate::lease::BreakMsg) {
-    let Some(conn) = w.conns.get_mut(b.conn_idx).and_then(|c| c.as_mut()) else {
-        return; // slot recycled — holder already gone
-    };
-    if conn.gen != b.conn_gen {
-        return; // generation mismatch — different connection now
+/// Deliver an oplock break to a connection owned by this worker: build the
+/// OPLOCK_BREAK notification and queue it on the connection's deferred queue
+/// (the same path CHANGE_NOTIFY uses), flushing if the tx side is idle.
+fn deliver_break(ring: &mut IoUring, w: &mut Worker, b: crate::lease::BreakMsg) {
+    {
+        let Some(conn) = w.conns.get_mut(b.conn_idx).and_then(|c| c.as_mut()) else {
+            return; // slot recycled — holder already gone
+        };
+        if conn.gen != b.conn_gen || conn.closing {
+            return; // different connection now, or tearing down
+        }
+        let sign = conn.proto.channels.get(&b.session_id).and_then(|c| c.sign.clone());
+        let frame = smb2::build_oplock_break(b.fid, b.new_level, b.session_id, sign.as_ref());
+        conn.deferred.push_back(frame);
     }
-    logd!(
-        "worker {}: lease break for slot {} (state -> {:#x})",
-        w.wid,
-        b.conn_idx,
-        b.new_state
-    );
+    // Flush now if nothing else is on the wire (otherwise drains after the
+    // in-flight send completes, as deferred frames always do).
+    if matches!(conn_mut(w, b.conn_idx).txm, Tx::Idle) {
+        drive(ring, w, b.conn_idx);
+    }
 }
 
 fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32, flags: u32) {
