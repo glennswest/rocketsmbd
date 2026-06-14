@@ -39,6 +39,7 @@ const FSCTL_VALIDATE_NEGOTIATE_INFO: u32 = 0x0014_0204;
 const FSCTL_QUERY_NETWORK_INTERFACE_INFO: u32 = 0x0014_01FC;
 
 const SUPPORTED_DIALECTS: [u16; 5] = [0x0311, 0x0302, 0x0300, 0x0210, 0x0202];
+const CAP_LEASING: u32 = 0x2;
 const CAP_LARGE_MTU: u32 = 0x4;
 const CAP_MULTI_CHANNEL: u32 = 0x8;
 const SECURITY_MODE_SIGNING_ENABLED: u16 = 0x1;
@@ -370,6 +371,11 @@ fn negotiate_body(
     let mut caps = CAP_LARGE_MTU;
     if dialect >= 0x0300 && srv.cfg.multichannel {
         caps |= CAP_MULTI_CHANNEL;
+    }
+    // Advertise leasing (SMB 2.1+) so clients request leases (RqLs) instead of
+    // legacy oplocks; our caching/break path is lease-based. Gated on `oplocks`.
+    if dialect >= 0x0210 && srv.cfg.oplocks {
+        caps |= CAP_LEASING;
     }
     tx.p32(caps);
     tx.p32(MAX_TRANSACT);
