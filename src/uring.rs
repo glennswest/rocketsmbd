@@ -428,9 +428,16 @@ fn deliver_break(ring: &mut IoUring, w: &mut Worker, b: crate::lease::BreakMsg) 
             return; // different connection now, or tearing down
         }
         let sign = conn.proto.channels.get(&b.session_id).and_then(|c| c.sign.clone());
-        let frame = smb2::build_oplock_break(b.fid, b.new_level, b.session_id, sign.as_ref());
+        let frame = smb2::build_lease_break(
+            &b.lease_key,
+            b.cur_state,
+            b.new_state,
+            b.epoch,
+            b.session_id,
+            sign.as_ref(),
+        );
         conn.deferred.push_back(frame);
-        logd!("oplock: break -> worker {} slot {} fid {}", w.wid, b.conn_idx, b.fid);
+        logd!("lease: break -> worker {} slot {} state {}->{}", w.wid, b.conn_idx, b.cur_state, b.new_state);
     }
     // Flush now if nothing else is on the wire (otherwise drains after the
     // in-flight send completes, as deferred frames always do).

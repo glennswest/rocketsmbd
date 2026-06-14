@@ -167,7 +167,7 @@ pub fn dispatch(
                     drop(sess);
                     return read(pc, &sref, h, body, chain, tx);
                 }
-                CMD_WRITE => write(srv, &mut sess, h, msg, chain, tx, share, tree.share_idx, cid),
+                CMD_WRITE => write(srv, &mut sess, h, msg, chain, tx, share, tree.share_idx),
                 CMD_QUERY_DIRECTORY => query_directory(&mut sess, h, msg, chain, tx),
                 CMD_QUERY_INFO => query_info(srv, &mut sess, h, body, chain, tx),
                 CMD_SET_INFO => set_info(&mut sess, h, msg, chain, tx, share),
@@ -981,15 +981,16 @@ fn create(
     }
     let leaf = rel.rsplit('\\').next().unwrap_or("").to_string();
     let attrs = vfs::finalize_attrs(meta.attrs, &leaf);
-    // Grant a Level II (read-caching) oplock when the client asks for an oplock
-    // or lease on a file. Level II is the safe subset: multiple readers share
-    // it, there's no dirty client data, and a conflicting write breaks it to
-    // none with no acknowledgement required.
-    // Gated off by default: see Config::oplocks — the legacy oplock-break does
-    // not invalidate a lease-based cifs client's cache (stale reads), pending
-    // lease-based break (#18).
-    let want_oplock = srv.cfg.oplocks && allow_oplock && !is_dir && req.oplock != OPLOCK_NONE;
-    let granted_oplock = if want_oplock { OPLOCK_LEVEL_II } else { OPLOCK_NONE };
+    // Grant a read-caching lease when the client requests one (RqLs) on a file.
+    // Read-caching is the safe subset: distinct lease keys coexist, there's no
+    // dirty client data, and a conflicting write breaks it to none. Gated off
+    // by default (Config::oplocks). The client's lease key is recorded on the
+    // handle regardless (so a WRITE can exempt the client's own lease).
+    let lease_req = req.lease.clone();
+    let grant_lease = srv.cfg.oplocks
+        && allow_oplock
+        && !is_dir
+        && lease_req.as_ref().is_some_and(|l| l.state & LEASE_READ_CACHING != 0);
     let fid = sess.handles.insert(OpenFile {
         fd,
         path,
@@ -1000,26 +1001,30 @@ fn create(
         writable,
         delete_on_close,
         dir: None,
-        oplock_ino: if want_oplock { Some(meta.ino) } else { None },
+        oplock_ino: if grant_lease { Some(meta.ino) } else { None },
+        lease_key: lease_req.as_ref().map(|l| l.key),
     });
     chain.last_fid = Some(fid);
-    if want_oplock {
+    if grant_lease {
+        let l = lease_req.as_ref().unwrap();
         srv.leases.grant(
             (share_idx, meta.ino),
-            crate::lease::OplockGrant {
-                fid,
+            crate::lease::LeaseGrant {
+                lease_key: l.key,
+                state: LEASE_READ_CACHING,
+                epoch: l.epoch,
                 session_id: chain.session_id,
                 wid: cid.0,
                 conn_idx: cid.1,
                 conn_gen: cid.2,
             },
         );
-        crate::logd!("oplock: granted Level II (share {share_idx}, ino {})", meta.ino);
+        crate::logd!("lease: granted READ (share {share_idx}, ino {})", meta.ino);
     }
 
     begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
     tx.p16(89);
-    tx.p8(granted_oplock); // OplockLevel (Level II read-caching, or none)
+    tx.p8(if grant_lease { OPLOCK_LEASE } else { OPLOCK_NONE }); // OplockLevel
     tx.p8(0);
     tx.p32(action);
     tx.p64(meta.crtime);
@@ -1031,8 +1036,35 @@ fn create(
     tx.p32(attrs);
     tx.p32(0);
     put_fid(tx, fid);
-    tx.p32(0); // CreateContextsOffset
-    tx.p32(0); // CreateContextsLength
+    if grant_lease {
+        // Echo an RqLs response context with the granted lease state. The
+        // context list begins at a fixed offset from the SMB2 header (64-byte
+        // header + 88-byte fixed CREATE response = 152), 8-byte aligned.
+        let l = lease_req.as_ref().unwrap();
+        let data_len: u32 = if l.v2 { 52 } else { 32 };
+        tx.p32(152); // CreateContextsOffset (from SMB2 header)
+        tx.p32(24 + data_len); // CreateContextsLength (16 hdr + 4 name + 4 pad + data)
+        tx.p32(0); // Next
+        tx.p16(16); // NameOffset
+        tx.p16(4); // NameLength
+        tx.p16(0); // Reserved
+        tx.p16(24); // DataOffset
+        tx.p32(data_len); // DataLength
+        tx.pbytes(CTX_NAME_RQLS); // "RqLs" at offset 16
+        tx.zeros(4); // pad → data 8-aligned at offset 24
+        tx.pbytes(&l.key); // LeaseKey
+        tx.p32(LEASE_READ_CACHING); // LeaseState (granted)
+        tx.p32(0); // LeaseFlags
+        tx.p64(0); // LeaseDuration
+        if l.v2 {
+            tx.pbytes(&l.parent); // ParentLeaseKey
+            tx.p16(l.epoch); // Epoch
+            tx.p16(0); // Reserved
+        }
+    } else {
+        tx.p32(0); // CreateContextsOffset
+        tx.p32(0); // CreateContextsLength
+    }
 }
 
 // -------------------------------------------------------------------- CLOSE
@@ -1055,9 +1087,9 @@ fn close(srv: &Srv, pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, bod
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
-    // Release any Level II oplock this handle held.
-    if let Some(ino) = of.oplock_ino {
-        srv.leases.release((of.share_idx, ino), fid);
+    // Release any lease this handle held.
+    if let (Some(ino), Some(lk)) = (of.oplock_ino, of.lease_key) {
+        srv.leases.release((of.share_idx, ino), lk);
     }
     // Complete any CHANGE_NOTIFY pended on this handle.
     let mut i = 0;
@@ -1250,7 +1282,6 @@ fn write(
     tx: &mut Vec<u8>,
     share: &ShareCfg,
     share_idx: u32,
-    cid: (usize, usize, u16),
 ) {
     let parsed = (|| {
         let body = &msg[64..];
@@ -1281,12 +1312,12 @@ fn write(
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
     }
-    // Break any Level II oplocks held by *other* connections on this file
-    // before the write lands, so their cached reads are invalidated. A Level
-    // II → none break needs no acknowledgement, so we post and proceed.
+    // Break read-caching leases held by *other* clients (different lease key)
+    // on this file before the write lands, so their cached reads invalidate.
+    // The write handle's own lease key is exempt. Read → none needs no ack.
+    let writer_key = of.lease_key;
     if let Ok(m) = vfs::fstat_meta(of.fd) {
-        let breaks = srv.leases.break_conflicts((share_idx, m.ino), cid.0, cid.1, cid.2);
-        for b in breaks {
+        for b in srv.leases.break_conflicts((share_idx, m.ino), writer_key) {
             srv.mailboxes[b.wid].post(b);
         }
     }

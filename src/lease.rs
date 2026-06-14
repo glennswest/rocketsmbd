@@ -27,61 +27,73 @@ pub struct BreakMsg {
     pub conn_idx: usize,
     /// Generation guard — the break is dropped if the slot was recycled.
     pub conn_gen: u16,
-    /// The holder's FileId (we write it persistent+volatile) so the client
-    /// knows which handle's oplock is breaking.
-    pub fid: u64,
-    /// New oplock level to break to (0 = none).
-    pub new_level: u8,
+    /// The client's 16-byte lease key (identifies which lease breaks).
+    pub lease_key: [u8; 16],
+    /// Lease state before and after the break (we break read-caching → none).
+    pub cur_state: u32,
+    pub new_state: u32,
+    /// Lease epoch to advertise in the break (v2 leases; 0 for v1).
+    pub epoch: u16,
     /// Session id, for building the break-notification header.
     pub session_id: u64,
 }
 
-/// A granted Level II oplock on a file, plus where its holder connection lives
-/// so a break raised on any worker can be routed back to it.
+/// A granted lease on a file, plus where its holder connection lives so a
+/// break raised on any worker can be routed back to it.
 #[derive(Debug, Clone)]
-pub struct OplockGrant {
-    pub fid: u64,
+pub struct LeaseGrant {
+    pub lease_key: [u8; 16],
+    pub state: u32, // currently-granted caching bits (read-caching only today)
+    pub epoch: u16,
     pub session_id: u64,
     pub wid: usize,
     pub conn_idx: usize,
     pub conn_gen: u16,
 }
 
-/// File-keyed oplock registry, shared across all workers (lives in `Srv`).
-/// Keyed by `(share_idx, inode)`. Level II (read-caching) oplocks may be held
-/// by several clients at once; a conflicting write breaks them all to none.
+/// File-keyed lease registry, shared across all workers (lives in `Srv`).
+/// Keyed by `(share_idx, inode)`. Read-caching leases held by distinct lease
+/// keys (clients) coexist; a conflicting write breaks the *other* keys to none.
 #[derive(Default)]
 pub struct LeaseTable {
-    map: Mutex<HashMap<(u32, u64), Vec<OplockGrant>>>,
+    map: Mutex<HashMap<(u32, u64), Vec<LeaseGrant>>>,
 }
 
 impl LeaseTable {
-    /// Grant a Level II oplock for an open handle (each handle is one grant).
-    pub fn grant(&self, key: (u32, u64), g: OplockGrant) {
-        self.map.lock().unwrap().entry(key).or_default().push(g);
+    /// Grant (or refresh) a lease for `g.lease_key` on a file. One lease per
+    /// (file, lease key): a re-open with the same key replaces the prior grant.
+    pub fn grant(&self, key: (u32, u64), g: LeaseGrant) {
+        let mut m = self.map.lock().unwrap();
+        let v = m.entry(key).or_default();
+        if let Some(e) = v.iter_mut().find(|e| e.lease_key == g.lease_key) {
+            *e = g;
+        } else {
+            v.push(g);
+        }
     }
 
-    /// A conflicting access (write, or a second opener) arrived from the
-    /// connection identified by `(wid, idx, gen)`. Break every *other* holder
-    /// to none: remove them and return the break messages to deliver. A Level
-    /// II → none break needs no client acknowledgement (MS-SMB2), so this is
-    /// safe fire-and-forget.
-    pub fn break_conflicts(&self, key: (u32, u64), wid: usize, idx: usize, gen: u16) -> Vec<BreakMsg> {
+    /// A conflicting access from a holder with lease key `writer_key`
+    /// (`None` = an un-leased writer). Break every lease with a *different* key
+    /// to none, remove them, and return the break messages. A read-caching →
+    /// none break carries no dirty data and needs no ack, so it's fire-and-forget.
+    pub fn break_conflicts(&self, key: (u32, u64), writer_key: Option<[u8; 16]>) -> Vec<BreakMsg> {
         let mut m = self.map.lock().unwrap();
         let Some(v) = m.get_mut(&key) else {
             return Vec::new();
         };
         let mut breaks = Vec::new();
         v.retain(|g| {
-            if g.wid == wid && g.conn_idx == idx && g.conn_gen == gen {
-                true // the actor keeps its own oplock
+            if writer_key == Some(g.lease_key) {
+                true // the writer's own lease is not broken
             } else {
                 breaks.push(BreakMsg {
                     wid: g.wid,
                     conn_idx: g.conn_idx,
                     conn_gen: g.conn_gen,
-                    fid: g.fid,
-                    new_level: 0,
+                    lease_key: g.lease_key,
+                    cur_state: g.state,
+                    new_state: 0,
+                    epoch: g.epoch.wrapping_add(1),
                     session_id: g.session_id,
                 });
                 false
@@ -93,18 +105,18 @@ impl LeaseTable {
         breaks
     }
 
-    /// Release one handle's oplock (on CLOSE).
-    pub fn release(&self, key: (u32, u64), fid: u64) {
+    /// Release one lease (on CLOSE).
+    pub fn release(&self, key: (u32, u64), lease_key: [u8; 16]) {
         let mut m = self.map.lock().unwrap();
         if let Some(v) = m.get_mut(&key) {
-            v.retain(|g| g.fid != fid);
+            v.retain(|g| g.lease_key != lease_key);
             if v.is_empty() {
                 m.remove(&key);
             }
         }
     }
 
-    /// Release every oplock held by a connection (on teardown / disconnect),
+    /// Release every lease held by a connection (on teardown / disconnect),
     /// so a connection that drops without a clean CLOSE doesn't leak grants.
     pub fn release_conn(&self, wid: usize, idx: usize, gen: u16) {
         let mut m = self.map.lock().unwrap();
@@ -179,8 +191,10 @@ mod tests {
             wid: 0,
             conn_idx: 3,
             conn_gen: 7,
-            fid: 0x1234,
-            new_level: 0,
+            lease_key: [0x5A; 16],
+            cur_state: 1,
+            new_state: 0,
+            epoch: 1,
             session_id: 0xDEAD_BEEF,
         }
     }
@@ -199,36 +213,57 @@ mod tests {
         assert!(mb.drain().is_empty());
     }
 
+    fn g(lk: u8, wid: usize, idx: usize, gen: u16) -> LeaseGrant {
+        LeaseGrant {
+            lease_key: [lk; 16],
+            state: 1,
+            epoch: 0,
+            session_id: 9,
+            wid,
+            conn_idx: idx,
+            conn_gen: gen,
+        }
+    }
+
     #[test]
     fn grant_break_release() {
         let t = LeaseTable::default();
         let key = (0u32, 42u64);
-        t.grant(key, OplockGrant { fid: 1, session_id: 9, wid: 0, conn_idx: 2, conn_gen: 5 });
-        t.grant(key, OplockGrant { fid: 2, session_id: 9, wid: 1, conn_idx: 3, conn_gen: 6 });
-        // A write from conn (0,2,5) breaks only the other holder (fid 2).
-        let breaks = t.break_conflicts(key, 0, 2, 5);
+        t.grant(key, g(0xAA, 0, 2, 5));
+        t.grant(key, g(0xBB, 1, 3, 6));
+        // A write from the holder of key 0xAA breaks only the other key (0xBB).
+        let breaks = t.break_conflicts(key, Some([0xAA; 16]));
         assert_eq!(breaks.len(), 1);
-        assert_eq!(breaks[0].fid, 2);
+        assert_eq!(breaks[0].lease_key, [0xBB; 16]);
         assert_eq!(breaks[0].wid, 1);
-        assert_eq!(breaks[0].new_level, 0);
-        // The actor keeps its own oplock; release it → table empties.
-        t.release(key, 1);
-        assert!(t.break_conflicts(key, 9, 9, 9).is_empty());
+        assert_eq!(breaks[0].new_state, 0);
+        // The writer's own lease remains; release it → table empties.
+        t.release(key, [0xAA; 16]);
+        assert!(t.break_conflicts(key, None).is_empty());
+    }
+
+    #[test]
+    fn unleased_writer_breaks_all() {
+        let t = LeaseTable::default();
+        let key = (0u32, 7u64);
+        t.grant(key, g(0xAA, 0, 1, 1));
+        t.grant(key, g(0xBB, 0, 2, 1));
+        // A writer with no lease key breaks every holder.
+        assert_eq!(t.break_conflicts(key, None).len(), 2);
     }
 
     #[test]
     fn release_conn_drops_all_grants_for_a_connection() {
         let t = LeaseTable::default();
-        // Two files, both held by conn (0,2,5); a third by a different conn.
-        t.grant((0, 10), OplockGrant { fid: 1, session_id: 1, wid: 0, conn_idx: 2, conn_gen: 5 });
-        t.grant((0, 11), OplockGrant { fid: 2, session_id: 1, wid: 0, conn_idx: 2, conn_gen: 5 });
-        t.grant((0, 11), OplockGrant { fid: 3, session_id: 1, wid: 1, conn_idx: 4, conn_gen: 9 });
+        t.grant((0, 10), g(0xAA, 0, 2, 5));
+        t.grant((0, 11), g(0xAA, 0, 2, 5));
+        t.grant((0, 11), g(0xCC, 1, 4, 9));
         // Connection (0,2,5) drops: its two grants go, the other stays.
         t.release_conn(0, 2, 5);
-        assert!(t.break_conflicts((0, 10), 9, 9, 9).is_empty()); // file 10 fully gone
-        let b = t.break_conflicts((0, 11), 9, 9, 9); // only the (1,4,9) holder remains
+        assert!(t.break_conflicts((0, 10), None).is_empty());
+        let b = t.break_conflicts((0, 11), None);
         assert_eq!(b.len(), 1);
-        assert_eq!(b[0].fid, 3);
+        assert_eq!(b[0].lease_key, [0xCC; 16]);
     }
 
     #[cfg(target_os = "linux")]

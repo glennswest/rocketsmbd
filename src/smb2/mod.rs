@@ -513,13 +513,21 @@ fn finish_nbt_with(tx: &mut [u8], len: u32) {
     tx[3] = (len & 0xFF) as u8;
 }
 
-/// Build a complete NBT-framed SMB2 OPLOCK_BREAK *notification* (server→client,
-/// MS-SMB2 2.2.23.1): a synchronous response with MessageId = -1 carrying the
-/// holder's FileId and the new oplock level (0 = none). Signed if the channel
-/// has a signing context. A Level II → none break is not acknowledged by the
-/// client, so this is the whole exchange.
-pub fn build_oplock_break(fid: u64, new_level: u8, session_id: u64, sign: Option<&SignCtx>) -> Vec<u8> {
-    let mut tx = Vec::with_capacity(4 + 64 + 24);
+/// Build a complete NBT-framed SMB2 **Lease Break** notification (server→client,
+/// MS-SMB2 2.2.23.2): a synchronous response with MessageId = -1, keyed by the
+/// client's 16-byte LeaseKey, telling it to drop from `cur_state` to
+/// `new_state`. Read-caching → none carries no dirty data, so Flags = 0 (no
+/// acknowledgement required). Signed if the channel has a signing context.
+#[allow(clippy::too_many_arguments)]
+pub fn build_lease_break(
+    lease_key: &[u8; 16],
+    cur_state: u32,
+    new_state: u32,
+    epoch: u16,
+    session_id: u64,
+    sign: Option<&SignCtx>,
+) -> Vec<u8> {
+    let mut tx = Vec::with_capacity(4 + 64 + 44);
     tx.zeros(4); // NBT length placeholder
     let start = tx.len();
     tx.pbytes(&[0xFE, b'S', b'M', b'B']);
@@ -535,13 +543,16 @@ pub fn build_oplock_break(fid: u64, new_level: u8, session_id: u64, sign: Option
     tx.p32(0); // TreeId
     tx.p64(session_id);
     tx.zeros(16); // signature
-    // Body (StructureSize 24).
-    tx.p16(24);
-    tx.p8(new_level); // OplockLevel
-    tx.p8(0); // Reserved
-    tx.p32(0); // Reserved2
-    tx.p64(fid); // FileId persistent
-    tx.p64(fid); // FileId volatile
+    // Lease Break Notification body (StructureSize 44).
+    tx.p16(44);
+    tx.p16(epoch); // NewEpoch (v2 leases; 0 for v1)
+    tx.p32(0); // Flags: 0 = acknowledgement not required (read-cache drop)
+    tx.pbytes(lease_key); // LeaseKey (16)
+    tx.p32(cur_state); // CurrentLeaseState
+    tx.p32(new_state); // NewLeaseState
+    tx.p32(0); // BreakReason
+    tx.p32(0); // AccessMaskHint
+    tx.p32(0); // ShareMaskHint
     if let Some(sc) = sign {
         let end = tx.len();
         sign_in_place(&mut tx, start, end, sc);

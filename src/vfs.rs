@@ -266,9 +266,13 @@ pub struct OpenFile {
     pub writable: bool,
     pub delete_on_close: bool,
     pub dir: Option<DirState>,
-    /// Inode of the file this handle holds a Level II oplock on (for releasing
-    /// the grant on CLOSE); `None` when no oplock was granted.
+    /// Inode of the file this handle holds a granted lease on (for releasing
+    /// the grant on CLOSE); `None` when no lease was granted.
     pub oplock_ino: Option<u64>,
+    /// The client's lease key from this open's RqLs context, if any. Recorded
+    /// even when not granted, so a WRITE on this handle can exempt the client's
+    /// own lease from the break.
+    pub lease_key: Option<[u8; 16]>,
 }
 
 impl Drop for OpenFile {
@@ -389,6 +393,7 @@ mod tests {
             delete_on_close: false,
             dir: None,
             oplock_ino: None,
+            lease_key: None,
         };
         let id = t.insert(of);
         assert!(t.get(id).is_some());
