@@ -340,6 +340,9 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
 
     pc.dialect = chosen;
     pc.cipher = cipher;
+    if cipher != 0 {
+        crate::logd!("negotiated dialect {chosen:#x} cipher {cipher:#x}");
+    }
     let start = begin_resp(tx, h, status::SUCCESS, false, 0, 0);
     negotiate_body(srv, pc, chosen, cipher, start, tx);
 }
