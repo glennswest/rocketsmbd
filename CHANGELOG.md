@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### 2026-06-13
+- **feat(#18):** Oplock infrastructure — Level II (read-caching) oplock grant, cross-worker break delivery (per-worker eventfd mailbox), `OPLOCK_BREAK` notification builder, and lease-table release on CLOSE *and* connection teardown. Unit + integration tested (grant, cross-worker break delivery, no-crash, no-leak).
+- **fix(#18):** **Gate oplock granting behind `oplocks` config (default off).** Integration testing revealed that cifs requests *leases* and does **not** invalidate its cache on a legacy oplock-break notification (it expects a lease-break), so granting Level II caused **stale reads** (a held mount served old data after a write). Default-off restores correct grant-none behavior (no caching, always fresh); the grant/break machinery stays live behind the flag until lease-based break lands.
 - **feat:** Worker **core pinning** (#17) — `core_pinning` config (default on) pins worker N to core N mod ncpu (`sched_setaffinity`), keeping each ring, its NIC softirqs, and cache on one core under `SO_REUSEPORT`. Validated (read md5 on/off).
 - **feat:** Opt-in io_uring **SQPOLL** (#13) — `sqpoll = true` builds the ring with `setup_sqpoll` (1s idle) so submissions need no syscall; falls back to a normal ring if the kernel rejects it. Opt-in (spins a kernel thread per worker; a win only at high IOPS / many channels).
 

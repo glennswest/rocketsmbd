@@ -985,7 +985,10 @@ fn create(
     // or lease on a file. Level II is the safe subset: multiple readers share
     // it, there's no dirty client data, and a conflicting write breaks it to
     // none with no acknowledgement required.
-    let want_oplock = allow_oplock && !is_dir && req.oplock != OPLOCK_NONE;
+    // Gated off by default: see Config::oplocks — the legacy oplock-break does
+    // not invalidate a lease-based cifs client's cache (stale reads), pending
+    // lease-based break (#18).
+    let want_oplock = srv.cfg.oplocks && allow_oplock && !is_dir && req.oplock != OPLOCK_NONE;
     let granted_oplock = if want_oplock { OPLOCK_LEVEL_II } else { OPLOCK_NONE };
     let fid = sess.handles.insert(OpenFile {
         fd,

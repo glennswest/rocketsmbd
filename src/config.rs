@@ -46,6 +46,13 @@ pub struct Config {
     /// busy kernel thread per worker, so it is opt-in. Default off.
     #[serde(default)]
     pub sqpoll: bool,
+    /// Grant Level II (read-caching) oplocks. **Experimental, default off.**
+    /// The grant + cross-worker break path works, but cifs requests *leases*
+    /// and does not invalidate its cache on a legacy oplock-break notification
+    /// (it expects a lease-break), so enabling this with cifs clients can serve
+    /// stale reads. Stays off until lease-based break lands (#18).
+    #[serde(default)]
+    pub oplocks: bool,
     #[serde(rename = "share")]
     pub shares: Vec<ShareCfg>,
     #[serde(rename = "user", default)]

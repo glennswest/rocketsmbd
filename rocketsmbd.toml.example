@@ -28,3 +28,7 @@ read_only = false
 # [[user]]
 # name = "bob"
 # nt_hash = "8846f7eaee8fb117ad06bdd830b7586c"
+
+# Experimental: grant Level II oplocks. OFF — cifs caches but ignores the
+# legacy oplock-break (it wants a lease-break), so this can serve stale reads.
+oplocks = false

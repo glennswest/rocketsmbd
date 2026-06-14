@@ -826,6 +826,7 @@ mod tests {
             advertise_only: vec![],
             core_pinning: false,
             sqpoll: false,
+            oplocks: false,
             shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
             users: vec![],
         };
