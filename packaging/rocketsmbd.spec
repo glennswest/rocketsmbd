@@ -37,6 +37,7 @@ Provides:       bundled(crate(aes)) = 0.8.4
 Provides:       bundled(crate(aes-gcm)) = 0.10.3
 Provides:       bundled(crate(bitflags)) = 2.13.0
 Provides:       bundled(crate(block-buffer)) = 0.10.4
+Provides:       bundled(crate(ccm)) = 0.5.0
 Provides:       bundled(crate(cfg-if)) = 1.0.4
 Provides:       bundled(crate(cipher)) = 0.4.4
 Provides:       bundled(crate(cmac)) = 0.7.2
