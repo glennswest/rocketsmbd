@@ -244,10 +244,16 @@ pub struct ProtoConn {
     pub notify_done: Vec<NotifyDone>,
     /// Live pends: (fid, async_id) — owned here so CLOSE/CANCEL can find them.
     pub notify_active: Vec<(u64, u64)>,
+    /// This connection's location in the reactor, so a lease/oplock break
+    /// raised on another worker can be routed back here (worker id + the
+    /// connection's slot index + generation guard). See `crate::lease`.
+    pub wid: usize,
+    pub conn_idx: usize,
+    pub conn_gen: u16,
 }
 
 impl ProtoConn {
-    pub fn new(srv: &Srv, _conn_seed: u64) -> Self {
+    pub fn new(srv: &Srv, wid: usize, conn_idx: usize, conn_gen: u16) -> Self {
         Self {
             dialect: 0,
             cipher: 0,
@@ -259,6 +265,9 @@ impl ProtoConn {
             notify_new: Vec::new(),
             notify_done: Vec::new(),
             notify_active: Vec::new(),
+            wid,
+            conn_idx,
+            conn_gen,
         }
     }
 }
@@ -794,6 +803,7 @@ mod tests {
             interfaces: vec![],
             sessions: crate::session::Registry::default(),
             mailboxes: vec![],
+            leases: crate::lease::LeaseTable::default(),
         }
     }
 
@@ -939,7 +949,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let srv = test_srv(&dir);
-        let mut pc = ProtoConn::new(&srv, 1);
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
         let (sess, tree) = establish(&srv, &mut pc);
 
         // CREATE hello.txt (overwrite-if, generic all)
@@ -1079,7 +1089,7 @@ mod tests {
         srv.allow_guest = srv.cfg.guest_allowed();
         assert!(!srv.allow_guest, "users defined → guest off by default");
 
-        let mut pc = ProtoConn::new(&srv, 1);
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
         // NEGOTIATE 3.0.2
         let mut f = req_hdr(CMD_NEGOTIATE, 0, 0, 0);
         f.p16(36);
@@ -1301,7 +1311,7 @@ mod tests {
         });
         srv.users = srv.cfg.user_db();
         srv.allow_guest = srv.cfg.guest_allowed();
-        let mut pc = ProtoConn::new(&srv, 1);
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
 
         // --- NEGOTIATE with a 3.1.1 preauth-integrity context (SHA-512) ---
         let mut neg = req_hdr(CMD_NEGOTIATE, 0, 0, 0);
@@ -1470,7 +1480,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rsmbd-batch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let srv = test_srv(&dir);
-        let mut pc = ProtoConn::new(&srv, 1);
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
 
         // Two ECHO frames processed into the same tx buffer must yield two
         // complete, independently-framed responses.

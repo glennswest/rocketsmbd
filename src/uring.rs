@@ -506,7 +506,6 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         );
     }
     w.conn_seed += 1;
-    let proto = ProtoConn::new(&w.srv, w.conn_seed);
     let idx = match w.free.pop() {
         Some(i) => i,
         None => {
@@ -516,6 +515,7 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         }
     };
     let gen = w.gens[idx];
+    let proto = ProtoConn::new(&w.srv, w.wid, idx, gen);
     w.conns[idx] = Some(Conn {
         fd,
         gen,
