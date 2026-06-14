@@ -1,3 +1,12 @@
+rocketsmbd (1.2.0-1) unstable; urgency=medium
+
+  * AES-256-GCM and AES-CCM (128/256) ciphers; prefer_aes256 option.
+  * Perf: send_zc buffered send, worker core pinning, opt-in SQPOLL,
+    multishot accept.
+  * Opt-in read-caching leases (oplocks=true). Guest+seal hang fixed.
+
+ -- Glenn West <glennswest@neuralcloudcomputing.com>  Sun, 14 Jun 2026 00:00:00 +0000
+
 rocketsmbd (1.1.0-1) unstable; urgency=medium
 
   * SMB3 encryption (AES-128-GCM); send_zc zero-copy buffered send path;

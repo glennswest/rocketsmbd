@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v1.2.0] — 2026-06-14
+
 ### 2026-06-14
 - **feat(#28):** **AES-256-GCM and AES-CCM (128/256)** for SMB 3.1.1 encryption, alongside AES-128-GCM. Generic SP800-108 KDF derives 16/32-byte keys; the transform codec dispatches per cipher with the right nonce length (GCM 12B, CCM 11B). NEGOTIATE picks the first cipher in the client's preference order that we support; new `prefer_aes256` config selects AES-256 when offered. Validated: cifs `seal` negotiates AES-128-GCM and (with `prefer_aes256`) AES-256-GCM — encrypted reads md5-verified both ways; all four ciphers unit-tested (AEAD + transform roundtrip/tamper). CCM via the `ccm` crate.
 
