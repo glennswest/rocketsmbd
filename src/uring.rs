@@ -575,6 +575,9 @@ fn close_conn_ring(ring: &mut IoUring, w: &mut Worker, idx: usize) {
 /// reference its buffers.
 fn finalize_close(w: &mut Worker, idx: usize) {
     if w.conns[idx].take().is_some() {
+        // Release any oplocks this connection held but never cleanly CLOSEd,
+        // so a dropped connection doesn't leak grants in the lease table.
+        w.srv.leases.release_conn(w.wid, idx, w.gens[idx]);
         w.gens[idx] = w.gens[idx].wrapping_add(1).max(1);
         w.free.push(idx);
         logd!("worker {}: connection closed (slot {idx})", w.wid);

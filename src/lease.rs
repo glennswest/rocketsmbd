@@ -103,6 +103,16 @@ impl LeaseTable {
             }
         }
     }
+
+    /// Release every oplock held by a connection (on teardown / disconnect),
+    /// so a connection that drops without a clean CLOSE doesn't leak grants.
+    pub fn release_conn(&self, wid: usize, idx: usize, gen: u16) {
+        let mut m = self.map.lock().unwrap();
+        m.retain(|_, v| {
+            v.retain(|g| !(g.wid == wid && g.conn_idx == idx && g.conn_gen == gen));
+            !v.is_empty()
+        });
+    }
 }
 
 /// Per-worker wakeable break mailbox. `Sync` (eventfd + `Mutex`), so it lives
@@ -204,6 +214,21 @@ mod tests {
         // The actor keeps its own oplock; release it → table empties.
         t.release(key, 1);
         assert!(t.break_conflicts(key, 9, 9, 9).is_empty());
+    }
+
+    #[test]
+    fn release_conn_drops_all_grants_for_a_connection() {
+        let t = LeaseTable::default();
+        // Two files, both held by conn (0,2,5); a third by a different conn.
+        t.grant((0, 10), OplockGrant { fid: 1, session_id: 1, wid: 0, conn_idx: 2, conn_gen: 5 });
+        t.grant((0, 11), OplockGrant { fid: 2, session_id: 1, wid: 0, conn_idx: 2, conn_gen: 5 });
+        t.grant((0, 11), OplockGrant { fid: 3, session_id: 1, wid: 1, conn_idx: 4, conn_gen: 9 });
+        // Connection (0,2,5) drops: its two grants go, the other stays.
+        t.release_conn(0, 2, 5);
+        assert!(t.break_conflicts((0, 10), 9, 9, 9).is_empty()); // file 10 fully gone
+        let b = t.break_conflicts((0, 11), 9, 9, 9); // only the (1,4,9) holder remains
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].fid, 3);
     }
 
     #[cfg(target_os = "linux")]
