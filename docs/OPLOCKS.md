@@ -93,6 +93,30 @@ This adds one genuinely new piece of infrastructure — the **per-worker eventfd
 mailbox** — which is also exactly what SMB Direct's CQ integration and any
 future cross-worker signalling will reuse. Build it once, here.
 
+## Status & key finding (2026-06-13)
+
+Built and tested: connection identity in `ProtoConn`, the `(share_idx,ino)`
+lease table, Level II oplock **grant**, cross-worker **break delivery** (the
+eventfd mailbox → `build_oplock_break` → deferred queue), and lease release on
+**CLOSE and connection teardown**. Unit-tested; cross-worker break delivery
+confirmed end-to-end on the rig (no crash, no leak).
+
+**But integration testing found granting is not yet *effective* with cifs, and
+is unsafe:** cifs (and Windows) request a **lease** (RqLs), and a lease-based
+client does **not** act on a legacy **oplock-break** notification (FileId) — it
+waits for a **lease-break** (keyed by LeaseKey, a different 44-byte frame). With
+Level II granted, a held cifs mount kept serving **stale** data after another
+client's write (server-on-disk and a fresh remount were correct; the cached
+handle was not invalidated). That's worse than grant-none.
+
+So granting is **gated behind `oplocks` (default off)**. Default behavior is
+grant-none = no client caching = always fresh (verified). To actually realize
+the caching win, the remaining work is the **lease path**: emit the granted
+`RqLs` response context (OplockLevel `0xFF`), and send a **lease-break**
+notification on conflict, broken by LeaseKey, with the ack handling leases
+require. The infrastructure (table, mailbox, identity, teardown release) is
+reused as-is.
+
 ## Increment plan
 
 1. **Foundation (done):** oplock/lease constants; parse `RequestedOplockLevel`
