@@ -7,36 +7,45 @@ on:
 permissions:
   contents: write
 
-env:
-  # The repo .cargo/config.toml names a dev-host (macOS) musl linker; override
-  # it for the CI runner, which provides musl-gcc via musl-tools.
-  CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-
 jobs:
   release:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            binsuffix: x86_64-linux-musl
+          - target: aarch64-unknown-linux-musl
+            binsuffix: aarch64-linux-musl
+    env:
+      # Static musl builds bundle musl libc; the cross gnu-gcc serves as the
+      # linker for both arches (the dev-host linker in .cargo/config.toml is
+      # overridden here for CI).
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
       - name: Install build deps
         run: |
           set -e
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
           cargo install cargo-deb cargo-generate-rpm
       - name: Build static binary
-        run: cargo build --release --target x86_64-unknown-linux-musl
+        run: cargo build --release --target ${{ matrix.target }}
       - name: Build .deb and .rpm
         run: |
           set -e
           mkdir -p out
-          cargo deb --no-build --target x86_64-unknown-linux-musl --output out/
+          cargo deb --no-build --target ${{ matrix.target }} --output out/
           # Static binary: no library auto-deps (the only dependency is the
           # kernel's io_uring, checked at runtime — see probe_io_uring()).
-          cargo generate-rpm --target x86_64-unknown-linux-musl --auto-req no -o out/
-          cp target/x86_64-unknown-linux-musl/release/rocketsmbd out/rocketsmbd-x86_64-linux-musl
+          cargo generate-rpm --target ${{ matrix.target }} --auto-req no -o out/
+          cp target/${{ matrix.target }}/release/rocketsmbd out/rocketsmbd-${{ matrix.binsuffix }}
           ls -la out/
       - uses: softprops/action-gh-release@v2
         with:
