@@ -1,7 +1,44 @@
 # Intra-connection read concurrency — design (#12)
 
-**Status:** in progress, staged. This is a high-risk change to the core
-zero-copy read path; it lands behind tested increments.
+**Status: NOT being built — measurement showed no benefit.** The design below
+is preserved for reference (and the Stage-1 user_data slot id is kept as
+harmless groundwork), but the premise was checked before building and does not
+hold for this architecture.
+
+## Why it was shelved (measured 2026-06-15)
+
+Single-channel read on the rig (loopback isolates server from network):
+
+| scenario | throughput | server CPU |
+|---|---|---|
+| warm (server cache hot) | 6.1–6.4 GB/s | **0.03 s CPU per GiB** (~80% of one core *idle*) |
+| cold (page cache dropped) | ~0.50 GB/s | — |
+| local disk baseline (cold) | ~0.48 GB/s | — |
+
+- **Warm:** the server spends 0.03 s of CPU to serve a 1 GiB read that takes
+  0.17 s — it is *not* the bottleneck. The single-channel cap is the
+  client/window/loopback, not the server's one-read-at-a-time processing. You
+  can't speed up a server that's already ~80% idle by overlapping fills.
+- **Cold:** SMB reads run at **disk speed** (0.50 vs 0.48 GB/s local), and
+  `POSIX_FADV_SEQUENTIAL` already has the kernel reading ahead — an app-level
+  prefetch is redundant with kernel readahead for sequential reads.
+
+This matches the earlier benchmark conclusion (linked-chain removal "changed
+nothing"; single-channel is "network/protocol-bound, not server-bound"), now
+confirmed by direct CPU measurement. So the engine below would add a large,
+regression-risky rewrite of the core read path for **no measurable gain**. The
+right lever for single-client throughput remains **multichannel** (more
+connections → more cores/NIC queues), which is already implemented.
+
+Revisit only if a future transport changes the dynamics (e.g. SMB Direct/RDMA,
+where the data path and latency profile differ — #19).
+
+---
+
+## (Original design, for reference)
+
+This was to be a high-risk change to the core zero-copy read path, landed
+behind tested increments.
 
 ## The problem
 
