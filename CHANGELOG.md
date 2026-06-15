@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [v1.3.0] — 2026-06-15
+
+### 2026-06-15
+- **feat(#27):** Read-caching leases **enabled by default** (`oplocks=true`). Validated end-to-end against cifs.ko and Windows: clients request a lease, the server grants read-caching, a conflicting write breaks the lease, and the holder re-reads fresh — no stale reads, breaks honored. AES-256-GCM also confirmed against Windows (`Encrypted=True`, cipher 0x4). Write/handle caching remain follow-ups. Set `oplocks=false` to disable.
+
 ## [v1.2.0] — 2026-06-14
 
 ### 2026-06-14

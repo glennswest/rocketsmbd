@@ -29,9 +29,9 @@ read_only = false
 # name = "bob"
 # nt_hash = "8846f7eaee8fb117ad06bdd830b7586c"
 
-# Experimental: grant Level II oplocks. OFF — cifs caches but ignores the
-# legacy oplock-break (it wants a lease-break), so this can serve stale reads.
-oplocks = false
+# Read-caching leases (SMB2.1+). On by default; clients cache reads and the
+# server breaks the lease on a conflicting write. Set false to disable.
+oplocks = true
 
 # Prefer AES-256 ciphers (GCM then CCM) when the client offers them.
 prefer_aes256 = false

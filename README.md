@@ -13,7 +13,7 @@ data never enters userspace. A single client mount stripes across cores via
 
 ## Status
 
-**Stable (`1.2`).** Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
+**Stable (`1.3`).** Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
 authentication, SMB2/3 signing, SMB 3.1.1 preauth integrity, SMB3
 multichannel, and SMB3 encryption (AES-128/256-GCM, AES-CCM)**. Supports a user database,
 optional guest access, byte-range locks, and directory change notification.
@@ -23,8 +23,9 @@ parsers are fuzzed.
 Set `encrypt = true` to require encryption, or just mount with `seal` (Linux)
 / an encrypted share (Windows) — verified against cifs.ko and Windows Server
 2025 (`Encrypted=True`). Ciphers: AES-128/256-GCM and AES-128/256-CCM (set
-`prefer_aes256` to favor 256-bit). Read-caching leases are available opt-in
-(`oplocks = true`); SMB Direct (RDMA) is on the [roadmap](ROADMAP.md). See
+`prefer_aes256` to favor 256-bit). Read-caching leases are on by
+default (`oplocks`; validated against cifs + Windows); SMB Direct (RDMA) is on
+the [roadmap](ROADMAP.md). See
 [SECURITY.md](SECURITY.md).
 
 ## Install
@@ -34,9 +35,9 @@ with io_uring ≥ 5.15) are attached to each [release](https://github.com/glenns
 
 ```sh
 # Fedora / RHEL (x86_64 or aarch64)
-sudo dnf install ./rocketsmbd-1.2.0-1.x86_64.rpm
+sudo dnf install ./rocketsmbd-1.3.0-1.x86_64.rpm
 # Debian / Ubuntu
-sudo dpkg -i ./rocketsmbd_1.2.0-1_amd64.deb
+sudo dpkg -i ./rocketsmbd_1.3.0-1_amd64.deb
 # then edit /etc/rocketsmbd.toml and:
 sudo systemctl enable --now rocketsmbd
 ```
