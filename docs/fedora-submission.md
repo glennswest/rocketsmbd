@@ -3,6 +3,8 @@
 Everything below is drafted for you to paste/run. The package is review-clean
 (see `docs/UPSTREAM.md`); what remains needs your Fedora identity.
 
+**Review bug: https://bugzilla.redhat.com/show_bug.cgi?id=2488339** (filed).
+
 URLs the review uses:
 - **Spec:** <https://raw.githubusercontent.com/glennswest/rocketsmbd/main/packaging/rocketsmbd.spec>
 - **SRPM:** <https://github.com/glennswest/rocketsmbd/releases/download/v1.4.0/rocketsmbd-1.4.0-1.fc43.src.rpm>
@@ -88,7 +90,7 @@ rocketsmbd — an SMB2/SMB3 file server built from scratch in Rust on io_uring
 parsers are fuzzed in CI, and it already builds in COPR for F41/rawhide/EPEL9
 (x86_64 + aarch64): https://copr.fedorainfracloud.org/coprs/glennswest/rocketsmbd/
 
-Review bug: <link once filed>
+Review bug: https://bugzilla.redhat.com/show_bug.cgi?id=2488339
 
 One thing I'd value SIG guidance on: it's currently bundled because it needs
 io-uring 0.7 (IORING_OP_SEND_ZC) and Fedora ships rust-io-uring 0.6.4 in stable
@@ -112,7 +114,7 @@ the packager group. It's rocketsmbd, a from-scratch SMB2/3 server in Rust on
 io_uring (zero-copy splice, multichannel, AES-GCM). Already fedora-review clean
 and building in COPR (F41/rawhide/EPEL9, x86_64+aarch64).
 
-Review bug: <link once filed>
+Review bug: https://bugzilla.redhat.com/show_bug.cgi?id=2488339
 COPR: https://copr.fedorainfracloud.org/coprs/glennswest/rocketsmbd/
 
 It's bundled for now only because it needs io-uring 0.7 (SEND_ZC) and Fedora
