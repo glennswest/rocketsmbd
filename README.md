@@ -23,7 +23,7 @@ parsers are fuzzed.
 Set `encrypt = true` to require encryption, or just mount with `seal` (Linux)
 / an encrypted share (Windows) — verified against cifs.ko and Windows Server
 2025 (`Encrypted=True`). Ciphers: AES-128/256-GCM and AES-128/256-CCM (set
-`prefer_aes256` to favor 256-bit). Read-caching leases are on by
+`prefer_aes256` to favor 256-bit). Read-caching + handle-caching leases are on by
 default (`oplocks`; validated against cifs + Windows); SMB Direct (RDMA) is on
 the [roadmap](ROADMAP.md). See
 [SECURITY.md](SECURITY.md).

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-06-15
+- **feat(#27):** **Handle-caching (RH) leases.** When a client requests handle-caching, the server now grants `R|H` (read + handle) instead of read-only, and the lease **persists past CLOSE** — the client keeps its cache/handle to avoid re-opens, and the lease is broken on a later conflicting write or released on connection teardown. Validated end-to-end on cifs.ko *and* Windows: `R|H` granted, the detached lease survives CLOSE, a conflicting write breaks it, and the client re-reads fresh (no stale data). Write-caching (RWH) is still not granted (dirty data needs break-with-ack).
+
+
 ## [v1.3.0] — 2026-06-15
 
 ### 2026-06-15
