@@ -1023,6 +1023,14 @@ fn create(
         && allow_oplock
         && !is_dir
         && lease_req.as_ref().is_some_and(|l| l.state & LEASE_READ_CACHING != 0);
+    // Grant read-caching, plus handle-caching if the client asked for it — that
+    // lets the client keep its lease (and cache) across CLOSE, avoiding re-opens.
+    // Never write-caching (dirty client data needs break-with-ack — not yet).
+    let granted_state = if grant_lease {
+        LEASE_READ_CACHING | (lease_req.as_ref().unwrap().state & LEASE_HANDLE_CACHING)
+    } else {
+        0
+    };
     let fid = sess.handles.insert(OpenFile {
         fd,
         path,
@@ -1035,6 +1043,7 @@ fn create(
         dir: None,
         oplock_ino: if grant_lease { Some(meta.ino) } else { None },
         lease_key: lease_req.as_ref().map(|l| l.key),
+        lease_granted: granted_state,
     });
     chain.last_fid = Some(fid);
     if grant_lease {
@@ -1043,7 +1052,7 @@ fn create(
             (share_idx, meta.ino),
             crate::lease::LeaseGrant {
                 lease_key: l.key,
-                state: LEASE_READ_CACHING,
+                state: granted_state,
                 epoch: l.epoch,
                 session_id: chain.session_id,
                 wid: cid.0,
@@ -1051,7 +1060,7 @@ fn create(
                 conn_gen: cid.2,
             },
         );
-        crate::logd!("lease: granted READ (share {share_idx}, ino {})", meta.ino);
+        crate::logd!("lease: granted {granted_state:#x} (share {share_idx}, ino {})", meta.ino);
     }
 
     begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
@@ -1085,7 +1094,7 @@ fn create(
         tx.pbytes(CTX_NAME_RQLS); // "RqLs" at offset 16
         tx.zeros(4); // pad → data 8-aligned at offset 24
         tx.pbytes(&l.key); // LeaseKey
-        tx.p32(LEASE_READ_CACHING); // LeaseState (granted)
+        tx.p32(granted_state); // LeaseState (granted: read, + handle if asked)
         tx.p32(0); // LeaseFlags
         tx.p64(0); // LeaseDuration
         if l.v2 {
@@ -1119,9 +1128,14 @@ fn close(srv: &Srv, pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, bod
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
-    // Release any lease this handle held.
+    // Release the lease this handle held — unless handle-caching was granted.
+    // With H caching the lease (and the client's cache) persists past CLOSE; it
+    // is broken on a later conflicting access or released on connection
+    // teardown (release_conn). Without H, drop it now.
     if let (Some(ino), Some(lk)) = (of.oplock_ino, of.lease_key) {
-        srv.leases.release((of.share_idx, ino), lk);
+        if of.lease_granted & LEASE_HANDLE_CACHING == 0 {
+            srv.leases.release((of.share_idx, ino), lk);
+        }
     }
     // Complete any CHANGE_NOTIFY pended on this handle.
     let mut i = 0;

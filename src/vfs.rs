@@ -273,6 +273,9 @@ pub struct OpenFile {
     /// even when not granted, so a WRITE on this handle can exempt the client's
     /// own lease from the break.
     pub lease_key: Option<[u8; 16]>,
+    /// Lease state granted on this handle (0 = none). When it includes
+    /// handle-caching, the lease persists past CLOSE (the client keeps caching).
+    pub lease_granted: u32,
 }
 
 impl Drop for OpenFile {
@@ -394,6 +397,7 @@ mod tests {
             dir: None,
             oplock_ino: None,
             lease_key: None,
+            lease_granted: 0,
         };
         let id = t.insert(of);
         assert!(t.get(id).is_some());
