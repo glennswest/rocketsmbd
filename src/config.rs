@@ -51,12 +51,12 @@ pub struct Config {
     /// AES-128-GCM for speed). Default off.
     #[serde(default)]
     pub prefer_aes256: bool,
-    /// Grant Level II (read-caching) oplocks. **Experimental, default off.**
-    /// The grant + cross-worker break path works, but cifs requests *leases*
-    /// and does not invalidate its cache on a legacy oplock-break notification
-    /// (it expects a lease-break), so enabling this with cifs clients can serve
-    /// stale reads. Stays off until lease-based break lands (#18).
-    #[serde(default)]
+    /// Grant read-caching leases (SMB2.1+). Default on. Clients cache reads
+    /// under a lease; a conflicting write breaks it (lease-break notification)
+    /// so they re-read fresh. Validated against cifs.ko and Windows (no stale
+    /// reads, breaks honored). Set false to disable. Write/handle caching are
+    /// not yet granted (#27).
+    #[serde(default = "default_true")]
     pub oplocks: bool,
     #[serde(rename = "share")]
     pub shares: Vec<ShareCfg>,
