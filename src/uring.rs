@@ -49,12 +49,20 @@ const TX_FLUSH: usize = 1 << 20;
 /// Shrink an oversized tx buffer back to this after a send completes.
 const TX_KEEP: usize = 1 << 20;
 
-fn ud(op: u8, idx: usize, gen: u16) -> u64 {
-    ((op as u64) << 56) | ((idx as u64 & 0xFF_FFFF) << 32) | ((gen as u64) << 16)
+/// Pack (op, conn slot index, generation, read-slot id) into io_uring
+/// user_data. The low 16 bits carry the per-connection read-slot id so
+/// concurrent zero-copy reads route to the right slot; non-read ops use 0.
+fn ud(op: u8, idx: usize, gen: u16, slot: u16) -> u64 {
+    ((op as u64) << 56) | ((idx as u64 & 0xFF_FFFF) << 32) | ((gen as u64) << 16) | (slot as u64)
 }
 
-fn ud_parts(v: u64) -> (u8, usize, u16) {
-    ((v >> 56) as u8, ((v >> 32) & 0xFF_FFFF) as usize, (v >> 16) as u16)
+fn ud_parts(v: u64) -> (u8, usize, u16, u16) {
+    (
+        (v >> 56) as u8,
+        ((v >> 32) & 0xFF_FFFF) as usize,
+        (v >> 16) as u16,
+        (v & 0xFFFF) as u16,
+    )
 }
 
 /// Verify the kernel actually provides io_uring before we spawn workers.
@@ -377,7 +385,7 @@ fn sq_push_conn(ring: &mut IoUring, w: &mut Worker, idx: usize, e: &squeue::Entr
 }
 
 fn arm_accept(ring: &mut IoUring, w: &Worker) {
-    let ud = ud(OP_ACCEPT, 0, 0);
+    let ud = ud(OP_ACCEPT, 0, 0, 0);
     // Multishot accept stays armed and posts a CQE per connection (no SQE per
     // accept). It's a modern-kernel feature; gate it on the same probe as
     // send_zc (≥ 6.0 covers multishot accept's 5.19 floor) and fall back to a
@@ -403,7 +411,7 @@ fn arm_wake(ring: &mut IoUring, w: &mut Worker) {
     }
     let e = opcode::Read::new(types::Fd(efd), &mut w.wake_buf as *mut u64 as *mut u8, 8)
         .build()
-        .user_data(ud(OP_WAKE, 0, 0));
+        .user_data(ud(OP_WAKE, 0, 0, 0));
     sq_push(ring, &e);
 }
 
@@ -447,7 +455,7 @@ fn deliver_break(ring: &mut IoUring, w: &mut Worker, b: crate::lease::BreakMsg) 
 }
 
 fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32, flags: u32) {
-    let (op, idx, gen) = ud_parts(udata);
+    let (op, idx, gen, _slot) = ud_parts(udata);
     if op == OP_ACCEPT {
         // Multishot accept stays armed (F_MORE set); only re-arm when it has
         // terminated. Oneshot accept never sets F_MORE, so it always re-arms.
@@ -567,10 +575,10 @@ fn close_conn_ring(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     // Unpark a waiting inotify Read so its buffer can be freed.
     if c.inotify_fd.is_some() && !c.inotify_cancelled {
         c.inotify_cancelled = true;
-        let target = ud(OP_INOTIFY, idx, c.gen);
+        let target = ud(OP_INOTIFY, idx, c.gen, 0);
         let e = opcode::AsyncCancel::new(target)
             .build()
-            .user_data(ud(OP_CANCEL, 0xFF_FFFF, 0));
+            .user_data(ud(OP_CANCEL, 0xFF_FFFF, 0, 0));
         sq_push(ring, &e); // not counted; sentinel completion is ignored
     }
     if c.inflight == 0 {
@@ -644,7 +652,7 @@ fn maybe_arm_recv(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     }
     let e = opcode::Recv::new(types::Fd(c.fd), buf.as_mut_ptr(), buf.len() as u32)
         .build()
-        .user_data(ud(OP_RECV, idx, c.gen));
+        .user_data(ud(OP_RECV, idx, c.gen, 0));
     c.recv_inflight = true;
     sq_push_conn(ring, w, idx, &e);
 }
@@ -801,7 +809,7 @@ fn arm_inotify(ring: &mut IoUring, c: &mut Conn, idx: usize) {
     let ifd = c.inotify_fd.expect("inotify created");
     let e = opcode::Read::new(types::Fd(ifd), c.ibuf.as_mut_ptr(), c.ibuf.len() as u32)
         .build()
-        .user_data(ud(OP_INOTIFY, idx, c.gen));
+        .user_data(ud(OP_INOTIFY, idx, c.gen, 0));
     c.inflight += 1;
     sq_push(ring, &e);
 }
@@ -910,14 +918,14 @@ fn submit_send(ring: &mut IoUring, w: &mut Worker, idx: usize, msg_flags: i32) {
     if send_zc_ok && msg_flags == 0 && buf.len() >= ZC_SEND_MIN {
         let e = opcode::SendZc::new(types::Fd(c.fd), buf.as_ptr(), buf.len() as u32)
             .build()
-            .user_data(ud(OP_SEND, idx, c.gen));
+            .user_data(ud(OP_SEND, idx, c.gen, 0));
         sq_push_conn(ring, w, idx, &e);
         return;
     }
     let e = opcode::Send::new(types::Fd(c.fd), buf.as_ptr(), buf.len() as u32)
         .flags(msg_flags)
         .build()
-        .user_data(ud(OP_SEND, idx, c.gen));
+        .user_data(ud(OP_SEND, idx, c.gen, 0));
     sq_push_conn(ring, w, idx, &e);
 }
 
@@ -1056,16 +1064,16 @@ fn submit_zc_linked(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     .flags(libc::SPLICE_F_MOVE)
     .build()
     .flags(squeue::Flags::IO_LINK)
-    .user_data(ud(OP_SPLICE_IN, idx, c.gen));
+    .user_data(ud(OP_SPLICE_IN, idx, c.gen, 0));
     let send = opcode::Send::new(types::Fd(c.fd), c.tx.as_ptr(), c.tx.len() as u32)
         .flags(libc::MSG_MORE)
         .build()
         .flags(squeue::Flags::IO_LINK)
-        .user_data(ud(OP_SEND, idx, c.gen));
+        .user_data(ud(OP_SEND, idx, c.gen, 0));
     let splice_out = opcode::Splice::new(types::Fd(pipe_r), -1, types::Fd(c.fd), -1, len)
         .flags(libc::SPLICE_F_MOVE)
         .build()
-        .user_data(ud(OP_SPLICE_OUT, idx, c.gen));
+        .user_data(ud(OP_SPLICE_OUT, idx, c.gen, 0));
     conn_mut(w, idx).inflight += 3;
     sq_push(ring, &splice_in);
     sq_push(ring, &send);
@@ -1085,7 +1093,7 @@ fn submit_splice_in(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     )
     .flags(libc::SPLICE_F_MOVE)
     .build()
-    .user_data(ud(OP_SPLICE_IN, idx, c.gen));
+    .user_data(ud(OP_SPLICE_IN, idx, c.gen, 0));
     sq_push_conn(ring, w, idx, &e);
 }
 
@@ -1206,7 +1214,7 @@ fn submit_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     let e = opcode::Splice::new(types::Fd(pipe_r), -1, types::Fd(c.fd), -1, zc.out_left)
         .flags(libc::SPLICE_F_MOVE)
         .build()
-        .user_data(ud(OP_SPLICE_OUT, idx, c.gen));
+        .user_data(ud(OP_SPLICE_OUT, idx, c.gen, 0));
     sq_push_conn(ring, w, idx, &e);
 }
 
