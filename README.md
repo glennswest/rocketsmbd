@@ -13,7 +13,7 @@ data never enters userspace. A single client mount stripes across cores via
 
 ## Status
 
-**Stable (`1.3`).** Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
+**Stable (`1.4`).** Speaks SMB 2.0.2 through 3.1.1 with **NTLMv2
 authentication, SMB2/3 signing, SMB 3.1.1 preauth integrity, SMB3
 multichannel, and SMB3 encryption (AES-128/256-GCM, AES-CCM)**. Supports a user database,
 optional guest access, byte-range locks, and directory change notification.
@@ -35,9 +35,9 @@ with io_uring ≥ 5.15) are attached to each [release](https://github.com/glenns
 
 ```sh
 # Fedora / RHEL (x86_64 or aarch64)
-sudo dnf install ./rocketsmbd-1.3.0-1.x86_64.rpm
+sudo dnf install ./rocketsmbd-1.4.0-1.x86_64.rpm
 # Debian / Ubuntu
-sudo dpkg -i ./rocketsmbd_1.3.0-1_amd64.deb
+sudo dpkg -i ./rocketsmbd_1.4.0-1_amd64.deb
 # then edit /etc/rocketsmbd.toml and:
 sudo systemctl enable --now rocketsmbd
 ```

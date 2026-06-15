@@ -1,3 +1,9 @@
+rocketsmbd (1.4.0-1) unstable; urgency=medium
+
+  * Handle-caching (RH) leases (persist past close; validated cifs + Windows).
+
+ -- Glenn West <glennswest@neuralcloudcomputing.com>  Sun, 15 Jun 2026 00:00:00 +0000
+
 rocketsmbd (1.3.0-1) unstable; urgency=medium
 
   * Read-caching leases enabled by default (validated vs cifs.ko and Windows);

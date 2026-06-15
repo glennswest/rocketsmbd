@@ -12,7 +12,7 @@
 # tarball as Source1 (packaging/build-srpm.sh produces both).
 
 Name:           rocketsmbd
-Version:        1.3.0
+Version:        1.4.0
 Release:        1%{?dist}
 Summary:        SMB2/SMB3 file server built on Linux io_uring (zero-copy, multichannel)
 
@@ -137,6 +137,8 @@ cargo test --release --offline
 %{_mandir}/man8/%{name}.8*
 
 %changelog
+* Sun Jun 15 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 1.4.0-1
+- Handle-caching (RH) leases: persist past CLOSE, validated on cifs + Windows.
 * Sun Jun 15 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 1.3.0-1
 - Read-caching leases on by default (cifs + Windows validated).
 * Sun Jun 14 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 1.2.0-1
