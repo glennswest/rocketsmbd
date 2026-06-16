@@ -21,13 +21,16 @@ sudo bench/stress/run-stress.sh 100 192.168.8.150   # remote server
 ```
 
 Each container (`client.sh`): mounts (`nosharesock` → its own connection),
-writes a unique random file, reads it back and **md5-verifies**, reads a
-shared file each pass (lease grant + break churn), repeats `ITERS` times
-(default 3, `SZ`=8 MiB), unmounts. Exit 0 = all I/O verified.
+waits at a **start barrier** (until the launcher drops `GO` on the share) so all
+`N` clients hold their mounts at once, then writes a unique random file, reads it
+back and **md5-verifies**, reads a shared file each pass (lease grant + break
+churn), repeats `ITERS` times (default 3, `SZ`=8 MiB), unmounts. Exit 0 = all
+I/O verified.
 
-`run-stress.sh` builds the image once, launches `N` containers, samples server
-established-connection count + RSS mid-run, then reports `pass/fail` and
-whether the server is still alive.
+`run-stress.sh` builds the image once, launches `N` containers, waits for all
+`N` connections to be established, releases the barrier, samples server
+peak connection count + RSS, then reports `pass/fail` and whether the server is
+still alive. Set `BARRIER=0` to skip the barrier (staggered mount/io/unmount).
 
 ## What to watch
 - All containers exit 0 (no `VERIFY_FAIL`/`MOUNT_FAIL`), server stays alive.

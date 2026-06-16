@@ -16,6 +16,16 @@ if ! mount -t cifs "//$SRV/data" "$M" \
 fi
 trap 'umount "$M" 2>/dev/null' EXIT
 
+# Start barrier: stay mounted but idle until the launcher drops GO on the share,
+# so all N clients hold their mounts simultaneously (real concurrency, not a
+# staggered sequence of quick mount/io/unmount cycles). Bounded wait.
+if [ "${BARRIER:-1}" = "1" ]; then
+    for _ in $(seq 1 600); do
+        [ -e "$M/GO" ] && break
+        sleep 0.1
+    done
+fi
+
 dd if=/dev/urandom of=/tmp/u bs=1M count="$SZ" status=none
 SRC=$(md5sum /tmp/u | cut -d' ' -f1)
 

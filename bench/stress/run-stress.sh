@@ -18,7 +18,9 @@ SHARE_PATH=${3:-/srv/stress}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 # Seed a shared file every client reads (concurrent lease grants + breaks).
+# Clear any stale GO barrier flag from a previous run.
 if [ -d "$SHARE_PATH" ]; then
+    rm -f "$SHARE_PATH/GO"
     dd if=/dev/urandom of="$SHARE_PATH/shared.bin" bs=1M count=16 status=none 2>/dev/null || true
 fi
 
@@ -33,11 +35,24 @@ for i in $(seq 1 "$N"); do
         rsmbd-stress >/dev/null
 done
 
-# Sample server while the fleet runs.
+# Wait for all N clients to mount and reach the barrier, then release them at
+# once so the server sees N simultaneous connections. Falls back after a bound.
+if [ "${BARRIER:-1}" = "1" ] && [ -d "$SHARE_PATH" ]; then
+    echo "==> waiting for $N clients to mount (barrier)"
+    for _ in $(seq 1 600); do
+        conns=$(ss -tn state established "( sport = :445 )" 2>/dev/null | grep -c ':445')
+        [ "$conns" -ge "$N" ] && break
+        sleep 0.5
+    done
+    echo "==> $conns mounted; releasing barrier"
+    : > "$SHARE_PATH/GO"
+fi
+
+# Sample server at peak (all clients now holding mounts + doing I/O).
 if [ -n "$srvpid" ]; then
     conns=$(ss -tn state established "( sport = :445 )" 2>/dev/null | grep -c ':445')
     rss=$(awk '/VmRSS/{print $2" "$3}' /proc/"$srvpid"/status 2>/dev/null)
-    echo "==> mid-run: established :445 conns=$conns  server RSS=$rss"
+    echo "==> peak: established :445 conns=$conns  server RSS=$rss"
 fi
 
 echo "==> waiting for completion"
@@ -57,4 +72,5 @@ alive=$([ -n "$srvpid" ] && kill -0 "$srvpid" 2>/dev/null && echo YES || echo NO
 echo "RESULT: $pass passed, $fail failed (of $N); server alive=$alive"
 
 echo "==> cleanup"
+[ -d "$SHARE_PATH" ] && rm -f "$SHARE_PATH/GO"
 podman rm -f $(for i in $(seq 1 "$N"); do echo "rss-$i"; done) >/dev/null 2>&1
