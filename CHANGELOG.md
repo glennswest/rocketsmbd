@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-06-16
+- **test:** Concurrent-mount stress harness (`bench/stress/`): N privileged podman containers each cifs-mount the server and do md5-verified write/read I/O plus shared-file reads (lease churn). Added a GO-flag **start barrier** so all N clients hold their mounts simultaneously — an N=100 run otherwise only held ~3 concurrent connections because serial container launch outpaced each client's quick I/O. Verified 100/100 pass, server stable, RSS returns to baseline (no per-connection/lease leak), 0 errors.
+
 ## [v1.4.0] — 2026-06-15
 
 ### 2026-06-15
