@@ -1,0 +1,6 @@
+# Minimal client image for the concurrent-mount stress test: cifs-utils to
+# mount, coreutils for dd/md5sum. Built once, run as N containers.
+FROM registry.fedoraproject.org/fedora-minimal:41
+RUN microdnf install -y cifs-utils coreutils util-linux && microdnf clean all
+COPY client.sh /client.sh
+ENTRYPOINT ["/bin/bash", "/client.sh"]
