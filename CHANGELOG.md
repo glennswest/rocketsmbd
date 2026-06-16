@@ -4,6 +4,8 @@
 
 ### 2026-06-16
 - **test:** Concurrent-mount stress harness (`bench/stress/`): N privileged podman containers each cifs-mount the server and do md5-verified write/read I/O plus shared-file reads (lease churn). Added a GO-flag **start barrier** so all N clients hold their mounts simultaneously — an N=100 run otherwise only held ~3 concurrent connections because serial container launch outpaced each client's quick I/O. Verified 100/100 pass, server stable, RSS returns to baseline (no per-connection/lease leak), 0 errors.
+- **test:** Added a **1000-round soak runner** (`soak.sh`) with per-round CSV stats (`round,epoch,pass,fail,rss_kb,peak_conns,duration_s`) and an analyzer (`analyze-soak.sh`) that reports a leak verdict via least-squares RSS slope + first/last-quartile means. Server validated clean through 168+ rounds (16,799 concurrent verified I/O ops, 0 data faults, flat RSS).
+- **test:** Harden the stress harness to **separate launch failures from I/O-verify failures** — under ~100k container creates in a soak, podman occasionally flakes a `run`; the harness now checks the create exit, retries once, skips `podman wait` for never-created containers, and reports launch-failed separately so a host/podman flake is never misread as a server or data-integrity fault.
 
 ## [v1.4.0] — 2026-06-15
 
