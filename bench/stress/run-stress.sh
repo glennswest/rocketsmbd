@@ -29,11 +29,27 @@ podman build -q -t rsmbd-stress -f "$HERE/Containerfile" "$HERE" >/dev/null
 
 srvpid=$(pgrep -x rocketsmbd | head -1)
 echo "==> server pid=$srvpid; launching $N containers against //$SRV/data"
+launched=0
+launch_fail=0
 for i in $(seq 1 "$N"); do
-    podman run -d --name "rss-$i" --privileged --network=host \
-        -e SRV="$SRV" -e SMBUSER=glenn -e SMBPASS=testpw123 -e ID="$i" \
-        rsmbd-stress >/dev/null
+    # Check the create exit and retry once: under heavy churn (thousands of
+    # creates in a soak) podman occasionally flakes a `run`. A create that
+    # never starts is a host/podman launch failure, NOT an I/O-verify failure.
+    if ! podman run -d --name "rss-$i" --privileged --network=host \
+            -e SRV="$SRV" -e SMBUSER=glenn -e SMBPASS=testpw123 -e ID="$i" \
+            rsmbd-stress >/dev/null 2>&1; then
+        podman rm -f "rss-$i" >/dev/null 2>&1
+        if ! podman run -d --name "rss-$i" --privileged --network=host \
+                -e SRV="$SRV" -e SMBUSER=glenn -e SMBPASS=testpw123 -e ID="$i" \
+                rsmbd-stress >/dev/null 2>&1; then
+            launch_fail=$((launch_fail + 1))
+            echo "  LAUNCH_FAIL container $i (podman run failed twice)"
+            continue
+        fi
+    fi
+    launched=$((launched + 1))
 done
+[ "$launch_fail" -gt 0 ] && echo "==> $launch_fail container(s) failed to launch (host/podman, not server)"
 
 # Wait for the clients to mount and reach the barrier, then release them at once
 # so the server sees them concurrently. Release once BARRIER_PCT% of N have
@@ -62,7 +78,14 @@ fi
 echo "==> waiting for completion"
 pass=0
 fail=0
+gone=0
 for i in $(seq 1 "$N"); do
+    # Only wait on containers that exist; a missing one is a launch failure
+    # (already counted above), not an I/O-verify failure.
+    if ! podman container exists "rss-$i" 2>/dev/null; then
+        gone=$((gone + 1))
+        continue
+    fi
     code=$(podman wait "rss-$i" 2>/dev/null)
     if [ "$code" = "0" ]; then
         pass=$((pass + 1))
@@ -73,7 +96,9 @@ for i in $(seq 1 "$N"); do
 done
 
 alive=$([ -n "$srvpid" ] && kill -0 "$srvpid" 2>/dev/null && echo YES || echo NO)
-echo "RESULT: $pass passed, $fail failed (of $N); server alive=$alive"
+# pass/fail count I/O verification only; launch failures are reported separately
+# so a podman-create flake under churn isn't misread as a server/data fault.
+echo "RESULT: $pass passed, $fail failed (of $launched launched, $((launch_fail + gone)) launch-failed); server alive=$alive"
 
 echo "==> cleanup"
 [ -d "$SHARE_PATH" ] && rm -f "$SHARE_PATH/GO"
