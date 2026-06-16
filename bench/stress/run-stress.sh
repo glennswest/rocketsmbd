@@ -35,13 +35,17 @@ for i in $(seq 1 "$N"); do
         rsmbd-stress >/dev/null
 done
 
-# Wait for all N clients to mount and reach the barrier, then release them at
-# once so the server sees N simultaneous connections. Falls back after a bound.
+# Wait for the clients to mount and reach the barrier, then release them at once
+# so the server sees them concurrently. Release once BARRIER_PCT% of N have
+# connected (default 100), or after a bound — so a single lagging container in a
+# long soak doesn't stall the whole round on the 300s timeout.
 if [ "${BARRIER:-1}" = "1" ] && [ -d "$SHARE_PATH" ]; then
-    echo "==> waiting for $N clients to mount (barrier)"
+    pct=${BARRIER_PCT:-100}
+    need=$(( (N * pct + 99) / 100 ))
+    echo "==> waiting for >=$need/$N clients to mount (barrier, ${pct}%)"
     for _ in $(seq 1 600); do
         conns=$(ss -tn state established "( sport = :445 )" 2>/dev/null | grep -c ':445')
-        [ "$conns" -ge "$N" ] && break
+        [ "$conns" -ge "$need" ] && break
         sleep 0.5
     done
     echo "==> $conns mounted; releasing barrier"
