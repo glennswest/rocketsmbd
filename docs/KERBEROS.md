@@ -180,7 +180,14 @@ the binary.
       SP800-108 KDF); compiles under `--features kerberos`.
 - [x] #36 auth selector config (`auth`, `[kerberos]`)
 - [x] dispatcher wiring (`session_setup` → mech routing; NTLM path unchanged)
-- [ ] #35 replay/skew/errors — GSS rcache relied on; skew/error mapping TODO
+- [x] #35 replay/skew/errors — replay via the GSS library's own rcache (MIT);
+      clock skew mapped to `STATUS_TIME_DIFFERENCE_AT_DC`; GSS major+minor
+      decoded with `gss_display_status` so failures read as text in the log
+      (validated: a wrong-SPN run logs *"No key table entry found matching
+      cifs/wronghost.g8.lo@"*). Single-leg AP-REQ only (the cifs/Windows norm);
+      a multi-leg GSS exchange is logged + rejected — persisting a partial GSS
+      context across SESSION_SETUP round-trips is a future item, not exercised
+      by real SMB clients.
 - [x] #37 live `sec=krb5` interop — **PASSED** against realm `G8.LO` (KDC
       krb5.g8.lo) on dev.g8.lo: cifs.ko `sec=krb5` authenticated `alice@G8.LO`,
       md5-verified read/write; a second run with `require_signing=true` +

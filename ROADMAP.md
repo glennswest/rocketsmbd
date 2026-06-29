@@ -40,18 +40,24 @@ Tracking the path from a fast LAN file server to a hardened, distro-packaged
   prerequisite for a clean OpenSSL/FIPS build (#30). Default-on `ntlm`
   feature; `--no-default-features` drops md4/md-5 entirely.
 
-## 0.7 — Active Directory / Kerberos
+## 0.7 — Active Directory / Kerberos ✅
 
 NTLM-only is not viable long term — Microsoft is aggressively removing NTLM in
-favor of Kerberos. Add Kerberos (GSS-API/SPNEGO) auth via an external GSS
-library (no pure-Rust krb5). Tracking issue #31, broken into sub-tasks:
+favor of Kerberos. Kerberos (GSS-API/SPNEGO) auth via the system GSS library
+(no pure-Rust krb5). Tracking issue #31 — **validated end-to-end** against a
+live KDC (cifs.ko `sec=krb5`, signing + AES-GCM sealing over the Kerberos
+session key). Sub-tasks:
 
-- SPNEGO mechtype negotiation — advertise + select Kerberos (#32).
-- AP-REQ acceptor + keytab via external GSS library (#33).
-- GSS session-key → SMB signing/sealing key derivation (#34).
-- Replay cache, clock-skew, and error handling (#35).
-- Config to select kerberos / ntlm / both (#36) — composes with #30.
-- AD-join/keytab docs + `sec=krb5` integration tests (#37).
+- ✅ SPNEGO mechtype negotiation — advertise + select Kerberos (#32).
+- ✅ AP-REQ acceptor + keytab via the system GSS library (#33).
+- ✅ GSS session-key → SMB signing/sealing key derivation (#34).
+- ✅ Replay cache, clock-skew, and error handling (#35) — multi-leg context
+  persistence remains a documented future item (not exercised by real clients).
+- ✅ Config to select kerberos / ntlm / both (#36) — composes with #30.
+- ✅ AD-join/keytab docs + `sec=krb5` integration tests (#37).
+
+Clean FIPS + AD posture: `--no-default-features --features "backend-openssl
+kerberos"` → OpenSSL crypto, Kerberos auth, no NTLM/MD4/RC4 in the binary.
 
 ## 1.0 — stable
 
