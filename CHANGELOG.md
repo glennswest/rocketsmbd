@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-06-29
+- **docs:** `docs/TESTING.md` now documents the concurrent-mount stress + 1000-round soak harness (`bench/stress/`) and records the clean soak result (no leak; slope +0.005 kB/round). Committed the soak stats artifact `bench/stress/results/soak-1000-2026-06-16.csv` so `analyze-soak.sh` can be re-run against it.
+
 ### 2026-06-16
 - **test:** Concurrent-mount stress harness (`bench/stress/`): N privileged podman containers each cifs-mount the server and do md5-verified write/read I/O plus shared-file reads (lease churn). Added a GO-flag **start barrier** so all N clients hold their mounts simultaneously — an N=100 run otherwise only held ~3 concurrent connections because serial container launch outpaced each client's quick I/O. Verified 100/100 pass, server stable, RSS returns to baseline (no per-connection/lease leak), 0 errors.
 - **test:** Added a **1000-round soak runner** (`soak.sh`) with per-round CSV stats (`round,epoch,pass,fail,rss_kb,peak_conns,duration_s`) and an analyzer (`analyze-soak.sh`) that reports a leak verdict via least-squares RSS slope + first/last-quartile means. **Full 1000-round soak completed clean** (17.6 h, mean 63.5s/round): 99,999 concurrent md5-verified I/O ops passed, 0 data faults; the single "fail" was a podman launch flake (round 168), not a server fault. Server alive the entire run (one pid, r1→r1000). RSS: 1700→1732 kB, +32 kB total drift in the first ~180 rounds then flat (slope +0.005 kB/round, max 1736 kB @r183) — **no leak** in connection-slot/lease-table/cross-worker-break paths across ~100k mount/teardown cycles.

@@ -34,6 +34,37 @@ Run: `cargo test` (anywhere); `cargo clippy --target x86_64-unknown-linux-musl
 | `win-interop.ps1` | Windows SMB client: `net use`, dir, read, write, `Get-SmbConnection` (dialect/signing). |
 | `win-read.ps1` | Windows `.NET` `FileStream` streamed read throughput. |
 
+## Concurrent-mount stress + soak (`bench/stress/`)
+
+What unit tests can't reach: lease-table contention, the cross-worker break
+mailbox under load, connection-slot churn, memory scaling, and mount/teardown
+storms. See `bench/stress/README.md` for the harness.
+
+| Script | What it does |
+|---|---|
+| `run-stress.sh N [host]` | Builds the client image once, launches `N` privileged podman containers that each cifs-mount the share and do md5-verified write/read + shared-file reads (lease churn). A **GO-flag start barrier** holds all `N` mounts simultaneously (without it, serial container launch outpaced the quick per-client I/O and only ~3 connections overlapped). |
+| `soak.sh` | 1000-round wrapper around the stress run; emits per-round CSV `round,epoch_s,pass,fail,rss_kb,peak_conns,duration_s`. |
+| `analyze-soak.sh [csv]` | Leak verdict from a stats CSV: least-squares RSS slope + first/last-quartile means → plateau vs linear-leak. Portable awk (macOS/Linux). |
+
+The harness **separates launch failures from I/O-verify failures**: under ~100k
+container creates podman occasionally flakes a `run`, so it checks the create
+exit, retries once, skips `podman wait` for never-created containers, and reports
+launch-failed separately — a host/podman flake is never misread as a server or
+data-integrity fault.
+
+### 1000-round soak — no leak (2026-06-16)
+Committed artifact: `bench/stress/results/soak-1000-2026-06-16.csv` (re-run
+`analyze-soak.sh` on it any time). 17.6 h, mean 63.5 s/round, ~100 concurrent
+mounts/round (mean peak 99.7):
+
+- **I/O**: 99,999 concurrent md5-verified ops passed, **0 data faults**. The lone
+  "fail" (round 168) was a podman launch flake, not a server fault.
+- **Liveness**: one server pid alive r1→r1000 across ~100k mount/teardown cycles.
+- **Memory**: RSS 1700→1732 kB (+32 kB, all in the first ~180 rounds, then flat).
+  Least-squares slope **+0.005 kB/round** (~+5 kB/1000 rounds); first vs.
+  last-quartile mean delta +4 kB; max 1736 kB @r183. → **VERDICT: no leak** in
+  the connection-slot / lease-table / cross-worker-break paths.
+
 ## Fuzzing (`cargo-fuzz`)
 
 Two libFuzzer targets in `fuzz/fuzz_targets/` (run with nightly; also a CI
