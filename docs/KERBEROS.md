@@ -181,8 +181,12 @@ the binary.
 - [x] #36 auth selector config (`auth`, `[kerberos]`)
 - [x] dispatcher wiring (`session_setup` → mech routing; NTLM path unchanged)
 - [ ] #35 replay/skew/errors — GSS rcache relied on; skew/error mapping TODO
-- [ ] #37 live `sec=krb5` interop — **blocked on the KDC (krb5.g8.lo)**; runbook
-      below, automated by `bench/krb5/e2e.sh`.
+- [x] #37 live `sec=krb5` interop — **PASSED** against realm `G8.LO` (KDC
+      krb5.g8.lo) on dev.g8.lo: cifs.ko `sec=krb5` authenticated `alice@G8.LO`,
+      md5-verified read/write; a second run with `require_signing=true` +
+      `sec=krb5,seal` confirmed signing + AES-GCM sealing over the Kerberos
+      session key (32 MiB sealed I/O, md5 matched). Automated by
+      `bench/krb5/e2e.sh`.
 
 Build verified on dev.g8.lo (all four feature combinations clippy-clean):
 `cargo build/test --features kerberos` and `--no-default-features --features

@@ -80,6 +80,24 @@ mounts/round (mean peak 99.7):
   last-quartile mean delta +4 kB; max 1736 kB @r183. → **VERDICT: no leak** in
   the connection-slot / lease-table / cross-worker-break paths.
 
+## Kerberos `sec=krb5` interop (`bench/krb5/e2e.sh`)
+
+End-to-end against a real KDC (realm `G8.LO`, krb5.g8.lo) with the `kerberos`
+feature build. `e2e.sh` builds `--features kerberos`, runs the server with
+`auth = "kerberos"` and a keytab for `cifs/<host>`, `kinit`s a test user, mounts
+`-o sec=krb5`, and md5-verifies write/read.
+
+### Verified (2026-06-29, dev.g8.lo)
+- cifs.ko `sec=krb5` mount authenticated `alice@G8.LO` via the GSS acceptor;
+  the SMB session key was derived from the Kerberos sub-session key; 64 MiB
+  read/write md5-verified.
+- With `require_signing = true` + `sec=krb5,seal`: **SMB3 signing (enforced) and
+  AES-GCM sealing both work over the Kerberos key** — 32 MiB sealed I/O,
+  md5 matched. Server log: `kerberos principal "alice@G8.LO" authenticated
+  (signing required, encryption ready)`.
+
+KDC-side setup (once) is in the `e2e.sh` header and `docs/KERBEROS.md` §10.
+
 ## Fuzzing (`cargo-fuzz`)
 
 Two libFuzzer targets in `fuzz/fuzz_targets/` (run with nightly; also a CI
