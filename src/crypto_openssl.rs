@@ -51,24 +51,29 @@ pub fn aes128_cmac(key: &[u8], parts: &[&[u8]]) -> [u8; 16] {
     out
 }
 
-fn cipher_for(cipher: u16) -> Cipher {
+fn gcm_cipher(cipher: u16) -> Option<Cipher> {
     match cipher {
-        CIPHER_AES128_GCM => Cipher::aes_128_gcm(),
-        CIPHER_AES256_GCM => Cipher::aes_256_gcm(),
-        CIPHER_AES128_CCM => Cipher::aes_128_ccm(),
-        CIPHER_AES256_CCM => Cipher::aes_256_ccm(),
-        _ => panic!("unknown cipher {cipher:#x}"),
+        CIPHER_AES128_GCM => Some(Cipher::aes_128_gcm()),
+        CIPHER_AES256_GCM => Some(Cipher::aes_256_gcm()),
+        _ => None,
     }
 }
 
 pub fn aead_seal(cipher: u16, key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
-    let mut tag = [0u8; 16];
-    // OpenSSL's high-level AEAD allocates the ciphertext; copy it back in place.
-    let ct = encrypt_aead(cipher_for(cipher), key, Some(nonce), aad, buf, &mut tag)
-        .expect("aead seal");
-    debug_assert_eq!(ct.len(), buf.len());
-    buf.copy_from_slice(&ct);
-    tag
+    // AES-GCM (the SMB3 default and the FIPS-relevant cipher) goes through
+    // OpenSSL. OpenSSL's one-shot AEAD does not handle AES-CCM's length-prefix
+    // requirement, and CCM is rarely negotiated, so CCM stays on the pure-Rust
+    // `ccm` crate (a FIPS deployment negotiates GCM anyway). See #29.
+    match gcm_cipher(cipher) {
+        Some(c) => {
+            let mut tag = [0u8; 16];
+            let ct = encrypt_aead(c, key, Some(nonce), aad, buf, &mut tag).expect("gcm seal");
+            debug_assert_eq!(ct.len(), buf.len());
+            buf.copy_from_slice(&ct);
+            tag
+        }
+        None => ccm_fallback::seal(cipher, key, nonce, aad, buf),
+    }
 }
 
 pub fn aead_open(
@@ -79,11 +84,50 @@ pub fn aead_open(
     buf: &mut [u8],
     tag: &[u8; 16],
 ) -> bool {
-    match decrypt_aead(cipher_for(cipher), key, Some(nonce), aad, buf, tag) {
-        Ok(pt) => {
-            buf.copy_from_slice(&pt);
-            true
+    match gcm_cipher(cipher) {
+        Some(c) => match decrypt_aead(c, key, Some(nonce), aad, buf, tag) {
+            Ok(pt) => {
+                buf.copy_from_slice(&pt);
+                true
+            }
+            Err(_) => false,
+        },
+        None => ccm_fallback::open(cipher, key, nonce, aad, buf, tag),
+    }
+}
+
+/// AES-CCM via the pure-Rust `ccm` crate (OpenSSL's one-shot AEAD can't do CCM).
+mod ccm_fallback {
+    use super::{CIPHER_AES128_CCM, CIPHER_AES256_CCM};
+
+    type Ccm128 = ccm::Ccm<aes::Aes128, ccm::consts::U16, ccm::consts::U11>;
+    type Ccm256 = ccm::Ccm<aes::Aes256, ccm::consts::U16, ccm::consts::U11>;
+
+    pub fn seal(cipher: u16, key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
+        use ccm::aead::{generic_array::GenericArray, AeadInPlace, KeyInit};
+        match cipher {
+            CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
+                .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
+                .expect("ccm")
+                .into(),
+            CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
+                .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
+                .expect("ccm")
+                .into(),
+            _ => panic!("unknown cipher {cipher:#x}"),
         }
-        Err(_) => false,
+    }
+
+    pub fn open(cipher: u16, key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8], tag: &[u8; 16]) -> bool {
+        use ccm::aead::{generic_array::GenericArray, AeadInPlace, KeyInit};
+        match cipher {
+            CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
+                .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
+                .is_ok(),
+            CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
+                .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
+                .is_ok(),
+            _ => false,
+        }
     }
 }
