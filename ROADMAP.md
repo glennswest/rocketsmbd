@@ -38,6 +38,19 @@ Tracking the path from a fast LAN file server to a hardened, distro-packaged
 - Make MD4/RC4 (NTLM legacy primitives) optional at build time, a
   prerequisite for a clean OpenSSL/FIPS build (#30).
 
+## 0.7 — Active Directory / Kerberos
+
+NTLM-only is not viable long term — Microsoft is aggressively removing NTLM in
+favor of Kerberos. Add Kerberos (GSS-API/SPNEGO) auth via an external GSS
+library (no pure-Rust krb5). Tracking issue #31, broken into sub-tasks:
+
+- SPNEGO mechtype negotiation — advertise + select Kerberos (#32).
+- AP-REQ acceptor + keytab via external GSS library (#33).
+- GSS session-key → SMB signing/sealing key derivation (#34).
+- Replay cache, clock-skew, and error handling (#35).
+- Config to select kerberos / ntlm / both (#36) — composes with #30.
+- AD-join/keytab docs + `sec=krb5` integration tests (#37).
+
 ## 1.0 — stable
 
 - Security review complete, fuzzing in CI, signing-required option,
