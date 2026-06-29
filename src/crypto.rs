@@ -4,17 +4,26 @@
 //! compositions: the SP800-108 counter-mode KDF used for SMB3 signing keys,
 //! RC4 for the NTLM key exchange, and the two wire signature algorithms.
 
-use aes::Aes128;
-use cmac::Cmac;
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256, Sha512};
-
-pub type HmacSha256 = Hmac<Sha256>;
+// Crypto backend (#29): the FIPS-able SMB2/3 primitives (HMAC-SHA256, SHA-512,
+// AES-CMAC, AES-GCM/CCM) are provided by one of two interchangeable backends.
+// Default is pure-Rust RustCrypto; `--features backend-openssl` routes them
+// through the system OpenSSL for FIPS deployments. The public API in this file
+// is backend-independent.
+#[cfg(feature = "backend-openssl")]
+#[path = "crypto_openssl.rs"]
+mod backend;
+#[cfg(not(feature = "backend-openssl"))]
+#[path = "crypto_rustcrypto.rs"]
+mod backend;
 
 // ------------------------------------------------ NTLM-only legacy primitives
 // MD4 (NT hash), HMAC-MD5 (NTLMv2), and RC4 (NTLMSSP key exchange) are used
 // only by the NTLM auth path and are the primitives a FIPS/OpenSSL backend
-// cannot provide. Gated behind the `ntlm` feature (#30).
+// cannot provide. They are always RustCrypto, gated behind the `ntlm` feature
+// (#30); a FIPS build uses `--no-default-features` so they are absent.
+
+#[cfg(feature = "ntlm")]
+use hmac::{Hmac, Mac};
 
 #[cfg(feature = "ntlm")]
 pub type HmacMd5 = Hmac<md5::Md5>;
@@ -29,32 +38,25 @@ pub fn hmac_md5(key: &[u8], data: &[u8]) -> [u8; 16] {
 /// NT hash: MD4 of the UTF-16LE password.
 #[cfg(feature = "ntlm")]
 pub fn nt_hash(password: &str) -> [u8; 16] {
-    use md4::Md4;
+    use md4::{Digest, Md4};
     let mut h = Md4::new();
     h.update(crate::wire::utf16le(password));
     h.finalize().into()
 }
 
 pub fn sha512(parts: &[&[u8]]) -> [u8; 64] {
-    let mut h = Sha512::new();
-    for p in parts {
-        h.update(p);
-    }
-    h.finalize().into()
+    backend::sha512(parts)
 }
 
 /// SP800-108 KDF in counter mode with HMAC-SHA256, 128-bit output — the
 /// SMB3 key derivation (MS-SMB2 3.1.4.2). `label` and `context` are used
 /// exactly as given (the spec's labels include their trailing NUL).
 pub fn kdf128(key: &[u8; 16], label: &[u8], context: &[u8]) -> [u8; 16] {
-    let mut m = HmacSha256::new_from_slice(key).expect("hmac accepts any key length");
-    m.update(&1u32.to_be_bytes());
-    m.update(label);
-    m.update(&[0]);
-    m.update(context);
-    m.update(&128u32.to_be_bytes());
-    let out = m.finalize().into_bytes();
-    out[..16].try_into().unwrap()
+    let mac = backend::hmac_sha256(
+        key,
+        &[&1u32.to_be_bytes(), label, &[0], context, &128u32.to_be_bytes()],
+    );
+    mac[..16].try_into().unwrap()
 }
 
 /// RC4 — used only for the NTLMSSP EncryptedRandomSessionKey unwrap.
@@ -92,22 +94,8 @@ pub enum SignAlg {
 /// (so callers can substitute a zeroed signature field without copying).
 pub fn smb2_signature(alg: SignAlg, key: &[u8; 16], parts: &[&[u8]]) -> [u8; 16] {
     match alg {
-        SignAlg::HmacSha256 => {
-            let mut m = HmacSha256::new_from_slice(key).unwrap();
-            for p in parts {
-                m.update(p);
-            }
-            let out = m.finalize().into_bytes();
-            out[..16].try_into().unwrap()
-        }
-        SignAlg::AesCmac => {
-            let mut m = <Cmac<Aes128> as Mac>::new_from_slice(key).unwrap();
-            for p in parts {
-                m.update(p);
-            }
-            let out = m.finalize().into_bytes();
-            out[..16].try_into().unwrap()
-        }
+        SignAlg::HmacSha256 => backend::hmac_sha256(key, parts)[..16].try_into().unwrap(),
+        SignAlg::AesCmac => backend::aes128_cmac(key, parts),
     }
 }
 
@@ -141,13 +129,11 @@ fn kdf(key: &[u8], label: &[u8], context: &[u8], out_bits: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(out_bytes + 32);
     let mut counter = 1u32;
     while out.len() < out_bytes {
-        let mut m = HmacSha256::new_from_slice(key).expect("hmac accepts any key length");
-        m.update(&counter.to_be_bytes());
-        m.update(label);
-        m.update(&[0]);
-        m.update(context);
-        m.update(&out_bits.to_be_bytes());
-        out.extend_from_slice(&m.finalize().into_bytes());
+        let block = backend::hmac_sha256(
+            key,
+            &[&counter.to_be_bytes(), label, &[0], context, &out_bits.to_be_bytes()],
+        );
+        out.extend_from_slice(&block);
         counter += 1;
     }
     out.truncate(out_bytes);
@@ -177,27 +163,7 @@ pub fn smb311_encryption_keys(
 /// tag. `key`/`nonce` must be the cipher's correct length (see cipher_key_len /
 /// cipher_nonce_len); `aad` is the authenticated TRANSFORM_HEADER bytes.
 pub fn aead_seal(cipher: u16, key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
-    use aes_gcm::aead::{AeadInPlace, KeyInit};
-    use ccm::aead::generic_array::GenericArray;
-    match cipher {
-        CIPHER_AES128_GCM => aes_gcm::Aes128Gcm::new(GenericArray::from_slice(key))
-            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-            .expect("gcm")
-            .into(),
-        CIPHER_AES256_GCM => aes_gcm::Aes256Gcm::new(GenericArray::from_slice(key))
-            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-            .expect("gcm")
-            .into(),
-        CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
-            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-            .expect("ccm")
-            .into(),
-        CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
-            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-            .expect("ccm")
-            .into(),
-        _ => panic!("unknown cipher {cipher:#x}"),
-    }
+    backend::aead_seal(cipher, key, nonce, aad, buf)
 }
 
 /// SMB3 AEAD open: verify the tag and decrypt `buf` in place. Returns false on
@@ -210,28 +176,8 @@ pub fn aead_open(
     buf: &mut [u8],
     tag: &[u8; 16],
 ) -> bool {
-    use aes_gcm::aead::{AeadInPlace, KeyInit};
-    use ccm::aead::generic_array::GenericArray;
-    match cipher {
-        CIPHER_AES128_GCM => aes_gcm::Aes128Gcm::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-            .is_ok(),
-        CIPHER_AES256_GCM => aes_gcm::Aes256Gcm::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-            .is_ok(),
-        CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-            .is_ok(),
-        CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-            .is_ok(),
-        _ => false,
-    }
+    backend::aead_open(cipher, key, nonce, aad, buf, tag)
 }
-
-// AES-CCM with SMB3 parameters: 16-byte tag, 11-byte nonce.
-type Ccm128 = ccm::Ccm<aes::Aes128, ccm::consts::U16, ccm::consts::U11>;
-type Ccm256 = ccm::Ccm<aes::Aes256, ccm::consts::U16, ccm::consts::U11>;
 
 #[cfg(test)]
 mod tests {
@@ -267,11 +213,10 @@ mod tests {
             &[0x0b; 16],
             &[b"Hi There"],
         );
-        // RFC 4231 case 1 uses a 20-byte key; recompute the truncated
-        // variant independently with the hmac crate to pin our part-feeding.
-        let mut m = HmacSha256::new_from_slice(&[0x0b; 16]).unwrap();
-        m.update(b"Hi There");
-        assert_eq!(sig.to_vec(), m.finalize().into_bytes()[..16].to_vec());
+        // Cross-check the part-fed/truncated signing path against the backend's
+        // single-shot HMAC over the same input.
+        let expect = backend::hmac_sha256(&[0x0b; 16], &[b"Hi There"]);
+        assert_eq!(sig.to_vec(), expect[..16].to_vec());
     }
 
     #[test]
@@ -339,15 +284,13 @@ mod tests {
         let key = [7u8; 16];
         let label = b"SMB2AESCMAC\0";
         let ctx = b"SmbSign\0";
-        let mut m = HmacSha256::new_from_slice(&key).unwrap();
         let mut msg = Vec::new();
         msg.extend_from_slice(&1u32.to_be_bytes());
         msg.extend_from_slice(label);
         msg.push(0);
         msg.extend_from_slice(ctx);
         msg.extend_from_slice(&128u32.to_be_bytes());
-        m.update(&msg);
-        let expect = &m.finalize().into_bytes()[..16];
-        assert_eq!(kdf128(&key, label, ctx).to_vec(), expect.to_vec());
+        let expect = backend::hmac_sha256(&key, &[&msg]);
+        assert_eq!(kdf128(&key, label, ctx).to_vec(), expect[..16].to_vec());
     }
 }

@@ -17,8 +17,14 @@ categories = ["network-programming", "filesystem"]
 # FIPS/OpenSSL crypto backend cannot provide. Build with
 # `--no-default-features` to compile them out (#30); the result has no NTLM
 # auth path and rejects NTLMSSP session-setup until Kerberos (#31) lands.
-default = ["ntlm"]
+default = ["ntlm", "backend-rustcrypto"]
 ntlm = ["dep:md4", "dep:md-5"]
+# Crypto backend for the FIPS-able SMB2/3 primitives (#29). Exactly one should
+# be active; rustcrypto is the default (pure-Rust, static-musl friendly).
+# backend-openssl routes them through system OpenSSL for FIPS deployments
+# (dynamically linked; needs openssl-devel at build time).
+backend-rustcrypto = []
+backend-openssl = ["dep:openssl"]
 # Kerberos (GSS-API/SPNEGO) acceptor (#31). OFF by default: it links the system
 # GSS library (MIT krb5 / Heimdal), so it is a dynamically-linked, Linux-only
 # build — incompatible with the static-musl `scratch` container. See
@@ -40,6 +46,9 @@ ccm = "0.5"
 # Legacy NTLM-only primitives — optional, gated by the `ntlm` feature.
 md4 = { version = "0.10", optional = true }
 md-5 = { version = "0.10", optional = true }
+# OpenSSL crypto backend — optional, gated by the `backend-openssl` feature
+# (system libcrypto at build/link time; dynamically linked).
+openssl = { version = "0.10", optional = true }
 # Kerberos/GSS — optional, gated by the `kerberos` feature (Linux + system GSS
 # library at build time). Raw RFC 2744 C bindings; we drive the accept loop and
 # the `gss_inquire_sec_context_by_oid` session-key extraction directly so the
