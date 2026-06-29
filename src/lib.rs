@@ -14,9 +14,17 @@ pub mod net;
 pub mod ntlm;
 pub mod session;
 pub mod smb2;
+pub mod spnego;
 pub mod status;
 pub mod vfs;
 pub mod wire;
+
+/// NTLMSSP message signature. Kept always-available (independent of the `ntlm`
+/// feature) so SPNEGO classification can recognize — and an NTLM-free build can
+/// cleanly reject — NTLMSSP tokens.
+pub fn ntlm_sig() -> &'static [u8; 8] {
+    b"NTLMSSP\0"
+}
 
 #[cfg(target_os = "linux")]
 pub mod uring;
