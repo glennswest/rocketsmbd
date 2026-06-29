@@ -19,6 +19,12 @@ categories = ["network-programming", "filesystem"]
 # auth path and rejects NTLMSSP session-setup until Kerberos (#31) lands.
 default = ["ntlm"]
 ntlm = ["dep:md4", "dep:md-5"]
+# Kerberos (GSS-API/SPNEGO) acceptor (#31). OFF by default: it links the system
+# GSS library (MIT krb5 / Heimdal), so it is a dynamically-linked, Linux-only
+# build — incompatible with the static-musl `scratch` container. See
+# docs/KERBEROS.md. Compose with `--no-default-features --features kerberos`
+# for an NTLM-free, Kerberos-only server.
+kerberos = ["dep:gssapi-sys"]
 
 [dependencies]
 libc = "0.2"
@@ -34,6 +40,11 @@ ccm = "0.5"
 # Legacy NTLM-only primitives — optional, gated by the `ntlm` feature.
 md4 = { version = "0.10", optional = true }
 md-5 = { version = "0.10", optional = true }
+# Kerberos/GSS — optional, gated by the `kerberos` feature (Linux + system GSS
+# library at build time). Raw RFC 2744 C bindings; we drive the accept loop and
+# the `gss_inquire_sec_context_by_oid` session-key extraction directly so the
+# context handle is consistent across both calls.
+gssapi-sys = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"

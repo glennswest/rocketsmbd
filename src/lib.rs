@@ -9,6 +9,8 @@ pub mod crypto;
 pub mod lease;
 #[macro_use]
 pub mod log;
+#[cfg(feature = "kerberos")]
+pub mod krb5;
 pub mod net;
 #[cfg(feature = "ntlm")]
 pub mod ntlm;

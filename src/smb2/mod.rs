@@ -845,6 +845,8 @@ mod tests {
             sqpoll: false,
             prefer_aes256: false,
             oplocks: false,
+            auth: crate::config::AuthMode::Both,
+            kerberos: None,
             shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
             users: vec![],
         };

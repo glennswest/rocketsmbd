@@ -58,10 +58,60 @@ pub struct Config {
     /// not yet granted (#27).
     #[serde(default = "default_true")]
     pub oplocks: bool,
+    /// Which authentication mechanisms to advertise/accept. Default `both`
+    /// (Kerberos preferred, NTLM fallback). The *effective* set is intersected
+    /// with the built features: `ntlm` (#30) and `kerberos` (#31). E.g. a
+    /// `--no-default-features --features kerberos` build treats `both` as
+    /// Kerberos-only.
+    #[serde(default = "default_auth")]
+    pub auth: AuthMode,
+    /// Kerberos/GSS settings (used only in a `kerberos`-feature build).
+    #[serde(default)]
+    pub kerberos: Option<KerberosCfg>,
     #[serde(rename = "share")]
     pub shares: Vec<ShareCfg>,
     #[serde(rename = "user", default)]
     pub users: Vec<UserCfg>,
+}
+
+/// Authentication mechanism selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// NTLMv2 only.
+    Ntlm,
+    /// Kerberos only.
+    Kerberos,
+    /// Advertise both; Kerberos preferred with NTLM fallback.
+    Both,
+}
+
+impl AuthMode {
+    /// Whether NTLM is permitted by policy (independent of build features).
+    pub fn allows_ntlm(self) -> bool {
+        matches!(self, AuthMode::Ntlm | AuthMode::Both)
+    }
+    /// Whether Kerberos is permitted by policy (independent of build features).
+    pub fn allows_kerberos(self) -> bool {
+        matches!(self, AuthMode::Kerberos | AuthMode::Both)
+    }
+}
+
+/// Kerberos acceptor configuration (`[kerberos]` table).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KerberosCfg {
+    /// Enable the Kerberos acceptor. Default true when the table is present.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Keytab holding the service key for the SPN. Falls back to `$KRB5_KTNAME`
+    /// / the system default keytab when unset.
+    pub keytab: Option<PathBuf>,
+    /// Service principal, e.g. `cifs/fileserver.example.com`. Defaults to
+    /// `cifs/<server_name>` when unset.
+    pub spn: Option<String>,
+    /// Kerberos realm. Defaults to the realm from the system `krb5.conf`.
+    pub realm: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +147,10 @@ fn default_log_level() -> u8 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_auth() -> AuthMode {
+    AuthMode::Both
 }
 
 impl Config {
