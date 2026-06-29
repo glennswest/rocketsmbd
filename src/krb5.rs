@@ -21,6 +21,32 @@ use std::ptr;
 
 use gssapi_sys as gss;
 
+// `gssapi-sys` binds only the base RFC 2744 `gssapi.h`. The session-key
+// extraction needs three symbols from the MIT/Heimdal extension header
+// (`gssapi_ext.h`) plus the `GSS_C_INDEFINITE` lifetime constant; declare them
+// here. They are exported by `libgssapi_krb5` (linked via `gssapi-sys`).
+const GSS_C_INDEFINITE: gss::OM_uint32 = 0xffff_ffff;
+
+#[repr(C)]
+struct GssBufferSetDesc {
+    count: usize, // size_t
+    elements: *mut gss::gss_buffer_desc,
+}
+type GssBufferSetT = *mut GssBufferSetDesc;
+
+extern "C" {
+    fn gss_inquire_sec_context_by_oid(
+        minor_status: *mut gss::OM_uint32,
+        context_handle: gss::gss_ctx_id_t,
+        desired_object: gss::gss_OID,
+        data_set: *mut GssBufferSetT,
+    ) -> gss::OM_uint32;
+    fn gss_release_buffer_set(
+        minor_status: *mut gss::OM_uint32,
+        buffer_set: *mut GssBufferSetT,
+    ) -> gss::OM_uint32;
+}
+
 /// `GSS_C_INQ_SSPI_SESSION_KEY` — the inquire OID whose first buffer is the
 /// established context's session key (the Kerberos sub-session key SMB signs
 /// and seals with). OID 1.2.840.113554.1.2.2.5.5.
@@ -75,7 +101,7 @@ impl Acceptor {
             let major = gss::gss_acquire_cred(
                 &mut minor,
                 name,
-                gss::GSS_C_INDEFINITE,
+                GSS_C_INDEFINITE,
                 ptr::null_mut(),               // desired mechs: default set
                 gss::GSS_C_ACCEPT as i32,
                 &mut cred,
@@ -162,8 +188,8 @@ impl AcceptCtx<'_> {
                 length: oid_val.len() as gss::OM_uint32,
                 elements: oid_val.as_mut_ptr() as *mut _,
             };
-            let mut set: gss::gss_buffer_set_t = ptr::null_mut();
-            let major = gss::gss_inquire_sec_context_by_oid(
+            let mut set: GssBufferSetT = ptr::null_mut();
+            let major = gss_inquire_sec_context_by_oid(
                 &mut minor,
                 self.ctx,
                 &oid as *const _ as gss::gss_OID,
@@ -174,7 +200,7 @@ impl AcceptCtx<'_> {
             }
             let b = &*(*set).elements;
             let key = std::slice::from_raw_parts(b.value as *const u8, b.length as usize).to_vec();
-            gss::gss_release_buffer_set(&mut minor, &mut set);
+            gss_release_buffer_set(&mut minor, &mut set);
             if key.is_empty() {
                 return Err("empty session key".into());
             }
