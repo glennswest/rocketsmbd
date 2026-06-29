@@ -33,10 +33,12 @@ Tracking the path from a fast LAN file server to a hardened, distro-packaged
 - SMB3 encryption, AES-128/256-GCM (#10).
 - Zero-copy path for signed/encrypted reads (#11).
 - Windows Server interop + head-to-head benchmark (#21).
-- Pluggable crypto backend — optional OpenSSL primitives for FIPS
-  compliance (#29).
-- Make MD4/RC4 (NTLM legacy primitives) optional at build time, a
-  prerequisite for a clean OpenSSL/FIPS build (#30).
+- ✅ Pluggable crypto backend — optional OpenSSL primitives for FIPS
+  compliance (#29). `backend-rustcrypto` (default) / `backend-openssl`;
+  OpenSSL KATs verified identical to RustCrypto on Linux.
+- ✅ Make MD4/RC4 (NTLM legacy primitives) optional at build time, a
+  prerequisite for a clean OpenSSL/FIPS build (#30). Default-on `ntlm`
+  feature; `--no-default-features` drops md4/md-5 entirely.
 
 ## 0.7 — Active Directory / Kerberos
 
