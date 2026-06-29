@@ -881,8 +881,9 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
             return;
         }
         Step::Failed(e) => {
+            let st = crate::krb5::status_for_failure(&e);
             crate::logw!("kerberos: authentication failed ({e})");
-            err_resp(tx, h, status::LOGON_FAILURE, chain);
+            err_resp(tx, h, st, chain);
             return;
         }
     };

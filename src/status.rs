@@ -24,6 +24,8 @@ pub const SHARING_VIOLATION: u32 = 0xC000_0043;
 pub const FILE_LOCK_CONFLICT: u32 = 0xC000_0054;
 pub const LOCK_NOT_GRANTED: u32 = 0xC000_0055;
 pub const LOGON_FAILURE: u32 = 0xC000_006D;
+/// Kerberos clock skew between client/server/KDC exceeds policy (MS-ERREF).
+pub const TIME_DIFFERENCE_AT_DC: u32 = 0xC000_0133;
 pub const DELETE_PENDING: u32 = 0xC000_0056;
 pub const DISK_FULL: u32 = 0xC000_007F;
 pub const INSUFFICIENT_RESOURCES: u32 = 0xC000_009A;

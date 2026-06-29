@@ -291,7 +291,74 @@ unsafe fn take_buf(b: &mut gss::gss_buffer_desc) -> Vec<u8> {
     v
 }
 
-/// Format a GSS major/minor status pair for logs.
+/// Format a GSS major/minor status pair for logs, decoding both into the
+/// human-readable messages from the GSS library (so the common Kerberos
+/// failures — clock skew, no key in keytab, expired ticket, unreachable KDC —
+/// are obvious in the log instead of a bare hex code).
 fn status_str(major: gss::OM_uint32, minor: gss::OM_uint32) -> String {
-    format!("major=0x{major:08x} minor=0x{minor:08x}")
+    let maj = display_status(major, gss::GSS_C_GSS_CODE as i32);
+    let min = display_status(minor, gss::GSS_C_MECH_CODE as i32);
+    let mut s = format!("major=0x{major:08x}");
+    if !maj.is_empty() {
+        s.push_str(&format!(" ({maj})"));
+    }
+    s.push_str(&format!(" minor=0x{minor:08x}"));
+    if !min.is_empty() {
+        s.push_str(&format!(" ({min})"));
+    }
+    s
+}
+
+/// Decode one GSS status value (major or minor) into its message text(s),
+/// walking the multi-message context.
+fn display_status(value: gss::OM_uint32, status_type: i32) -> String {
+    if value == 0 {
+        return String::new();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut msg_ctx: gss::OM_uint32 = 0;
+    // Bound the loop defensively; GSS sets msg_ctx back to 0 when done.
+    for _ in 0..8 {
+        unsafe {
+            let mut minor: gss::OM_uint32 = 0;
+            let mut buf = empty_buf();
+            let major = gss::gss_display_status(
+                &mut minor,
+                value,
+                status_type,
+                ptr::null_mut(), // default mechanism
+                &mut msg_ctx,
+                &mut buf,
+            );
+            if major != gss::GSS_S_COMPLETE {
+                break;
+            }
+            if !buf.value.is_null() && buf.length != 0 {
+                parts.push(
+                    String::from_utf8_lossy(std::slice::from_raw_parts(
+                        buf.value as *const u8,
+                        buf.length,
+                    ))
+                    .into_owned(),
+                );
+            }
+            gss::gss_release_buffer(&mut minor, &mut buf);
+        }
+        if msg_ctx == 0 {
+            break;
+        }
+    }
+    parts.join("; ")
+}
+
+/// Map a failed GSS accept to the most informative SMB status. Clock skew is
+/// the single most common Kerberos misconfiguration, so surface it distinctly;
+/// everything else is a logon failure.
+pub fn status_for_failure(reason: &str) -> u32 {
+    let r = reason.to_ascii_lowercase();
+    if r.contains("clock skew") || r.contains("time") && r.contains("skew") {
+        crate::status::TIME_DIFFERENCE_AT_DC
+    } else {
+        crate::status::LOGON_FAILURE
+    }
 }
