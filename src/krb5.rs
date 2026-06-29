@@ -199,7 +199,7 @@ impl AcceptCtx<'_> {
                 return Err(status_str(major, minor));
             }
             let b = &*(*set).elements;
-            let key = std::slice::from_raw_parts(b.value as *const u8, b.length as usize).to_vec();
+            let key = std::slice::from_raw_parts(b.value as *const u8, b.length).to_vec();
             gss_release_buffer_set(&mut minor, &mut set);
             if key.is_empty() {
                 return Err("empty session key".into());
@@ -226,7 +226,7 @@ unsafe fn import_name(s: &str) -> Result<gss::gss_name_t, String> {
     let mut minor: gss::OM_uint32 = 0;
     let mut bytes = s.as_bytes().to_vec();
     let mut nb = gss::gss_buffer_desc {
-        length: bytes.len() as usize,
+        length: bytes.len(),
         value: bytes.as_mut_ptr() as *mut _,
     };
     let mut name: gss::gss_name_t = ptr::null_mut();
@@ -262,7 +262,7 @@ unsafe fn display_name(name: gss::gss_name_t) -> String {
     }
     let s = String::from_utf8_lossy(std::slice::from_raw_parts(
         out.value as *const u8,
-        out.length as usize,
+        out.length,
     ))
     .into_owned();
     gss::gss_release_buffer(&mut minor, &mut out);
@@ -271,7 +271,7 @@ unsafe fn display_name(name: gss::gss_name_t) -> String {
 
 unsafe fn buf_from(b: &[u8]) -> gss::gss_buffer_desc {
     gss::gss_buffer_desc {
-        length: b.len() as usize,
+        length: b.len(),
         value: b.as_ptr() as *mut _,
     }
 }
@@ -285,7 +285,7 @@ unsafe fn take_buf(b: &mut gss::gss_buffer_desc) -> Vec<u8> {
     if b.value.is_null() || b.length == 0 {
         return Vec::new();
     }
-    let v = std::slice::from_raw_parts(b.value as *const u8, b.length as usize).to_vec();
+    let v = std::slice::from_raw_parts(b.value as *const u8, b.length).to_vec();
     let mut minor: gss::OM_uint32 = 0;
     gss::gss_release_buffer(&mut minor, b);
     v
