@@ -172,9 +172,51 @@ the binary.
 
 ## 10. Status
 
-- [ ] #32 SPNEGO mechtype negotiation — *implemented + unit-tested on macOS*
-- [ ] #33 GSS acceptor + keytab — *written, builds/validates on Linux host*
-- [ ] #34 GSS session-key → SMB KDF — *written, validates on Linux host*
-- [ ] #35 replay/skew/errors
-- [ ] #36 auth selector config
-- [ ] #37 docs + `sec=krb5` integration tests
+- [x] #32 SPNEGO mechtype negotiation — implemented + unit-tested (7 tests)
+- [x] #33 GSS acceptor + keytab — implemented; **builds + links `libgssapi_krb5`
+      on dev.g8.lo** (Fedora 43). `gssapi-sys` binds only base `gssapi.h`, so the
+      session-key symbols from `gssapi_ext.h` are declared directly in `krb5.rs`.
+- [x] #34 GSS session-key → SMB KDF — implemented (sub-session key → existing
+      SP800-108 KDF); compiles under `--features kerberos`.
+- [x] #36 auth selector config (`auth`, `[kerberos]`)
+- [x] dispatcher wiring (`session_setup` → mech routing; NTLM path unchanged)
+- [ ] #35 replay/skew/errors — GSS rcache relied on; skew/error mapping TODO
+- [ ] #37 live `sec=krb5` interop — **blocked on the KDC (krb5.g8.lo)**; runbook
+      below, automated by `bench/krb5/e2e.sh`.
+
+Build verified on dev.g8.lo (all four feature combinations clippy-clean):
+`cargo build/test --features kerberos` and `--no-default-features --features
+kerberos`. Single-leg AP-REQ only so far (the common cifs/Windows case); a
+multi-leg GSS exchange is logged + rejected pending per-channel context
+persistence (#35).
+
+### e2e runbook (run once krb5.g8.lo is up)
+
+Realm assumed `G8.LO`, KDC `krb5.g8.lo`, server `dev.g8.lo`. `bench/krb5/e2e.sh`
+automates this:
+
+```sh
+# on krb5.g8.lo (KDC): create the service + a test user
+kadmin.local -q "addprinc -randkey cifs/dev.g8.lo@G8.LO"
+kadmin.local -q "ktadd -k /tmp/rocketsmbd.keytab cifs/dev.g8.lo@G8.LO"
+kadmin.local -q "addprinc -pw testpw alice@G8.LO"
+#   copy /tmp/rocketsmbd.keytab to dev.g8.lo:/etc/rocketsmbd.keytab
+
+# on dev.g8.lo (server): krb5.conf points at krb5.g8.lo; then
+cat > /etc/rocketsmbd.toml <<EOF
+listen = "0.0.0.0:445"
+auth = "kerberos"
+[kerberos]
+keytab = "/etc/rocketsmbd.keytab"
+spn = "cifs/dev.g8.lo"
+[[share]]
+name = "data"
+path = "/srv/krbshare"
+EOF
+rocketsmbd --config /etc/rocketsmbd.toml &
+
+# client (kinit then mount)
+kinit alice@G8.LO <<<"testpw"
+mount -t cifs //dev.g8.lo/data /mnt -o sec=krb5,vers=3.1.1
+#   verify: write+md5 read back, klist shows the cifs/dev.g8.lo ticket
+```
