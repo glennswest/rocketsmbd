@@ -908,6 +908,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "ntlm")]
     fn establish(srv: &Srv, pc: &mut ProtoConn) -> (u64, u32) {
         // NEGOTIATE offering 2.1 / 3.0 / 3.0.2
         let mut f = req_hdr(CMD_NEGOTIATE, 0, 0, 0);
@@ -972,6 +973,7 @@ mod tests {
         (sess, r.tree_id)
     }
 
+    #[cfg(feature = "ntlm")]
     fn create_file(srv: &Srv, pc: &mut ProtoConn, sess: u64, tree: u32, name: &str, disp: u32, opts: u32, desired: u32) -> (u32, u64) {
         let n = utf16le(name);
         let mut f = req_hdr(CMD_CREATE, 10, tree, sess);
@@ -1000,6 +1002,7 @@ mod tests {
         (r.status, fid)
     }
 
+    #[cfg(feature = "ntlm")]
     #[test]
     fn full_session_create_write_read_dir() {
         let dir = std::env::temp_dir().join(format!("rsmbd-test-{}", std::process::id()));
@@ -1129,6 +1132,7 @@ mod tests {
     /// Full authenticated session over the wire: NTLMv2 challenge/response
     /// with a real user db, then a signed TREE_CONNECT whose response must
     /// carry a valid signature, and rejection of a wrong password.
+    #[cfg(feature = "ntlm")]
     #[test]
     fn ntlmv2_auth_and_signing() {
         use crate::crypto;
@@ -1353,6 +1357,7 @@ mod tests {
     /// preauth integrity chain + signing key from the exact transmitted
     /// bytes, then verify the final SESSION_SETUP response signature. This
     /// catches preauth/key-derivation divergence that real clients reject.
+    #[cfg(feature = "ntlm")]
     #[test]
     fn smb311_preauth_signing() {
         use crate::crypto;

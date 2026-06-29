@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-06-29
+- **feat(#30):** **Optional NTLM / MD4 / RC4 at build time.** New default-on `ntlm` Cargo feature gates the entire NTLM auth path and the only three legacy primitives a FIPS/OpenSSL crypto backend can't provide — MD4 (NT hash), HMAC-MD5 (NTLMv2), and RC4 (NTLMSSP key exchange). `cargo build --no-default-features` drops `md4`/`md-5` from the dependency tree entirely and makes SESSION_SETUP reject every NTLMSSP token with `STATUS_NOT_SUPPORTED` (fail loudly) — the interim state until Kerberos (#31) lands. Prerequisite for a clean OpenSSL/FIPS build (#29). Both feature configs verified: clippy `-D warnings` clean on aarch64+x86_64 musl, `cargo test` 32 passing (ntlm) / 22 passing (no-default-features).
 - **docs:** ROADMAP — add a 0.7 Active Directory / Kerberos milestone (GSS/SPNEGO via external lib; #31 + sub-tasks #32–#37).
 - **docs:** ROADMAP — add pluggable OpenSSL crypto backend for FIPS (#29) and optional MD4/RC4 build (#30) under 0.6 security.
 - **docs:** `docs/TESTING.md` now documents the concurrent-mount stress + 1000-round soak harness (`bench/stress/`) and records the clean soak result (no leak; slope +0.005 kB/round). Committed the soak stats artifact `bench/stress/results/soak-1000-2026-06-16.csv` so `analyze-soak.sh` can be re-run against it.

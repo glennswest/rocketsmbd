@@ -11,19 +11,29 @@ readme = "README.md"
 keywords = ["smb", "smb3", "io_uring", "fileserver", "samba"]
 categories = ["network-programming", "filesystem"]
 
+[features]
+# NTLM/NTLMv2 authentication. Enabled by default. Pulls in the only two
+# legacy primitives — MD4 (NT hash) and MD5 (HMAC-MD5, NTLMv2) — that a
+# FIPS/OpenSSL crypto backend cannot provide. Build with
+# `--no-default-features` to compile them out (#30); the result has no NTLM
+# auth path and rejects NTLMSSP session-setup until Kerberos (#31) lands.
+default = ["ntlm"]
+ntlm = ["dep:md4", "dep:md-5"]
+
 [dependencies]
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
-# Pure-Rust crypto (RustCrypto) for NTLMv2 + SMB2/3 signing
-md4 = "0.10"
-md-5 = "0.10"
+# Pure-Rust crypto (RustCrypto) for SMB2/3 signing + encryption.
 sha2 = "0.10"
 hmac = "0.12"
 cmac = "0.7"
 aes = "0.8"
 aes-gcm = "0.10"
 ccm = "0.5"
+# Legacy NTLM-only primitives — optional, gated by the `ntlm` feature.
+md4 = { version = "0.10", optional = true }
+md-5 = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"

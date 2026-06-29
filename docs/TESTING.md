@@ -6,7 +6,7 @@ How rocketsmbd is tested, the scripts used, and a log of what each test found
 
 ## Unit / integration tests (`cargo test`)
 
-22 tests, OS-independent (the protocol layer parses/builds bytes; only the
+32 tests, OS-independent (the protocol layer parses/builds bytes; only the
 io_uring reactor is Linux-gated). They drive `process_frame` and assert on the
 wire bytes. Highlights:
 
@@ -21,6 +21,21 @@ wire bytes. Highlights:
 
 Run: `cargo test` (anywhere); `cargo clippy --target x86_64-unknown-linux-musl
 -- -D warnings`.
+
+### Build feature matrix
+
+NTLM (and its MD4/MD5/RC4 primitives) is gated behind a default-on `ntlm`
+feature (#30). Both configs must stay green:
+
+```sh
+cargo test                          # default: ntlm on  (32 tests)
+cargo test --no-default-features    # ntlm off          (22 tests; NTLM-only tests skipped)
+cargo clippy --no-default-features --target x86_64-unknown-linux-musl -- -D warnings
+```
+
+`--no-default-features` drops `md4`/`md-5` from the dependency tree entirely and
+makes SESSION_SETUP reject every NTLMSSP token with `STATUS_NOT_SUPPORTED` — the
+interim state until Kerberos (#31) provides a non-NTLM mechanism.
 
 ## Integration scripts (`bench/`)
 

@@ -7,12 +7,19 @@
 use aes::Aes128;
 use cmac::Cmac;
 use hmac::{Hmac, Mac};
-use md5::Md5;
 use sha2::{Digest, Sha256, Sha512};
 
-pub type HmacMd5 = Hmac<Md5>;
 pub type HmacSha256 = Hmac<Sha256>;
 
+// ------------------------------------------------ NTLM-only legacy primitives
+// MD4 (NT hash), HMAC-MD5 (NTLMv2), and RC4 (NTLMSSP key exchange) are used
+// only by the NTLM auth path and are the primitives a FIPS/OpenSSL backend
+// cannot provide. Gated behind the `ntlm` feature (#30).
+
+#[cfg(feature = "ntlm")]
+pub type HmacMd5 = Hmac<md5::Md5>;
+
+#[cfg(feature = "ntlm")]
 pub fn hmac_md5(key: &[u8], data: &[u8]) -> [u8; 16] {
     let mut m = HmacMd5::new_from_slice(key).expect("hmac accepts any key length");
     m.update(data);
@@ -20,6 +27,7 @@ pub fn hmac_md5(key: &[u8], data: &[u8]) -> [u8; 16] {
 }
 
 /// NT hash: MD4 of the UTF-16LE password.
+#[cfg(feature = "ntlm")]
 pub fn nt_hash(password: &str) -> [u8; 16] {
     use md4::Md4;
     let mut h = Md4::new();
@@ -50,6 +58,7 @@ pub fn kdf128(key: &[u8; 16], label: &[u8], context: &[u8]) -> [u8; 16] {
 }
 
 /// RC4 — used only for the NTLMSSP EncryptedRandomSessionKey unwrap.
+#[cfg(feature = "ntlm")]
 pub fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut s: [u8; 256] = std::array::from_fn(|i| i as u8);
     let mut j = 0u8;
@@ -235,12 +244,14 @@ mod tests {
             .collect()
     }
 
+    #[cfg(feature = "ntlm")]
     #[test]
     fn nt_hash_classic() {
         // The canonical NT hash of "password".
         assert_eq!(nt_hash("password").to_vec(), hex("8846f7eaee8fb117ad06bdd830b7586c"));
     }
 
+    #[cfg(feature = "ntlm")]
     #[test]
     fn hmac_md5_reference() {
         // Verified against Python: hmac.new(b"Jefe", b"what do ya wanna do
@@ -274,6 +285,7 @@ mod tests {
         assert_eq!(sig.to_vec(), hex("070a16b46b4d4144f79bdd9dd04a287c"));
     }
 
+    #[cfg(feature = "ntlm")]
     #[test]
     fn rc4_known() {
         assert_eq!(rc4(b"Key", b"Plaintext"), hex("bbf316e8d940af0ad3"));

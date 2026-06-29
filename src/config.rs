@@ -151,7 +151,10 @@ impl Config {
         Ok(())
     }
 
-    /// Resolved (lowercased-name → NT hash) map.
+    /// Resolved (lowercased-name → NT hash) map. NT hashes only feed the NTLM
+    /// auth path; in a build without the `ntlm` feature (#30) this is always
+    /// empty (the user DB is inert — no auth mechanism consumes it yet).
+    #[cfg(feature = "ntlm")]
     pub fn user_db(&self) -> std::collections::HashMap<String, [u8; 16]> {
         self.users
             .iter()
@@ -170,6 +173,13 @@ impl Config {
                 (u.name.to_lowercase(), hash)
             })
             .collect()
+    }
+
+    /// Without the `ntlm` feature there is no NTLM verifier to consume NT
+    /// hashes, so the resolved user DB is empty.
+    #[cfg(not(feature = "ntlm"))]
+    pub fn user_db(&self) -> std::collections::HashMap<String, [u8; 16]> {
+        std::collections::HashMap::new()
     }
 
     pub fn guest_allowed(&self) -> bool {

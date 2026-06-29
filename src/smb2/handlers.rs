@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::*;
 use crate::config::{ShareCfg, Srv};
+#[cfg(feature = "ntlm")]
 use crate::ntlm;
 use crate::status;
 use crate::vfs::{self, DirState, OpenFile};
@@ -44,7 +45,9 @@ const CAP_LARGE_MTU: u32 = 0x4;
 const CAP_MULTI_CHANNEL: u32 = 0x8;
 const SECURITY_MODE_SIGNING_ENABLED: u16 = 0x1;
 const SECURITY_MODE_SIGNING_REQUIRED: u16 = 0x2;
+#[cfg(feature = "ntlm")]
 const SESSION_FLAG_IS_GUEST: u16 = 0x1;
+#[cfg(feature = "ntlm")]
 const SESSION_FLAG_ENCRYPT_DATA: u16 = 0x4;
 const MAXIMAL_ACCESS_ALL: u32 = 0x001F_01FF;
 /// Max credits a connection may hold (window accounting).
@@ -384,7 +387,13 @@ fn negotiate_body(
     if srv.cfg.require_signing {
         secmode |= SECURITY_MODE_SIGNING_REQUIRED;
     }
+    // SPNEGO NegTokenInit2 hint advertises the NTLM mechtype. Without the
+    // `ntlm` feature there is no mechanism to advertise yet (Kerberos is #31),
+    // so the security buffer is empty.
+    #[cfg(feature = "ntlm")]
     let hint = crate::ntlm::spnego_hint();
+    #[cfg(not(feature = "ntlm"))]
+    let hint: Vec<u8> = Vec::new();
     let body = resp_start + 64;
     tx.p16(65);
     tx.p16(secmode);
@@ -447,6 +456,7 @@ fn negotiate_body(
 
 // ------------------------------------------------------------ SESSION_SETUP
 
+#[cfg(feature = "ntlm")]
 fn ss_resp(tx: &mut Vec<u8>, h: &ReqHdr, st: u32, related: bool, sid: u64, flags: u16, blob: &[u8]) {
     begin_resp(tx, h, st, related, 0, sid);
     tx.p16(9);
@@ -456,8 +466,20 @@ fn ss_resp(tx: &mut Vec<u8>, h: &ReqHdr, st: u32, related: bool, sid: u64, flags
     tx.pbytes(blob);
 }
 
+#[cfg(feature = "ntlm")]
 const SESSION_FLAG_BINDING: u8 = 0x01;
 
+/// No-auth stub for builds without the `ntlm` feature (#30). Until Kerberos
+/// (#31) provides an alternative mechanism there is no way to authenticate a
+/// session, so every SESSION_SETUP is rejected (fail loudly, per #30) rather
+/// than silently granting access.
+#[cfg(not(feature = "ntlm"))]
+fn session_setup(_srv: &Srv, _pc: &mut ProtoConn, h: &ReqHdr, _msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+    crate::logi!("session_setup rejected: built without NTLM and no Kerberos auth mechanism available");
+    err_resp(tx, h, status::NOT_SUPPORTED, chain);
+}
+
+#[cfg(feature = "ntlm")]
 fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let body = &msg[64..];

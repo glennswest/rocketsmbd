@@ -10,6 +10,7 @@ pub mod lease;
 #[macro_use]
 pub mod log;
 pub mod net;
+#[cfg(feature = "ntlm")]
 pub mod ntlm;
 pub mod session;
 pub mod smb2;
