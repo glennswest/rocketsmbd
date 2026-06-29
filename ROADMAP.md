@@ -33,6 +33,10 @@ Tracking the path from a fast LAN file server to a hardened, distro-packaged
 - SMB3 encryption, AES-128/256-GCM (#10).
 - Zero-copy path for signed/encrypted reads (#11).
 - Windows Server interop + head-to-head benchmark (#21).
+- Pluggable crypto backend — optional OpenSSL primitives for FIPS
+  compliance (#29).
+- Make MD4/RC4 (NTLM legacy primitives) optional at build time, a
+  prerequisite for a clean OpenSSL/FIPS build (#30).
 
 ## 1.0 — stable
 

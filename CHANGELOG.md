@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-06-29
+- **docs:** ROADMAP — add pluggable OpenSSL crypto backend for FIPS (#29) and optional MD4/RC4 build (#30) under 0.6 security.
 - **docs:** `docs/TESTING.md` now documents the concurrent-mount stress + 1000-round soak harness (`bench/stress/`) and records the clean soak result (no leak; slope +0.005 kB/round). Committed the soak stats artifact `bench/stress/results/soak-1000-2026-06-16.csv` so `analyze-soak.sh` can be re-run against it.
 
 ### 2026-06-16
