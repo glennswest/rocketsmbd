@@ -47,7 +47,7 @@ const SECURITY_MODE_SIGNING_ENABLED: u16 = 0x1;
 const SECURITY_MODE_SIGNING_REQUIRED: u16 = 0x2;
 #[cfg(feature = "ntlm")]
 const SESSION_FLAG_IS_GUEST: u16 = 0x1;
-#[cfg(feature = "ntlm")]
+#[cfg(any(feature = "ntlm", feature = "kerberos"))]
 const SESSION_FLAG_ENCRYPT_DATA: u16 = 0x4;
 const MAXIMAL_ACCESS_ALL: u32 = 0x001F_01FF;
 /// Max credits a connection may hold (window accounting).
@@ -456,7 +456,7 @@ fn negotiate_body(
 
 // ------------------------------------------------------------ SESSION_SETUP
 
-#[cfg(feature = "ntlm")]
+#[cfg(any(feature = "ntlm", feature = "kerberos"))]
 fn ss_resp(tx: &mut Vec<u8>, h: &ReqHdr, st: u32, related: bool, sid: u64, flags: u16, blob: &[u8]) {
     begin_resp(tx, h, st, related, 0, sid);
     tx.p16(9);
@@ -469,18 +469,74 @@ fn ss_resp(tx: &mut Vec<u8>, h: &ReqHdr, st: u32, related: bool, sid: u64, flags
 #[cfg(feature = "ntlm")]
 const SESSION_FLAG_BINDING: u8 = 0x01;
 
-/// No-auth stub for builds without the `ntlm` feature (#30). Until Kerberos
-/// (#31) provides an alternative mechanism there is no way to authenticate a
-/// session, so every SESSION_SETUP is rejected (fail loudly, per #30) rather
-/// than silently granting access.
-#[cfg(not(feature = "ntlm"))]
-fn session_setup(_srv: &Srv, _pc: &mut ProtoConn, h: &ReqHdr, _msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
-    crate::logi!("session_setup rejected: built without NTLM and no Kerberos auth mechanism available");
-    err_resp(tx, h, status::NOT_SUPPORTED, chain);
+/// SESSION_SETUP dispatcher: classify the SPNEGO/raw security blob and route it
+/// to the mechanism that owns it, subject to the `auth` policy (#36) and the
+/// built features (#30 `ntlm`, #31 `kerberos`). Kerberos is preferred when both
+/// are offered. A token for a mechanism that is disabled by policy or not built
+/// is rejected with `STATUS_NOT_SUPPORTED` (fail loudly).
+// In a build with neither `ntlm` nor `kerberos`, every arm rejects without
+// touching `pc`/`msg`, so they read as unused — that is the intended no-auth
+// build (#30), not a bug.
+#[cfg_attr(
+    not(any(feature = "ntlm", feature = "kerberos")),
+    allow(unused_variables)
+)]
+fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+    // Extract the security buffer to classify it (the mechanism handlers
+    // re-read what they need from `msg`).
+    let blob = (|| {
+        let mut r = Rdr::new(&msg[64..]);
+        if r.u16()? != 25 {
+            return None;
+        }
+        r.skip(1 + 1 + 4 + 4)?; // flags, secmode, caps, channel
+        let off = r.u16()? as usize;
+        let len = r.u16()? as usize;
+        if len == 0 {
+            return Some(&[][..]);
+        }
+        msg.get(off..off + len)
+    })();
+    let Some(blob) = blob else {
+        err_resp(tx, h, status::INVALID_PARAMETER, chain);
+        return;
+    };
+
+    use crate::spnego::Mech;
+    let mech = crate::spnego::classify(blob).mech;
+    let allow_krb = srv.cfg.auth.allows_kerberos();
+    let allow_ntlm = srv.cfg.auth.allows_ntlm();
+
+    match mech {
+        Mech::Krb5 if allow_krb => {
+            #[cfg(feature = "kerberos")]
+            kerberos_session_setup(srv, pc, h, msg, chain, tx);
+            #[cfg(not(feature = "kerberos"))]
+            {
+                crate::logi!("session_setup: Kerberos token, but server built without the `kerberos` feature");
+                err_resp(tx, h, status::NOT_SUPPORTED, chain);
+            }
+        }
+        // NTLMSSP, or an unrecognized/empty blob (raw anonymous → guest, which
+        // the NTLM handler owns). Routed to NTLM when policy + build allow.
+        Mech::Ntlmssp | Mech::Unknown if allow_ntlm => {
+            #[cfg(feature = "ntlm")]
+            ntlm_session_setup(srv, pc, h, msg, chain, tx);
+            #[cfg(not(feature = "ntlm"))]
+            {
+                crate::logi!("session_setup: NTLM token, but server built without the `ntlm` feature");
+                err_resp(tx, h, status::NOT_SUPPORTED, chain);
+            }
+        }
+        _ => {
+            crate::logi!("session_setup: no enabled auth mechanism for the offered token (auth={:?})", srv.cfg.auth);
+            err_resp(tx, h, status::NOT_SUPPORTED, chain);
+        }
+    }
 }
 
 #[cfg(feature = "ntlm")]
-fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);
@@ -752,6 +808,142 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
             }
         }
     }
+}
+
+/// Kerberos SESSION_SETUP (#31). Unwraps the GSS AP-REQ from SPNEGO, runs it
+/// through the per-connection GSS acceptor, and on success establishes the
+/// session using the Kerberos sub-session key for SMB signing/encryption.
+///
+/// Single-leg only for now: a Kerberos AP-REQ from cifs.ko / Windows completes
+/// in one `gss_accept_sec_context`. A multi-leg exchange (rare) is logged and
+/// rejected pending per-channel GSS-context persistence (#35).
+#[cfg(feature = "kerberos")]
+fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+    // Re-extract the security blob and its flags.
+    let parsed = (|| {
+        let mut r = Rdr::new(&msg[64..]);
+        if r.u16()? != 25 {
+            return None;
+        }
+        let _flags = r.u8()?;
+        let secmode = r.u8()?;
+        r.skip(4 + 4)?; // caps, channel
+        let off = r.u16()? as usize;
+        let len = r.u16()? as usize;
+        let _prev = r.u64()?;
+        let blob = if len == 0 { &[][..] } else { msg.get(off..off + len)? };
+        Some((secmode, blob))
+    })();
+    let Some((client_secmode, blob)) = parsed else {
+        err_resp(tx, h, status::INVALID_PARAMETER, chain);
+        return;
+    };
+    let incoming = crate::spnego::classify(blob);
+    let wrapped = incoming.spnego;
+    let signing_required =
+        srv.cfg.require_signing || client_secmode as u16 & SECURITY_MODE_SIGNING_REQUIRED != 0;
+    let dialect = pc.dialect;
+    let cipher = pc.cipher;
+
+    // Lazily acquire the acceptor credential for this connection.
+    if pc.krb_acceptor.is_none() {
+        let kcfg = srv.cfg.kerberos.as_ref();
+        if kcfg.map(|k| !k.enabled).unwrap_or(false) {
+            crate::logw!("kerberos: token received but [kerberos].enabled = false");
+            err_resp(tx, h, status::NOT_SUPPORTED, chain);
+            return;
+        }
+        let spn = kcfg
+            .and_then(|k| k.spn.clone())
+            .unwrap_or_else(|| format!("cifs/{}", srv.cfg.server_name));
+        let keytab = kcfg.and_then(|k| k.keytab.as_deref());
+        match crate::krb5::Acceptor::new(&spn, keytab) {
+            Ok(a) => pc.krb_acceptor = Some(a),
+            Err(e) => {
+                crate::logw!("kerberos: acceptor init failed ({e})");
+                err_resp(tx, h, status::LOGON_FAILURE, chain);
+                return;
+            }
+        }
+    }
+
+    // Run one acceptor leg. Scope the GSS borrow so we can mutate `pc` after.
+    let step = {
+        let mut ctx = pc.krb_acceptor.as_ref().unwrap().begin();
+        ctx.step(incoming.token)
+    };
+    use crate::krb5::Step;
+    let est = match step {
+        Step::Done(est) => est,
+        Step::Continue(_) => {
+            crate::logw!("kerberos: multi-leg exchange not yet supported (#35)");
+            err_resp(tx, h, status::LOGON_FAILURE, chain);
+            return;
+        }
+        Step::Failed(e) => {
+            crate::logw!("kerberos: authentication failed ({e})");
+            err_resp(tx, h, status::LOGON_FAILURE, chain);
+            return;
+        }
+    };
+
+    // SMB session key: first 16 bytes of the Kerberos sub-session key.
+    let mut key = [0u8; 16];
+    let n = est.session_key.len().min(16);
+    key[..n].copy_from_slice(&est.session_key[..n]);
+
+    // Fresh session; chain the 3.1.1 preauth over this single setup message.
+    let (sid, sref) = srv.sessions.create();
+    chain.session_id = sid;
+    let ch_preauth = if dialect == 0x0311 {
+        crate::crypto::sha512(&[&pc.preauth_neg, msg])
+    } else {
+        [0u8; 64]
+    };
+
+    {
+        let mut s = sref.lock().unwrap();
+        s.session_key = key;
+        s.established = true;
+        s.guest = false;
+        s.signing_required = signing_required;
+        s.user = est.client.clone();
+        s.channels = 1;
+    }
+    let mut ch = crate::smb2::ChannelState {
+        established: true,
+        signing_required,
+        sign: Some(crate::smb2::derive_sign_ctx(dialect, &key, &ch_preauth)),
+        preauth: ch_preauth,
+        ..Default::default()
+    };
+    let mut ss_flags = 0u16;
+    if cipher != 0 && dialect == 0x0311 {
+        let (c2s, s2c) = crate::crypto::smb311_encryption_keys(cipher, &key, &ch_preauth);
+        ch.enc = Some(crate::smb2::EncCtx { cipher, c2s, s2c, nonce_ctr: 0 });
+        if srv.cfg.encrypt {
+            ch.encrypt = true;
+            ss_flags |= SESSION_FLAG_ENCRYPT_DATA;
+        }
+    }
+    pc.channels.insert(sid, ch);
+
+    crate::logi!(
+        "session {:x}: kerberos principal {:?} authenticated (signing {}, encryption {})",
+        sid,
+        est.client,
+        if signing_required { "required" } else { "optional" },
+        if cipher != 0 && dialect == 0x0311 { "ready" } else { "off" }
+    );
+
+    // Wrap the AP-REP (if any) in a SPNEGO accept-completed when the request
+    // was SPNEGO-wrapped; otherwise return the raw GSS output token.
+    let done = if wrapped {
+        crate::spnego::neg_resp(crate::spnego::ACCEPT_COMPLETED, crate::spnego::Mech::Krb5, &est.out)
+    } else {
+        est.out.clone()
+    };
+    ss_resp(tx, h, status::SUCCESS, chain.related, sid, ss_flags, &done);
 }
 
 // ------------------------------------------------------------- TREE_CONNECT

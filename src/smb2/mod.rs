@@ -252,6 +252,11 @@ pub struct ProtoConn {
     pub wid: usize,
     pub conn_idx: usize,
     pub conn_gen: u16,
+    /// Kerberos GSS acceptor, lazily acquired on the first Kerberos
+    /// SESSION_SETUP (holds the service credential; per-connection so the
+    /// non-`Send` GSS handle never crosses worker threads).
+    #[cfg(feature = "kerberos")]
+    pub krb_acceptor: Option<crate::krb5::Acceptor>,
 }
 
 impl ProtoConn {
@@ -270,6 +275,8 @@ impl ProtoConn {
             wid,
             conn_idx,
             conn_gen,
+            #[cfg(feature = "kerberos")]
+            krb_acceptor: None,
         }
     }
 }
