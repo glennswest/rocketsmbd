@@ -1,4 +1,4 @@
-.TH ROCKETSMBD 8 "2026-06-10" "rocketsmbd" "System Administration"
+.TH ROCKETSMBD 8 "2026-09-27" "rocketsmbd" "System Administration"
 .SH NAME
 rocketsmbd \- io_uring SMB2/SMB3 file server (zero-copy, multichannel)
 .SH SYNOPSIS
@@ -12,8 +12,11 @@ is a from-scratch SMB2/3 file server built on Linux io_uring. Accept, receive,
 send, and file I/O all flow through one io_uring per worker thread; file reads
 are served zero-copy from page cache to socket via linked
 .BR splice (2)
-operations. It speaks SMB 2.0.2 through 3.1.1 with NTLMv2 authentication,
-SMB2/3 signing, and SMB3 multichannel.
+operations. It speaks SMB 2.0.2 through 3.1.1 with NTLMv2 and (in a
+\fBkerberos\fR build) Kerberos authentication, SMB2/3 signing, SMB3
+multichannel, SMB3 encryption (AES-128/256-GCM and -CCM), byte-range locks,
+change notification, and read/handle-caching leases. It listens on TCP 445
+only (direct TCP; no NetBIOS port 139).
 .SH OPTIONS
 .TP
 .BR \-\-config " " \fIpath\fR " (or " \-c ")"
@@ -28,7 +31,7 @@ Print version and exit.
 Configuration is TOML, by convention \fI/etc/rocketsmbd.toml\fR.
 .TP
 .B listen
-Bind address, e.g. \f"0.0.0.0:445\fR". Binding 445 needs CAP_NET_BIND_SERVICE.
+Bind address, default \fB"0.0.0.0:445"\fR. Binding 445 needs CAP_NET_BIND_SERVICE.
 .TP
 .B workers
 Worker threads (one io_uring + SO_REUSEPORT listener each). 0 = one per core.
@@ -51,10 +54,37 @@ Advertise SMB3 multichannel and accept session binding.
 .B advertise_only
 List of IPs to advertise for multichannel (e.g. a storage NIC). Empty = all
 non-loopback interfaces.
+.TP
+.B encrypt
+Require SMB3 encryption on all post-auth traffic. Default false; encryption a
+client asks for (e.g. cifs \fBseal\fR) is honored either way.
+.TP
+.B prefer_aes256
+Prefer AES-256 ciphers (GCM, then CCM) when offered. Default false.
+.TP
+.B oplocks
+Grant read- and handle-caching leases. Default true. Write-caching is never
+granted.
+.TP
+.B core_pinning
+Pin worker N to CPU core N mod ncpu. Default true.
+.TP
+.B sqpoll
+Enable io_uring SQPOLL (one busy kernel thread per worker). Default false.
+.TP
+.B auth
+\fB"both"\fR (default; Kerberos preferred, NTLM fallback), \fB"ntlm"\fR, or
+\fB"kerberos"\fR. Intersected with the mechanisms the binary was built with.
 .PP
-Shares are \fB[[share]]\fR tables with \fBname\fR, \fBpath\fR, and optional
-\fBread_only\fR. Users are \fB[[user]]\fR tables with \fBname\fR and either
-\fBpassword\fR or a 32-hex-char \fBnt_hash\fR.
+All top-level keys must appear before the first table header. Unknown keys are
+rejected.
+.PP
+Shares are \fB[[share]]\fR tables with \fBname\fR, \fBpath\fR (an existing
+directory), and optional \fBread_only\fR; at least one is required and
+\fBIPC$\fR is reserved. Users are \fB[[user]]\fR tables with \fBname\fR and
+either \fBpassword\fR or a 32-hex-char \fBnt_hash\fR. An optional
+\fB[kerberos]\fR table sets \fBenabled\fR, \fBkeytab\fR, \fBspn\fR (default
+\fIcifs/<server_name>\fR), and \fBrealm\fR.
 .SH EXAMPLE
 .nf
 listen = "0.0.0.0:445"
@@ -76,12 +106,15 @@ Mount from a client:
 mount -t cifs //server/data /mnt -o username=alice,password=secret,vers=3.1.1
 .fi
 .SH SECURITY
-Pre-1.0: no SMB3 encryption yet; trusted-LAN use only. Do not expose port 445
-to untrusted networks. See SECURITY.md.
+No external security review has been done yet; do not expose port 445 to the
+public internet. Authorization is share-level only: any authenticated user may
+use every share, and file I/O runs as the server's Unix user. For untrusted
+networks, use Kerberos or NTLMv2 users with \fBrequire_signing\fR and
+\fBencrypt\fR. See SECURITY.md.
 .SH FILES
 .TP
 .I /etc/rocketsmbd.toml
-Default configuration file.
+Configuration file installed by the packages and used by the systemd unit.
 .SH SEE ALSO
 .BR mount.cifs (8)
 .SH AUTHORS

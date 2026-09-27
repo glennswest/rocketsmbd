@@ -1,4 +1,8 @@
 # rocketsmbd example configuration
+#
+# All top-level keys must come before the first [table] / [[share]] line —
+# anything after a table header belongs to that table, and unknown keys are
+# rejected. Validate with: rocketsmbd --config <file> --check
 listen = "0.0.0.0:445"
 workers = 0            # 0 = one worker per CPU core
 server_name = "ROCKETSMBD"
@@ -8,11 +12,30 @@ log_level = 1          # 0 = warn, 1 = info, 2 = debug
 core_pinning = true    # pin worker N to core N (ring + softirqs + cache locality)
 sqpoll = false         # kernel-thread SQ polling; only helps at high IOPS/many channels
 
+# SMB3 multichannel: one client mount stripes across several connections.
+multichannel = false
+# advertise_only = ["10.0.0.5"]   # IPs to advertise; empty = all non-loopback
+
+# Leases (SMB2.1+). On by default: read- and handle-caching are granted and
+# broken on a conflicting write; write-caching is never granted.
+oplocks = true
+
 # Security. With no [[user]] entries, guest access is allowed by default.
 # Add users to require authentication; set allow_guest explicitly to override.
-require_signing = false   # true = reject unsigned requests on auth'd sessions
-encrypt = false          # true = require SMB3 encryption (AES-128-GCM)
+require_signing = false  # true = reject unsigned requests on auth'd sessions
+encrypt = false          # true = require SMB3 encryption (AES-128/256-GCM/CCM)
+prefer_aes256 = false    # true = pick AES-256 when the client offers it
 # allow_guest = false
+
+# Authentication mechanisms: "both" (default; Kerberos preferred, NTLM
+# fallback), "ntlm", or "kerberos". Kerberos needs a `kerberos`-feature build.
+auth = "both"
+
+# Kerberos acceptor settings (kerberos build only). All keys optional.
+# [kerberos]
+# keytab = "/etc/rocketsmbd.keytab"   # default: $KRB5_KTNAME / system keytab
+# spn = "cifs/fileserver.example.com" # default: cifs/<server_name>
+# realm = "EXAMPLE.COM"               # default: from krb5.conf
 
 [[share]]
 name = "data"
@@ -28,10 +51,3 @@ read_only = false
 # [[user]]
 # name = "bob"
 # nt_hash = "8846f7eaee8fb117ad06bdd830b7586c"
-
-# Read-caching leases (SMB2.1+). On by default; clients cache reads and the
-# server breaks the lease on a conflicting write. Set false to disable.
-oplocks = true
-
-# Prefer AES-256 ciphers (GCM then CCM) when the client offers them.
-prefer_aes256 = false
