@@ -16,7 +16,8 @@ categories = ["network-programming", "filesystem"]
 # legacy primitives — MD4 (NT hash) and MD5 (HMAC-MD5, NTLMv2) — that a
 # FIPS/OpenSSL crypto backend cannot provide. Build with
 # `--no-default-features` to compile them out (#30); the result has no NTLM
-# auth path and rejects NTLMSSP session-setup until Kerberos (#31) lands.
+# auth path and rejects NTLMSSP session-setup (add `--features kerberos` for a
+# Kerberos-only server).
 default = ["ntlm", "backend-rustcrypto"]
 ntlm = ["dep:md4", "dep:md-5"]
 # Crypto backend for the FIPS-able SMB2/3 primitives (#29). Exactly one should
@@ -74,7 +75,7 @@ rocketsmbd is a from-scratch SMB2/SMB3 file server built on Linux io_uring:
 accept, recv, send, and file I/O flow through one ring per worker, and file
 reads are served zero-copy from page cache to socket via splice. Supports
 NTLMv2 auth, SMB2/3 signing, SMB 3.1.1, SMB3 multichannel, and SMB3
-encryption (AES-128-GCM).
+encryption (AES-128/256-GCM and -CCM).
  .
  Statically linked (no library dependencies), but requires a Linux kernel
  with io_uring: 5.15 or newer (6.0+ recommended). Checked at startup."""

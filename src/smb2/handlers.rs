@@ -1230,8 +1230,8 @@ fn create(
     let attrs = vfs::finalize_attrs(meta.attrs, &leaf);
     // Grant a read-caching lease when the client requests one (RqLs) on a file.
     // Read-caching is the safe subset: distinct lease keys coexist, there's no
-    // dirty client data, and a conflicting write breaks it to none. Gated off
-    // by default (Config::oplocks). The client's lease key is recorded on the
+    // dirty client data, and a conflicting write breaks it to none. On by
+    // default; `oplocks = false` disables (Config::oplocks). The client's lease key is recorded on the
     // handle regardless (so a WRITE can exempt the client's own lease).
     let lease_req = req.lease.clone();
     let grant_lease = srv.cfg.oplocks

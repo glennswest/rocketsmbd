@@ -1,8 +1,36 @@
 # Oplocks & leases — design
 
-**Status:** foundation landed (constants + create-context/lease parsing,
-grant-none unchanged). Granting + breaks are the next increments (#18). This
-doc is the implementation contract.
+**Status (as of 1.4.0):** leases are **on by default** (`oplocks = true`).
+The server grants read-caching (R), plus handle-caching (H) when the client
+asks for it (R|H), on files opened over **non-encrypted** sessions. It never
+grants write-caching (W), directory leases or legacy (non-lease) oplocks.
+Validated against cifs.ko and Windows (#18, #27). See
+[What the code does today](#what-the-code-does-today); the rest of this doc is
+the original design and increment plan.
+
+## What the code does today
+
+- **Grant** (`create`, `src/smb2/handlers.rs`): if `oplocks` is on, the session
+  is not encrypted, the target is a file and the `RqLs` context asks for R, the
+  server grants `R | (requested & H)` and echoes an `RqLs` response context.
+  Otherwise it grants none. A legacy `RequestedOplockLevel` without a lease
+  context gets no oplock.
+- **Why not on encrypted sessions:** a lease-break notification there would
+  have to be sealed too, and that path isn't built. Encrypted mounts get no
+  caching.
+- **Break:** only a **WRITE** from a different lease key breaks conflicting
+  leases, to none (`LeaseTable::break_conflicts`), delivered cross-worker via
+  the eventfd mailbox as a lease-break notification. The break is
+  fire-and-forget: R and H carry no dirty data, so the write doesn't wait for
+  an ack, and inbound OPLOCK_BREAK acknowledgements aren't processed.
+  **Truncate, overwriting CREATE, rename and delete don't break leases yet
+  (#42).**
+- **Lifetime:** without H, the lease is released at CLOSE. With H, it survives
+  CLOSE (detached) until a conflicting write breaks it or the connection is torn
+  down.
+- **Not implemented:** write-caching (RW/RWH, which needs break-with-ack and
+  deferred-op replay; deliberately deferred in #27), directory leases, lease v2
+  epoch/parent-key semantics beyond parsing, and durable handles (DH2Q).
 
 ## Why
 
@@ -30,8 +58,8 @@ optimization.** If we grant an R lease and a second client writes the file, the
 holder must be *broken* down (R→None) before the write is acknowledged, or it
 keeps serving stale cached data — silent corruption. Therefore:
 
-> We do not grant any lease/oplock until the break-delivery path is built and
-> proven. grant-none (today) is always safe.
+> We do not grant any lease state until the break-delivery path for it is
+> built and proven. That is why R and H are granted today and W is not.
 
 ## Wire format (parsed today)
 
@@ -93,7 +121,7 @@ This adds one genuinely new piece of infrastructure — the **per-worker eventfd
 mailbox** — which is also exactly what SMB Direct's CQ integration and any
 future cross-worker signalling will reuse. Build it once, here.
 
-## Status & key finding (2026-06-13)
+## History: key finding (2026-06-13)
 
 Built and tested: connection identity in `ProtoConn`, the `(share_idx,ino)`
 lease table, Level II oplock **grant**, cross-worker **break delivery** (the
@@ -109,8 +137,8 @@ Level II granted, a held cifs mount kept serving **stale** data after another
 client's write (server-on-disk and a fresh remount were correct; the cached
 handle was not invalidated). That's worse than grant-none.
 
-So granting is **gated behind `oplocks` (default off)**. Default behavior is
-grant-none = no client caching = always fresh (verified). To actually realize
+So at that point granting was gated behind `oplocks` (then default off). The
+lease path below was built next and has been default-on since v1.3.0. To realize
 the caching win, the remaining work is the **lease path**: emit the granted
 `RqLs` response context (OplockLevel `0xFF`), and send a **lease-break**
 notification on conflict, broken by LeaseKey, with the ack handling leases
@@ -119,21 +147,24 @@ reused as-is.
 
 ## Increment plan
 
+Steps 1–4 and RH are done; W, the ack handler and durable handles are not.
+
 1. **Foundation (done):** oplock/lease constants; parse `RequestedOplockLevel`
    + `RqLs` (v1/v2) into `CreateReq`; still grant none. No behavior change.
-2. **Lease table + identity:** `(share_idx, ino)` table in `Srv`; record holder
+2. **Lease table + identity (done):** `(share_idx, ino)` table in `Srv`; record holder
    on CREATE; release on CLOSE. Still grant none (table is observational).
-3. **Per-worker eventfd mailbox:** eventfd + POLL_ADD per worker; shared
+3. **Per-worker eventfd mailbox (done):** eventfd + POLL_ADD per worker; shared
    `Sender` table; a `wake(worker)` helper. Unit-test the wakeup.
-4. **Grant R (Level II) + break-on-write:** grant `READ_CACHING` when no
+4. **Grant R + break-on-write (done as a lease grant, v1.3.0; break on
+   conflicting CREATE is still open, #42):** grant `READ_CACHING` when no
    conflicting holder; on WRITE / conflicting CREATE from another client, send
    a lease break (R→None) via the mailbox; track ack. Most-tested path first
    because R is shared (no exclusivity bugs).
-5. **Grant RH, then RW/RWH (exclusive):** handle/write caching with the
+5. **Grant RH (done, v1.4.0), then RW/RWH (exclusive; deferred, #27):** handle/write caching with the
    exclusivity invariant; break W→R / RW→R on second opener.
-6. **Oplock-break acknowledgement** handler (cmd 0x12 inbound) + the
+6. **Oplock-break acknowledgement** handler (not built) (cmd 0x12 inbound) + the
    wait-for-ack state on the breaking op.
-7. **Durable handles (DH2Q)** can reuse the same handle table + lease epoch
+7. **Durable handles (DH2Q)** (not built) can reuse the same handle table + lease epoch
    later (separate item).
 
 ## Testing

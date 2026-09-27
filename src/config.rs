@@ -28,7 +28,7 @@ pub struct Config {
     /// client can stripe one share across multiple connections (cores).
     #[serde(default)]
     pub multichannel: bool,
-    /// Require SMB3 encryption (AES-128-GCM): the server tells clients to seal
+    /// Require SMB3 encryption (AES-128/256-GCM/CCM): the server tells clients to seal
     /// all post-auth traffic. When false, client-initiated encryption (e.g.
     /// cifs `seal`) is still honored if a cipher is negotiated.
     #[serde(default)]
@@ -54,8 +54,9 @@ pub struct Config {
     /// Grant read-caching leases (SMB2.1+). Default on. Clients cache reads
     /// under a lease; a conflicting write breaks it (lease-break notification)
     /// so they re-read fresh. Validated against cifs.ko and Windows (no stale
-    /// reads, breaks honored). Set false to disable. Write/handle caching are
-    /// not yet granted (#27).
+    /// reads, breaks honored). Handle-caching is granted when requested (the
+    /// lease then survives CLOSE); write-caching is never granted (#27). Set
+    /// false to disable.
     #[serde(default = "default_true")]
     pub oplocks: bool,
     /// Which authentication mechanisms to advertise/accept. Default `both`
