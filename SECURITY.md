@@ -13,11 +13,11 @@ Report privately via GitHub Security Advisories
 `Cargo.toml`. Include steps to reproduce, affected versions, and impact. We
 aim to acknowledge within a few days.
 
-## Current security posture (pre-1.0)
+## Current security posture (1.4)
 
-rocketsmbd is **pre-1.0.** It has grown real authentication, signing, and
-encryption, but has not yet had a full external security review. Know the
-following before deploying:
+rocketsmbd is at 1.4. It has real authentication, signing, and encryption, but
+1.0 shipped without the planned external security review, and that review
+still hasn't been done (#39). Know the following before deploying:
 
 - **SMB3 encryption** — AES-128-GCM, AES-256-GCM, and AES-128/256-CCM (SMB
   3.1.1). Set `encrypt = true` to require it, or let clients request it
@@ -32,27 +32,40 @@ following before deploying:
   - **NTLMv2** against a local user database (the `ntlm` feature, on by
     default; compile out with `--no-default-features`).
   - **Guest/anonymous** when enabled. No account lockout yet.
+  - Kerberos accepts single-leg AP-REQ exchanges only (#38).
+- **Authorization is share-level only** — `read_only` per share applies to
+  everyone. Any authenticated user (or guest, if allowed) can use every share,
+  and all file I/O runs as the server process's Unix user, so on-disk
+  permissions don't distinguish clients. Per-share user/group lists and a
+  SID→uid map are tracked in #40. Run the server as a dedicated unprivileged
+  user that owns only the share trees.
 - **Crypto backend** — pure-Rust (default) or **system OpenSSL**
   (`--features backend-openssl`) for FIPS deployments, where OpenSSL is the
-  validated module. A clean FIPS+AD build is
+  validated module. A FIPS+AD build is
   `--no-default-features --features "backend-openssl kerberos"` — no
-  NTLM/MD4/RC4 in the binary.
+  NTLM/MD4/RC4 in the binary. AES-CCM still runs on the RustCrypto `ccm`
+  crate in that build, and the RustCrypto crates remain linked (see
+  docs/FIPS.md). Release artifacts are the default build only; the Kerberos
+  and OpenSSL builds are source builds.
 - **Wire parsers are fuzzed** — `process_frame` (SMB2 entry) and the NTLMSSP
   token parser have libFuzzer targets run in CI (per-push smoke + weekly). Not
   a guarantee, but the attack surface is no longer unexercised.
-- **Path safety** — share paths are the jail boundary; `..` traversal and NUL
-  bytes are rejected. Symlinks inside a share are followed.
+- **Path safety** — `..` traversal and NUL bytes in client paths are rejected.
+  Symlinks that already exist inside a share are **followed, even if they
+  point outside it** (like Samba's `wide links`). Clients can't create
+  symlinks over SMB, so only someone with local access to the share tree can
+  plant one.
 - **Deployment** — a hardened build (Kerberos or NTLMv2 + `require_signing`,
   optionally `encrypt`) is reasonable beyond a trusted LAN, but a full
   security review has not been done; do not expose port 445 to the public
-  internet before 1.0.
+  internet until it has (#39).
 
 ## Hardening roadmap
 
-A pre-1.0 security review pass is still planned (see `ROADMAP.md`, 1.0).
+An external security review pass is still planned (#39).
 Done: SMB3 encryption (AES-128/256-GCM/CCM), SMB2/3 signing, Kerberos auth, an
 OpenSSL/FIPS crypto-backend option, and fuzzing the frame + NTLMSSP parsers.
 
 ## Supported versions
 
-Pre-1.0: only the latest tagged release receives fixes.
+Only the latest tagged release receives fixes.

@@ -6,7 +6,7 @@ How rocketsmbd is tested, the scripts used, and a log of what each test found
 
 ## Unit / integration tests (`cargo test`)
 
-32 tests, OS-independent (the protocol layer parses/builds bytes; only the
+40 `#[test]` functions (default features), OS-independent (the protocol layer parses/builds bytes; only the
 io_uring reactor is Linux-gated). They drive `process_frame` and assert on the
 wire bytes. Highlights:
 
@@ -25,17 +25,24 @@ Run: `cargo test` (anywhere); `cargo clippy --target x86_64-unknown-linux-musl
 ### Build feature matrix
 
 NTLM (and its MD4/MD5/RC4 primitives) is gated behind a default-on `ntlm`
-feature (#30). Both configs must stay green:
+feature (#30); Kerberos (`kerberos`) and the OpenSSL backend
+(`backend-openssl`) are off by default. These configs should all stay green:
 
 ```sh
-cargo test                          # default: ntlm on  (32 tests)
-cargo test --no-default-features    # ntlm off          (22 tests; NTLM-only tests skipped)
+cargo test                                              # default: ntlm + rustcrypto
+cargo test --no-default-features                        # no NTLM (NTLM-only tests skipped)
+cargo test --features kerberos                          # needs krb5 devel headers
+cargo test --no-default-features --features "backend-openssl kerberos"   # FIPS profile
 cargo clippy --no-default-features --target x86_64-unknown-linux-musl -- -D warnings
 ```
 
+**CI (`.github/workflows/ci.yml`) runs only the default config**: `cargo test`,
+clippy on x86_64-musl and a check on aarch64-musl. The other configs were last
+verified by hand on dev.g8.lo (2026-06-29); adding them to CI is #43.
+
 `--no-default-features` drops `md4`/`md-5` from the dependency tree entirely and
-makes SESSION_SETUP reject every NTLMSSP token with `STATUS_NOT_SUPPORTED` — the
-interim state until Kerberos (#31) provides a non-NTLM mechanism.
+makes SESSION_SETUP reject every NTLMSSP token with `STATUS_NOT_SUPPORTED`. Add
+`--features kerberos` for a Kerberos-only server.
 
 ## Integration scripts (`bench/`)
 
@@ -48,6 +55,13 @@ interim state until Kerberos (#31) provides a non-NTLM mechanism.
 | `net-iperf.sh` | Raw TCP ceiling (iperf3) between two hosts — run this first. |
 | `win-interop.ps1` | Windows SMB client: `net use`, dir, read, write, `Get-SmbConnection` (dialect/signing). |
 | `win-read.ps1` | Windows `.NET` `FileStream` streamed read throughput. |
+| `win-multistream.ps1` | Windows concurrent multi-stream read + write throughput. |
+| `krb5/e2e.sh` | `sec=krb5` end-to-end against a live KDC (see docs/KERBEROS.md). |
+| `stress/` | Concurrent-mount stress and 1000-round soak (below). |
+
+There is no `test/` directory or `rocketsmbd-test` container yet (per the
+stormcos test standard); that's #44. All of the above are host scripts that
+need root and `cifs.ko`, or a Windows client.
 
 ## Concurrent-mount stress + soak (`bench/stress/`)
 
