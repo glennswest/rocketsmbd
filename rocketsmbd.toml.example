@@ -35,7 +35,7 @@ auth = "both"
 # [kerberos]
 # keytab = "/etc/rocketsmbd.keytab"   # default: $KRB5_KTNAME / system keytab
 # spn = "cifs/fileserver.example.com" # default: cifs/<server_name>
-# realm = "EXAMPLE.COM"               # default: from krb5.conf
+# realm = "EXAMPLE.COM"               # currently ignored (#45)
 
 [[share]]
 name = "data"

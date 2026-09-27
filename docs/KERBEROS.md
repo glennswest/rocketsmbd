@@ -124,7 +124,7 @@ per SESSION_SETUP:
 enabled = true
 keytab  = "/etc/rocketsmbd.keytab"   # or $KRB5_KTNAME
 spn     = "cifs/fileserver.example.com"   # optional; default cifs/<server_name>
-realm   = "EXAMPLE.COM"                   # optional; from krb5.conf
+realm   = "EXAMPLE.COM"                   # accepted but currently ignored (#45)
 
 # top-level auth selector
 auth = "both"   # "kerberos" | "ntlm" | "both" (default "both")

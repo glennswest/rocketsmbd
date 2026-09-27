@@ -111,7 +111,8 @@ pub struct KerberosCfg {
     /// Service principal, e.g. `cifs/fileserver.example.com`. Defaults to
     /// `cifs/<server_name>` when unset.
     pub spn: Option<String>,
-    /// Kerberos realm. Defaults to the realm from the system `krb5.conf`.
+    /// Kerberos realm. Currently parsed but not used (#45); the realm comes
+    /// from the system `krb5.conf`.
     pub realm: Option<String>,
 }
 
