@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-09-27
+- **docs:** Docs refreshed from the code (no code changes since 2026-06-29). README: Kerberos/OpenSSL marked unreleased, Cargo feature table, full config key/default table, container config path, ports (TCP 445 only), corrected READ chain order, `sec=krb5`/`seal`/multichannel mounts. Man page: every config key, encryption supported, current security posture, fixed a font-escape typo. ARCHITECTURE, OPLOCKS, TUNING, KERBEROS, FIPS, TESTING, SECURITY, ROADMAP, CONTRIBUTING and CLAUDE.md updated to match: shared state (session registry, lease table, break mailbox), multishot accept + send_zc, leases R/RH default-on (never W, not on encrypted sessions, broken only by WRITE), single-leg Kerberos, share-level-only authorization, symlinks followed outside the share, CI builds default features only.
+- **fix(#41):** `rocketsmbd.toml.example` (installed as `/etc/rocketsmbd.toml` by the .deb/.rpm) put `oplocks` and `prefer_aes256` after `[[share]]`, so TOML made them share keys and the server rejected the file (`deny_unknown_fields`) on a fresh 1.3.0/1.4.0 package install. All top-level keys now come before the tables. The example also gains `multichannel`, `advertise_only`, `auth` and a commented `[kerberos]` table.
+- **docs:** Stale code comments corrected (`oplocks` handle-caching, `encrypt` ciphers, `ntlm` feature, negotiated-cipher field, deb extended-description).
+- **chore:** Filed #41 (shipped config), #42 (lease breaks on truncate/overwrite/rename), #43 (CI feature matrix), #44 (`rocketsmbd-test` container), #45 (`[kerberos].realm` ignored).
+
 ### 2026-06-29
 - **docs:** SECURITY.md posture refreshed — Kerberos auth, AES-256-GCM/CCM, OpenSSL/FIPS backend, and fuzzed parsers are now shipped (were listed as pending/absent).
 - **feat(#35):** **Kerberos diagnostics + clock-skew handling.** GSS failures now decode their major+minor status via `gss_display_status`, so the common Kerberos misconfigurations read as text in the log instead of a hex code (validated on dev.g8.lo: a wrong-SPN run logs *"No key table entry found matching cifs/wronghost.g8.lo@"*). Clock skew maps to `STATUS_TIME_DIFFERENCE_AT_DC`; replay is handled by the GSS library's own rcache. (Single-leg AP-REQ — the cifs/Windows norm; multi-leg GSS context persistence is a documented future item.)

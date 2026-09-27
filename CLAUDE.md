@@ -103,9 +103,9 @@ See SECURITY.md.
 
 ### Phase 1 status: COMPLETE — released as v0.1.0 (2026-06-09)
 
-Build hosts: macOS (cross-check + unit tests), **dev.g8.lo** (root@, Fedora x86_64,
-cargo installed) for native Linux builds and cifs.ko integration testing.
-Primary deploy target is x86_64; ARM64 retained for MikroTik Rose/mkube.
+(History: phase 1–5 integration runs were done on dev.g8.lo. Builds now go
+through `sc-build` only — see Platform & Build.) Primary deploy target is
+x86_64; ARM64 is also released.
 
 ### Phase 1.5 — write throughput (v0.1.1) — COMPLETE, released 2026-06-09
 - [x] Frame batching: drain all complete frames per wakeup, accumulate
