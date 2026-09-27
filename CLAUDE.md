@@ -6,47 +6,75 @@ thread-per-connection — one io_uring reactor per worker thread.
 
 ## Version
 
-- Current: **1.4.0** (stable; config/wire-behavior backward-compatible across 1.x)
+- Current: **1.4.0** (stable; config/wire-behavior backward-compatible across 1.x).
+  `main` carries unreleased work since then: Kerberos (#31–#37), the `auth` key,
+  the OpenSSL backend (#29) and optional NTLM (#30). See CHANGELOG `[Unreleased]`.
 - Version locations: `Cargo.toml` (`[package] version`), `src/main.rs` (`VERSION` const via `env!("CARGO_PKG_VERSION")` — single source is Cargo.toml)
 
 ## Platform & Build
 
-- **Target OS**: Linux only (io_uring). Kernel ≥ 5.15 required; ≥ 6.0 recommended (multishot accept/recv).
-- **Dev host**: macOS — cannot run the server locally. Use `cargo check --target aarch64-unknown-linux-musl` (and clippy) for validation; run/integration-test on a Linux host.
-- **Release build**: static musl binary → `scratch` container via `podman` (see MikroTik Rose deploy rules in user CLAUDE.md).
-- Build check: `cargo check --target aarch64-unknown-linux-musl`
+- **Target OS**: Linux only (io_uring). Kernel ≥ 5.15 required; ≥ 6.0 recommended
+  (multishot accept + send_zc are probed and used when available; recv is oneshot).
+- **Where work happens**: this checkout on stormcentral.g8.lo. **Never build here**
+  and never `ssh root@` anywhere. Commit, `git push`, then `sc-build` (runs
+  `cargo build && cargo test` on the build box); `sc-build 'cargo clippy --target
+  x86_64-unknown-linux-musl -- -D warnings'` etc. for other commands. Scratch
+  files go in `tmp/` (gitignored).
+- **Cargo features**: `ntlm` (default), `backend-rustcrypto` (default),
+  `backend-openssl` (dynamic, FIPS), `kerberos` (dynamic, system GSS). CI and
+  releases build the defaults only (#43).
+- **How it ships**: `.github/workflows/release.yml` on a tag builds static musl
+  x86_64 + aarch64 binaries, `.deb` and `.rpm` (config at `/etc/rocketsmbd.toml`,
+  systemd unit `packaging/rocketsmbd.service`, man page `docs/rocketsmbd.8`);
+  `Containerfile` = `scratch` + static binary, config at
+  `/etc/rocketsmbd/rocketsmbd.toml`. Also crates.io, COPR, and the distro
+  packaging in `packaging/` (Fedora spec, `debian/`); see docs/UPSTREAM.md.
+- **Ports**: TCP 445 only (`listen`, default `0.0.0.0:445`). No NetBIOS, no
+  management/REST API.
 
 ## Architecture
 
 ```
-main ─ config (TOML) ─ spawn N workers (SO_REUSEPORT)
+main ─ config (TOML) ─ spawn N workers (SO_REUSEPORT), pinned to cores
 each worker:
-  io_uring ring
-  ├─ accept on :445 (oneshot, re-armed; multishot is phase 3)
-  ├─ per-connection: recv (per-conn growable buffer) → NBT framing → SMB2 dispatch
-  ├─ responses: send (send_zc is phase 3)
-  └─ READ data path (zero-copy), one request in flight per connection:
+  io_uring ring (SQPOLL optional)
+  ├─ accept on :445 (multishot on ≥6.0, else oneshot re-armed)
+  ├─ per-connection: recv (oneshot, per-conn growable buffer) → NBT framing → SMB2 dispatch
+  ├─ responses: send, or send_zc for batches ≥ 64 KiB
+  ├─ lease-break mailbox: eventfd polled in the ring (cross-worker breaks)
+  └─ READ data path (zero-copy, unsigned standalone reads ≥ 8 KiB):
        splice(file → pipe) → send(hdr, MSG_MORE) → splice(pipe → socket)
        (splice-first so the header carries the actual byte count; the pipe is
         sized to the advertised MaxReadSize so the splice never blocks)
+       signed/encrypted/compound/small reads are buffered
 ```
 
-Phase-1 simplification: one in-flight request per connection (responses are
-strictly serialized; client pipelining is absorbed by TCP). True intra-
-connection concurrency with credit accounting is phase 3.
+One tx stream per connection (responses serialized; frame batching absorbs
+client pipelining). Intra-connection concurrency was shelved (#12); scale-out is
+multichannel. Full detail: docs/ARCHITECTURE.md.
 
-- `src/main.rs` — startup, worker spawn
-- `src/config.rs` — TOML config: listen, workers, shares
-- `src/uring.rs` — reactor: ring lifecycle, user_data encoding (op | conn id), buffer pool
-- `src/conn.rs` — connection state machine, NBT (4-byte length) framing, rx reassembly
-- `src/smb2/` — wire protocol: `header.rs`, `negotiate.rs`, `session.rs`, `tree.rs`, `create.rs`, `io.rs` (read/write/flush/close), `dir.rs` (query_directory), `info.rs` (query/set info), `misc.rs` (echo/logoff/disconnect)
-- `src/ntlm.rs` — minimal NTLMSSP (guest/anonymous only in phase 1)
-- `src/vfs.rs` — share roots, open-handle table (FileId → fd), path sanitation
+- `src/main.rs` — CLI (`--config`, `--check`, `--version`), startup, worker spawn
+- `src/config.rs` — TOML config (all keys + defaults; `deny_unknown_fields`)
+- `src/uring.rs` — reactor: ring lifecycle, user_data encoding, accept/recv/send/send_zc, zero-copy read chain
+- `src/smb2/mod.rs` — `process_frame`, header codec, compound handling, encryption/signing wrap, unit tests
+- `src/smb2/handlers.rs` — command handlers (negotiate, session_setup dispatcher, tree, create, read/write, dir, info, lock, notify, ioctl, leases)
+- `src/session.rs` — shared session registry (multichannel) + per-session handle table
+- `src/lease.rs` — lease table + per-worker break mailbox
+- `src/ntlm.rs` — NTLMv2; `src/spnego.rs` — SPNEGO/DER; `src/krb5.rs` — GSS acceptor (`kerberos`)
+- `src/crypto.rs` — KDF/signing/AEAD API over `crypto_rustcrypto.rs` or `crypto_openssl.rs`
+- `src/net.rs` — interface enumeration (multichannel advertisement)
+- `src/vfs.rs` — path sanitation, file ops, handle slab, directory snapshots
+- `src/wire.rs`, `src/status.rs`, `src/log.rs` — wire primitives, NTSTATUS codes, logging
 
-## Security posture (phase 1)
+## Security posture (1.4)
 
-Guest/anonymous auth only, no signing/encryption enforcement, intended for
-trusted LAN use. NTLMv2 + signing is phase 2; do not expose to untrusted networks.
+NTLMv2 (+ Kerberos on `main`, unreleased), SMB2/3 signing, SMB 3.1.1 preauth
+integrity, SMB3 encryption (AES-128/256-GCM/CCM). Guest allowed only when no
+`[[user]]` exists (or `allow_guest = true`). **Authorization is share-level
+only** (`read_only`; any authenticated user can use every share; I/O runs as the
+server's Unix user — #40). Symlinks inside a share are followed even outside it.
+No external security review yet (#39) — don't expose 445 to the public internet.
+See SECURITY.md.
 
 ## Work Plan
 
@@ -135,22 +163,39 @@ Order:
 - [x] 1. Measure multi-stream aggregate on loopback: 1 conn ≈ 45 Gbps, 4 conns
       = 100 Gbps (linear SO_REUSEPORT scaling). Single-client gap = multichannel.
 - [x] 2. docs/TUNING.md: jumbo frames, TCP buffers, NIC/RSS, multichannel path
-- [ ] 3. TCP send/recv buffer headroom on accepted sockets (high-BDP links)
+- [ ] 3. TCP send/recv buffer headroom on accepted sockets (high-BDP links) — not done (no SO_SNDBUF/SO_RCVBUF set)
 - [x] 4. SMB3 multichannel: MULTI_CHANNEL cap, FSCTL_QUERY_NETWORK_INTERFACE_INFO,
       session binding (shared registry, per-channel signing). Single mount
       4.7 → 21.1 GB/s (169 Gbps), 4.5×. — released v0.3.0
 - [x]    Server-side read-ahead (POSIX_FADV_SEQUENTIAL); lock-free read I/O.
-- [ ] 5. send_zc (MSG_ZEROCOPY) for the buffered send path; registered buffers
-- [ ] 6. multishot accept/recv, SQPOLL mode, worker core pinning
-- [ ] 7. Intra-connection request concurrency (multiple zc reads in flight)
-- [ ] 8. SMB3 encryption (AES-128-GCM) + zero-copy-friendly signed/enc reads
-- [ ] 9. Oplocks/leases with real caching
-- [ ] 10. Cross-VM benchmark on Proxmox (real NIC fabric) + Windows Server head-to-head
-- [ ] 11. SMB Direct (RDMA) — the endgame for 400/800GbE
+- [x] 5. send_zc (MSG_ZEROCOPY) for the buffered send path (v1.2.0, #15).
+      Registered buffers: not done (#14, waits on #19)
+- [x] 6. multishot accept, SQPOLL (opt-in), worker core pinning (v1.2.0).
+      Multishot recv: not done (recv stays oneshot)
+- [x] 7. Intra-connection request concurrency — shelved after measurement (#12, docs/CONCURRENCY.md)
+- [x] 8. SMB3 encryption — done (phase 4). Zero-copy signed/enc reads: infeasible over TCP (#11)
+- [x] 9. Leases: R (v1.3.0) + RH (v1.4.0), default on. W deferred (#27); breaks on truncate/overwrite missing (#42)
+- [x] 10. Cross-VM benchmark (Proxmox) + Windows Server interop (docs/BENCHMARKS.md, #21)
+- [ ] 11. SMB Direct (RDMA) — designed (docs/SMBDIRECT.md), blocked on hardware (#19)
+
+### Phase 5 — AD / Kerberos / FIPS (on `main`, unreleased) — COMPLETE
+- [x] SPNEGO mechtype negotiation (#32), GSS acceptor + keytab (#33), session key → KDF (#34)
+- [x] GSS error decoding + clock skew (#35), `auth` + `[kerberos]` config (#36)
+- [x] `sec=krb5` e2e vs live KDC, incl. signing + seal (#37, `bench/krb5/e2e.sh`)
+- [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
+
+### Open work (priorities in stormcentral)
+- #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load — example fixed (d0b114c); needs guard test + 1.4.1
+- #42 P1 lease breaks only on WRITE (truncate/overwrite/rename leave stale caches)
+- #39 P2 external security review; #40 P2 per-share authz (PAC) + idmap
+- #43 P2 CI feature matrix; #44 P2 `rocketsmbd-test` container (test standard)
+- #38, #45, #27, #22, #23, #19, #14 P3
 
 ## Testing
 
-- `cargo check --target aarch64-unknown-linux-musl` and `--target x86_64-unknown-linux-musl` must pass.
-- `cargo clippy --target aarch64-unknown-linux-musl -- -D warnings`
-- Unit tests for wire parse/build run on macOS (`cargo test` — protocol code is OS-independent; only uring/reactor is Linux-gated).
-- Integration: mount from Linux: `mount -t cifs //host/share /mnt -o guest,vers=3.0`
+- Via `sc-build` after pushing: `cargo test` (default), and for feature work
+  `sc-build 'cargo test --features kerberos'`,
+  `sc-build 'cargo test --no-default-features --features "backend-openssl kerberos"'`.
+- `cargo clippy --target x86_64-unknown-linux-musl -- -D warnings`; `cargo check --target aarch64-unknown-linux-musl` (what CI runs).
+- Protocol unit tests are OS-independent (drive `process_frame`); only uring/reactor is Linux-gated.
+- Integration: `bench/` host scripts (cifs mount, Windows, krb5 e2e, stress/soak) — see docs/TESTING.md. No `test/` container yet (#44).
