@@ -37,7 +37,20 @@ static `scratch` container; package it on a glibc base with the system OpenSSL.
 - **AES-CCM** — OpenSSL's one-shot AEAD interface can't satisfy CCM's
   length-prefix requirement, and CCM is rarely negotiated (GCM is the SMB3
   default), so CCM stays on the pure-Rust `ccm` crate even in the OpenSSL
-  backend. A strict-FIPS deployment negotiates AES-GCM, which is OpenSSL-backed.
+  backend. There is no config knob to stop CCM being negotiated: the server
+  picks from the client's cipher list (or AES-256 first with
+  `prefer_aes256`), so a client that offers only CCM gets CCM on the
+  RustCrypto `ccm` crate. cifs.ko and Windows offer GCM first.
+- **Linking:** the RustCrypto crates (`sha2`, `hmac`, `cmac`, `aes`,
+  `aes-gcm`, `ccm`) are non-optional dependencies, so they are linked in every
+  build, including the OpenSSL one. With `backend-openssl` they are only
+  exercised by the CCM path.
+- **Feature selection:** the code picks OpenSSL whenever `backend-openssl` is
+  enabled (`cfg(not(feature = "backend-openssl"))` selects RustCrypto), so
+  `--features backend-openssl` alone is enough and `backend-rustcrypto` is just
+  a default marker. Nothing rejects enabling both.
+- As of v1.4.0 the OpenSSL backend is unreleased (on `main`), and CI doesn't
+  build it (#43).
 
 ## Summary: the clean FIPS posture
 
@@ -45,5 +58,6 @@ static `scratch` container; package it on a glibc base with the system OpenSSL.
 --no-default-features --features "backend-openssl kerberos"
 ```
 
-→ OpenSSL for all crypto on the wire (GCM, signing, KDF), Kerberos for auth, and
-no MD4/MD5/RC4/NTLM anywhere in the binary.
+→ OpenSSL for GCM, signing and the KDF, Kerberos for auth, and no
+MD4/MD5/RC4/NTLM anywhere in the binary. CCM, if a client insists on it, is
+still RustCrypto (above).
