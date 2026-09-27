@@ -13,11 +13,13 @@ GSS library and a KDC + joined client, and are gated behind the off-by-default
 
 ## 1. Library choice
 
-**`libgssapi` crate** (safe bindings over the system GSS-API: MIT krb5
-`libgssapi_krb5` or Heimdal). Rationale: covers `gss_accept_sec_context`,
-credential/keytab acquisition, context inquiry, and error formatting without us
-hand-writing `extern "C"`. Raw `gssapi-sys` FFI is the fallback if we need an
-inquire OID the safe crate doesn't expose.
+**Raw `gssapi-sys` 0.2 FFI** over the system GSS-API (MIT krb5
+`libgssapi_krb5` or Heimdal). The plan was originally the safe `libgssapi`
+crate, but the implementation binds the C API directly (`src/krb5.rs`), so the
+same context handle drives both `gss_accept_sec_context` and the
+`gss_inquire_sec_context_by_oid` session-key extraction. `gssapi-sys` binds
+only the base `gssapi.h`, so the `gssapi_ext.h` symbols are declared by hand in
+`krb5.rs`.
 
 Consequence: linking system GSS means a **dynamically-linked build** — it breaks
 the static-musl `scratch` container story. Kerberos builds use a glibc base
@@ -29,14 +31,17 @@ OpenSSL backend (#29); document both as the "dynamic profile".
 
 ```toml
 [features]
-kerberos = ["dep:libgssapi"]      # default OFF; needs system GSS + dynamic link
+kerberos = ["dep:gssapi-sys"]     # default OFF; needs system GSS + dynamic link
 
 [dependencies]
-libgssapi = { version = "0.x", optional = true }
+gssapi-sys = { version = "0.2", optional = true }
 ```
 
-- Default builds (static musl, what CI on macOS cross-checks) do **not** enable
-  `kerberos` and pull no GSS dependency.
+- Default builds (static musl, which is what CI builds and what the release
+  packages and container ship) do **not** enable `kerberos` and pull no GSS
+  dependency. **No released artifact includes Kerberos.** Build it from source
+  (`cargo build --release --features kerberos`, or `cargo install rocketsmbd
+  --features kerberos`) on the target distro.
 - `cargo build --features kerberos` is a **Linux-host** build (needs
   `krb5-devel`/`libkrb5-dev` + `libgssapi-krb5`).
 - Composes with `--no-default-features` (#30): `--no-default-features
@@ -45,8 +50,10 @@ libgssapi = { version = "0.x", optional = true }
 
 ## 3. Server principal & keytab
 
-- SPN: **`cifs/<fqdn>@REALM`** (cifs is the SMB service class; some clients also
-  request `host/<fqdn>`). Register both where practical.
+- SPN: **`cifs/<fqdn>@REALM`** (cifs is the SMB service class). The acceptor
+  acquires a credential for exactly one SPN: `kerberos.spn`, or
+  `cifs/<server_name>` when unset. Set `server_name` to the FQDN clients
+  mount by, or set `spn` explicitly. There is no `host/` fallback.
 - Keytab: path from config (`kerberos.keytab = "/etc/rocketsmbd.keytab"`), or
   fall back to `KRB5_KTNAME`. The acceptor acquires its credential for the SPN
   from this keytab via `gss_acquire_cred` (or `gss_krb5_import_cred`).
@@ -89,10 +96,13 @@ per SESSION_SETUP:
   on error -> log GSS major/minor, STATUS_LOGON_FAILURE
 ```
 
-- Multi-leg exchanges (rare for Kerberos AP-REQ, common if the client does
-  mutual auth or channel binding) carry the partial GSS context in the
-  per-channel `PendingAuth`, like the NTLM challenge does today.
-- Extract the authenticated client name (`gss_display_name`) for logging/ACLs.
+- **Implemented:** single-leg only. If `gss_accept_sec_context` returns
+  `CONTINUE_NEEDED`, the handler logs it and fails with `STATUS_LOGON_FAILURE`;
+  the partial context isn't persisted across SESSION_SETUP legs (#38).
+  cifs.ko and Windows send a complete AP-REQ in one leg.
+- The authenticated client name (`gss_display_name`) is extracted and
+  **logged only**. No authorization uses it: every authenticated user can use
+  every share (#40).
 
 ## 6. Session-key derivation (#34)
 
@@ -113,16 +123,18 @@ per SESSION_SETUP:
 [kerberos]
 enabled = true
 keytab  = "/etc/rocketsmbd.keytab"   # or $KRB5_KTNAME
-spn     = "cifs/fileserver.example.com"   # optional; default from hostname
+spn     = "cifs/fileserver.example.com"   # optional; default cifs/<server_name>
 realm   = "EXAMPLE.COM"                   # optional; from krb5.conf
 
 # top-level auth selector
-auth = "both"   # "kerberos" | "ntlm" | "both" (default preserves NTLM behavior)
+auth = "both"   # "kerberos" | "ntlm" | "both" (default "both")
 ```
 
 - `auth = "kerberos"` → advertise/accept only Kerberos; NTLMSSP tokens rejected.
 - `auth = "ntlm"` → today's behavior.
-- `auth = "both"` → advertise both, Kerberos preferred (NTLM fallback).
+- `auth = "both"` (default) → advertise both, Kerberos preferred (NTLM
+  fallback). The effective set is intersected with the built features, so in
+  a default (no-`kerberos`) build `both` behaves as NTLM-only.
 - `auth = "kerberos"` with `--no-default-features` = no NTLM code at all.
 
 ## 8. Robustness (#35)
@@ -199,7 +211,8 @@ Build verified on dev.g8.lo (all four feature combinations clippy-clean):
 `cargo build/test --features kerberos` and `--no-default-features --features
 kerberos`. Single-leg AP-REQ only so far (the common cifs/Windows case); a
 multi-leg GSS exchange is logged + rejected pending per-channel context
-persistence (#35).
+persistence (#38). Those feature builds were verified by hand on dev.g8.lo;
+CI builds only the default features (#43).
 
 ### e2e runbook (run once krb5.g8.lo is up)
 
