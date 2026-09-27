@@ -1,9 +1,10 @@
 # Tuning for high-speed networks (10/25/40/100GbE)
 
 Short version: rocketsmbd already scales to line rate **across connections**.
-The work to fill a fast link from a *single client* is SMB3 multichannel
-(in progress). Jumbo frames and TCP tuning are deployment knobs that help at
-the margin.
+A *single client* fills a fast link through SMB3 multichannel, which is
+shipped but off by default: set `multichannel = true` in the server config and
+mount with `multichannel,max_channels=N`. Jumbo frames and TCP tuning are
+deployment knobs that help at the margin.
 
 ## What the numbers say
 
@@ -26,13 +27,14 @@ Two takeaways:
 
 Notice that 4 readers on *one* connection (4.7 GB/s) is *slower* than a single
 reader (6.0): they contend on one connection, which today serializes requests
-(one in flight). That's the motivation for intra-connection concurrency
-(phase 3) and, more importantly, multichannel.
+(one in flight). Intra-connection concurrency was designed and then shelved
+after measurement (#12, docs/CONCURRENCY.md); multichannel is the answer.
 
 ## How to get full line rate today
 
-Until multichannel lands, a single client fills a fast link by using multiple
-connections:
+Use multichannel (`multichannel = true` on the server, and on the client
+`mount ... -o vers=3.1.1,multichannel,max_channels=4`). Without multichannel,
+a client can still fill a fast link by using multiple connections:
 
 ```sh
 # Force separate TCP connections per mount (don't share the socket):
@@ -90,8 +92,9 @@ On loopback (tiny BDP) this is moot; it matters on real links with RTT.
   connection should land on a different queue.
 - **IRQ affinity**: pin NIC IRQs across cores (or run `irqbalance`).
 - **CPU governor**: `performance` governor for latency-sensitive throughput.
-- **Worker pinning**: planned (phase 3) — pin each worker to the core whose
-  NIC queue it drains.
+- **Worker pinning**: `core_pinning` (default on) pins worker N to core
+  N mod ncpu. Aligning workers to the NIC RSS queue their flows land on is not
+  implemented; the kernel's `SO_REUSEPORT` balancing picks the worker.
 
 ## Read-ahead
 
@@ -131,20 +134,20 @@ Implemented (more):
   need no syscall. Worth it only at high IOPS / many channels (it spins a
   kernel thread per worker), hence off by default.
 
-Planned, in rough value order for 400/800GbE:
-- **Registered files + registered buffers** (`IORING_REGISTER_*`) — drops
-  per-op fd refcount and buffer-pinning overhead on the hot path.
-- **Intra-connection read concurrency** — multiple splices in flight per
-  connection (pool of pipes) so even one channel exceeds ~45 Gbps and fewer
-  channels are needed to fill the link.
-- **Worker core-pinning aligned to NIC RSS queues** — each worker drains the
-  queue its flows land on; avoids cross-core cache traffic.
-- **Signed/encrypted zero-copy** — keep the splice path under signing/GCM via
-  a trailer-MAC or offload scheme, so security doesn't force buffered reads.
-- **SMB Direct (RDMA)** — the endgame for 100GbE+; Windows uses it to bypass
-  TCP/CPU entirely. Large effort (RDMA verbs, separate transport).
+Not implemented:
+- **Registered files + registered buffers** (`IORING_REGISTER_*`) — deferred
+  until SMB Direct needs them (#14).
+- **SMB Direct (RDMA)** — the endgame for 100GbE+; designed
+  (docs/SMBDIRECT.md) but blocked on RDMA hardware (#19).
+- **Worker pinning aligned to NIC RSS queues** — not built (see above).
 
-## Encryption performance (AES-128-GCM)
+Investigated and dropped:
+- **Intra-connection read concurrency** — shelved; the server wasn't the
+  single-channel bottleneck (#12, docs/CONCURRENCY.md).
+- **Signed/encrypted zero-copy** — closed as infeasible over TCP (#11); signed
+  and encrypted reads are buffered and go out via `send_zc`.
+
+## Encryption performance (AES-GCM)
 
 The crypto hot path is AES (AES-NI: `AESENC*`) + GHASH (PCLMULQDQ). RustCrypto
 detects both at **runtime** (`cpufeatures`), so the shipped generic/musl binary
