@@ -129,7 +129,9 @@ about NetBIOS framing and the `ZcRead` plan escape hatch.
   connection).
 - Dialects 2.0.2, 2.1, 3.0, 3.0.2, 3.1.1 (3.1.1 with SHA-512 preauth integrity
   and the encryption/signing negotiate contexts). SMB1 negotiate gets the
-  0x02FF wildcard response.
+  0x02FF wildcard response whatever dialects it offers
+  (`negotiate_resp_smb1_wildcard`). An SMB1-only client can't parse that and
+  times out instead of being refused (#47).
 
 ## VFS layer (src/vfs.rs)
 

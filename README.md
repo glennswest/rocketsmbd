@@ -33,6 +33,13 @@ every share (`read_only` applies to everyone), and all file I/O runs as the
 server's own Unix user. Per-share user/group lists and per-user identity are
 tracked in [#40](https://github.com/glennswest/rocketsmbd/issues/40).
 
+**No SMB1.** Every SMB1 NEGOTIATE gets the SMB2 wildcard (0x02FF) reply, and
+the dialects the client offers are never checked. A client that speaks
+SMB2 upgrades normally. An SMB1-only client (e.g. one that offers only
+`NT LM 0.12`, such as some BMCs) can't parse the reply and hangs until it times
+out (~20 s), instead of being refused
+([#47](https://github.com/glennswest/rocketsmbd/issues/47)).
+
 Set `encrypt = true` to require encryption, or just mount with `seal` (Linux)
 / an encrypted share (Windows) — verified against cifs.ko and Windows Server
 2025 (`Encrypted=True`). Ciphers: AES-128/256-GCM and AES-128/256-CCM (set
