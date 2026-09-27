@@ -17,10 +17,10 @@ What has shipped and what is open. Items link to GitHub issues. Dates are target
 - **1.0** (2026-06-11) — stable config + wire behavior; parser fuzzing in CI
   (#20); lib/bin split. Shipped **without** the planned external security
   review, which is now #39.
-- **1.1** — SMB3 encryption, AES-128-GCM (#10); send_zc (#15); SQPOLL (#13);
-  multishot accept (#16; recv stays oneshot); worker core pinning (#17).
+- **1.1** — SMB3 encryption, AES-128-GCM (#10).
 - **1.2** — AES-256-GCM and AES-128/256-CCM (#28); read-caching leases, opt-in
-  (#18).
+  (#18); send_zc (#15); SQPOLL (#13); multishot accept (#16; recv stays
+  oneshot); worker core pinning (#17).
 - **1.3** — read-caching leases on by default, validated on Windows (#27).
 - **1.4** — handle-caching (RH) leases (#27).
 - Packaging: COPR live, crates.io published, Fedora review bug filed (#22).
