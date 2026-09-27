@@ -185,6 +185,7 @@ Order:
 - [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
 
 ### Open work (priorities in stormcentral)
+- **Where we are (2026-09-27):** docs refresh complete and pushed (d62ca5a, sc-build green). Nothing in progress. Next up: #41 (guard test loading `rocketsmbd.toml.example`, then 1.4.1 release + golden), then #42.
 - #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load — example fixed (d0b114c); needs guard test + 1.4.1
 - #42 P1 lease breaks only on WRITE (truncate/overwrite/rename leave stale caches)
 - #39 P2 external security review; #40 P2 per-share authz (PAC) + idmap
