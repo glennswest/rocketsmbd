@@ -231,7 +231,7 @@ pub struct AsyncMeta {
 /// `channels` holds this connection's per-session signing/preauth state.
 pub struct ProtoConn {
     pub dialect: u16,
-    /// Negotiated SMB3 cipher (0 = none). Currently AES-128-GCM only.
+    /// Negotiated SMB3 cipher (0 = none): AES-128/256-GCM or AES-128/256-CCM.
     pub cipher: u16,
     pub channels: HashMap<u64, ChannelState>,
     pub max_read: u32,
