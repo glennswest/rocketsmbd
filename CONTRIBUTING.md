@@ -10,7 +10,8 @@ performance work, packaging, docs — are all welcome.
   and unit-tests anywhere; the reactor (`src/uring.rs`) is Linux-gated.
 - Keep the share-nothing-per-core reactor model intact unless there's a
   measured reason not to. Per-connection state is lock-free; only the shared
-  session registry takes locks, and only briefly.
+  session registry and the lease table (plus its per-worker break mailbox)
+  take locks, and only briefly.
 - New wire behavior needs a unit test in `src/smb2/mod.rs` (drive
   `process_frame` and assert on the bytes).
 - Run before pushing:
@@ -19,7 +20,9 @@ performance work, packaging, docs — are all welcome.
   cargo clippy --target x86_64-unknown-linux-musl -- -D warnings
   cargo check --target aarch64-unknown-linux-musl
   ```
-- CI runs build + test + clippy on every PR.
+- CI runs build + test + clippy on every PR, for the default features only
+  (#43). If you touch `kerberos`, `backend-openssl` or `ntlm`-gated code, also
+  run the feature matrix in docs/TESTING.md.
 
 ## Building
 
@@ -38,9 +41,19 @@ architecture, benchmark method, and tuning notes.
 - `src/smb2/` — protocol: header codec, dispatch, command handlers
 - `src/uring.rs` — the io_uring reactor (Linux)
 - `src/session.rs` — cross-connection session registry (multichannel)
-- `src/crypto.rs`, `src/ntlm.rs` — signing + NTLMv2
+- `src/config.rs` — TOML config
+- `src/crypto.rs` — signing/encryption/KDF API, backed by
+  `src/crypto_rustcrypto.rs` (default) or `src/crypto_openssl.rs`
+- `src/ntlm.rs` — NTLMv2; `src/spnego.rs` — SPNEGO/DER; `src/krb5.rs` —
+  Kerberos GSS acceptor (`kerberos` feature)
+- `src/lease.rs` — lease table + cross-worker break mailbox
+- `src/net.rs` — interface enumeration for multichannel
 - `src/vfs.rs` — filesystem layer, handle table
-- `docs/` — ARCHITECTURE.md, BENCHMARKS.md, TUNING.md
+- `src/status.rs` — NTSTATUS codes; `src/log.rs` — logging
+- `fuzz/` — cargo-fuzz targets (`process_frame`, `ntlm`)
+- `bench/` — integration, benchmark, stress and Kerberos e2e scripts
+- `docs/` — ARCHITECTURE, BENCHMARKS, CONCURRENCY, FIPS, KERBEROS, OPLOCKS,
+  SMBDIRECT, TESTING, TUNING, UPSTREAM, fedora-submission, `rocketsmbd.8`
 
 ## Commit style
 

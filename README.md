@@ -21,10 +21,12 @@ byte-range locks, and directory change notification. The config format and
 on-wire behavior are stable across the 1.x series. The `process_frame` and
 NTLMSSP parsers are fuzzed.
 
-Kerberos is off in the default build (`--features kerberos`, see
-[docs/KERBEROS.md](docs/KERBEROS.md)); an OpenSSL crypto backend for FIPS
-deployments is available too (`--features backend-openssl`, see
-[docs/FIPS.md](docs/FIPS.md)).
+Kerberos, the `auth` selector, the OpenSSL crypto backend for FIPS and the
+optional-NTLM build are **on `main` but not yet in a release** (see
+[CHANGELOG.md](CHANGELOG.md) `[Unreleased]`); v1.4.0 and its packages are
+NTLMv2-only. Kerberos is also off in the default build (`--features kerberos`,
+see [docs/KERBEROS.md](docs/KERBEROS.md)), as is the OpenSSL backend
+(`--features backend-openssl`, see [docs/FIPS.md](docs/FIPS.md)).
 
 **Authorization is share-level only.** Once authenticated, any user can use
 every share (`read_only` applies to everyone), and all file I/O runs as the

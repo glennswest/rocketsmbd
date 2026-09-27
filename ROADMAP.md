@@ -1,7 +1,6 @@
 # rocketsmbd Roadmap
 
-Tracking the path from a fast LAN file server to a hardened, distro-packaged
-1.0. Items link to GitHub issues. Dates are targets, not promises.
+What has shipped and what is open. Items link to GitHub issues. Dates are targets, not promises.
 
 ## Shipped
 
@@ -13,32 +12,31 @@ Tracking the path from a fast LAN file server to a hardened, distro-packaged
   per-channel signing), server-side read-ahead, lock-free read I/O. Single
   mount 169 Gbps loopback / ~47 Gbps cross-VM jumbo.
 
-## 0.4 — throughput & packaging
+- **0.4** — linked io_uring chain for full zero-copy reads, `advertise_only`,
+  `.deb`/`.rpm` packages, systemd unit, man page, CI.
+- **1.0** (2026-06-11) — stable config + wire behavior; parser fuzzing in CI
+  (#20); lib/bin split. Shipped **without** the planned external security
+  review, which is now #39.
+- **1.1** — SMB3 encryption, AES-128-GCM (#10); send_zc (#15); SQPOLL (#13);
+  multishot accept (#16; recv stays oneshot); worker core pinning (#17).
+- **1.2** — AES-256-GCM and AES-128/256-CCM (#28); read-caching leases, opt-in
+  (#18).
+- **1.3** — read-caching leases on by default, validated on Windows (#27).
+- **1.4** — handle-caching (RH) leases (#27).
+- Packaging: COPR live, crates.io published, Fedora review bug filed (#22).
 
-- Linked io_uring chain for full zero-copy reads (done; cuts CPU/read).
-- `advertise_only` for multichannel NIC selection (done).
-- Distro packaging: `.deb` + `.rpm` artifacts, systemd unit, man page, CI.
-- Fedora COPR + Debian repo for early users (#22, #23).
-- Fuzz the SMB2 + NTLMSSP parsers — cargo-fuzz (#20).
+Investigated and dropped: intra-connection read concurrency (#12, shelved after
+measurement) and zero-copy signed/encrypted reads (#11, infeasible over TCP).
 
-## 0.5 — efficiency & robustness
+## Next release (on `main`, unreleased)
 
-- SQPOLL (#13), registered files + buffers (#14), send_zc (#15).
-- Multishot accept/recv (#16), worker core pinning to NIC RSS (#17).
-- Intra-connection read concurrency (#12).
-- Oplocks/leases with caching (#18).
-
-## 0.6 — security & SMB3 completeness
-
-- SMB3 encryption, AES-128/256-GCM (#10).
-- Zero-copy path for signed/encrypted reads (#11).
-- Windows Server interop + head-to-head benchmark (#21).
 - ✅ Pluggable crypto backend — optional OpenSSL primitives for FIPS
   compliance (#29). `backend-rustcrypto` (default) / `backend-openssl`;
   OpenSSL KATs verified identical to RustCrypto on Linux.
 - ✅ Make MD4/RC4 (NTLM legacy primitives) optional at build time, a
   prerequisite for a clean OpenSSL/FIPS build (#30). Default-on `ntlm`
   feature; `--no-default-features` drops md4/md-5 entirely.
+- Kerberos (below).
 
 ## 0.7 — Active Directory / Kerberos ✅
 
@@ -59,13 +57,21 @@ session key). Sub-tasks:
 Clean FIPS + AD posture: `--no-default-features --features "backend-openssl
 kerberos"` → OpenSSL crypto, Kerberos auth, no NTLM/MD4/RC4 in the binary.
 
-## 1.0 — stable
+## Open
 
-- Security review complete, fuzzing in CI, signing-required option,
-  encryption available, docs + config stable (#24).
-- Official Fedora (Rust SIG) and Debian (debcargo) packages.
+- External security review (#39).
+- Lease breaks on truncate/overwrite/rename (#42); write-caching leases (#27,
+  deferred).
+- Per-share user/group authorization via the Kerberos PAC, and a SID→uid
+  map (#40).
+- Multi-leg Kerberos context persistence (#38); honor `[kerberos].realm` (#45).
+- CI feature matrix (#43); `rocketsmbd-test` container (#44); shipped-config
+  guard test + 1.4.1 (#41).
+- Official Fedora (Rust SIG, RHBZ #2488339) and Debian (debcargo) packages
+  (#22, #23).
 
 ## Beyond
 
+- Registered files + buffers (#14), driven by SMB Direct's needs.
 - SMB Direct (RDMA) transport for 400/800GbE (#19) —
   design: [docs/SMBDIRECT.md](docs/SMBDIRECT.md) (RoCEv2 target).

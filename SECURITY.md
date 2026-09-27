@@ -46,7 +46,8 @@ still hasn't been done (#39). Know the following before deploying:
   NTLM/MD4/RC4 in the binary. AES-CCM still runs on the RustCrypto `ccm`
   crate in that build, and the RustCrypto crates remain linked (see
   docs/FIPS.md). Release artifacts are the default build only; the Kerberos
-  and OpenSSL builds are source builds.
+  and OpenSSL builds are source builds, and as of v1.4.0 they exist only on
+  `main` (unreleased).
 - **Wire parsers are fuzzed** — `process_frame` (SMB2 entry) and the NTLMSSP
   token parser have libFuzzer targets run in CI (per-push smoke + weekly). Not
   a guarantee, but the attack surface is no longer unexercised.

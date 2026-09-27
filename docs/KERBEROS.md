@@ -39,9 +39,9 @@ gssapi-sys = { version = "0.2", optional = true }
 
 - Default builds (static musl, which is what CI builds and what the release
   packages and container ship) do **not** enable `kerberos` and pull no GSS
-  dependency. **No released artifact includes Kerberos.** Build it from source
-  (`cargo build --release --features kerberos`, or `cargo install rocketsmbd
-  --features kerberos`) on the target distro.
+  dependency. **No released artifact includes Kerberos**, and as of v1.4.0 the
+  Kerberos code is unreleased (on `main` only). Build it from a `main`
+  checkout (`cargo build --release --features kerberos`) on the target distro.
 - `cargo build --features kerberos` is a **Linux-host** build (needs
   `krb5-devel`/`libkrb5-dev` + `libgssapi-krb5`).
 - Composes with `--no-default-features` (#30): `--no-default-features
