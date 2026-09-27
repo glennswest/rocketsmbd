@@ -27,7 +27,12 @@ follow each distro's guidelines — that's what the files in `packaging/` target
 - [x] **All direct dependencies packaged in Fedora** as `rust-*-devel` — but
   one (`io-uring`) is too old (0.6.4 vs our required 0.7), so the official
   submission uses the **bundled** spec for now (see Fedora section). The rest
-  of the tree resolves unbundled (offline-build verified).
+  of the tree resolves unbundled (offline-build verified). `ccm` (added in
+  1.4.0 for AES-CCM) has not been re-checked against Fedora's crate set yet.
+- Distro packages build the **default features only** (`ntlm`,
+  `backend-rustcrypto`), like the GitHub release. The optional `kerberos`
+  (`gssapi-sys`) and `backend-openssl` (`openssl`) features aren't in any
+  package yet; they're unreleased (on `main`), see docs/KERBEROS.md and docs/FIPS.md.
 - [ ] Clear upstream contact / maintainer for the distro bug trackers
 - [ ] A **sponsor** in the Fedora `packager` group (the real remaining gate;
   social, not technical — engage the Rust SIG, below)
@@ -47,7 +52,8 @@ on Fedora 43 + rawhide with a fully-offline build against
 | crate | we require | Fedora ships | ok? |
 |---|---|---|---|
 | toml | `1` (was 0.8) | 1.1.2 | ✅ (bumped to match) |
-| aes-gcm, cmac, hmac, sha2, md-5, md4, serde, libc | as-is | match | ✅ |
+| aes, aes-gcm, cmac, hmac, sha2, md-5, md4, serde, libc | as-is | match | ✅ |
+| ccm | `0.5` (added 1.4.0) | not re-checked | ? |
 | **io-uring** | **`0.7`** (need `SendZc`) | **0.6.4** (F43 *and* rawhide) | ❌ |
 
 `io-uring` is the blocker: we depend on 0.7-only API (`send_zc`, #15) and
@@ -134,11 +140,13 @@ Path:
 3. Build with the `debian/` dir here (`dh $@ --buildsystem cargo`).
 4. Find a **DD/DM sponsor** to review and upload (mentors.debian.net).
 
-`packaging/debian/` here is current (1.1.0; control/rules/changelog/copyright/
+`packaging/debian/` here is current (1.4.0-1; control/rules/changelog/copyright/
 install/manpages; Standards-Version 4.7.2; copyright notes the bundled crate
-licenses). Crate-dependency resolution is the main work — like Fedora, our code
-builds against older `io-uring`, so debcargo (separate `librust-*` packages) is
-feasible if Debian's `librust-io-uring-dev` is recent enough; otherwise vendor.
+licenses). `debian/rules` runs `cargo build --release --offline` (falling back to
+an online build), default features only. Crate-dependency resolution is the main
+work. We require `io-uring` **0.7** (`send_zc`, #15), so debcargo (separate
+`librust-*` packages) only works if Debian's `librust-io-uring-dev` is at 0.7.
+If it isn't, vendor the crates, as the Fedora spec does.
 
 ### ITP bug — ready to file
 
@@ -153,7 +161,7 @@ Owner: Glenn West <glennswest@neuralcloudcomputing.com>
 X-Debbugs-Cc: debian-devel@lists.debian.org, debian-rust@lists.debian.org
 
 * Package name    : rocketsmbd
-  Version         : 1.1.0
+  Version         : 1.4.0
   Upstream Author : Glenn West <glennswest@neuralcloudcomputing.com>
 * URL             : https://github.com/glennswest/rocketsmbd
 * License         : MIT
@@ -164,7 +172,8 @@ X-Debbugs-Cc: debian-devel@lists.debian.org, debian-rust@lists.debian.org
  send and file I/O flow through one ring per worker, and reads are served
  zero-copy from page cache to socket via splice. SMB 2.0.2-3.1.1 with NTLMv2
  auth, SMB2/3 signing, SMB 3.1.1 preauth, SMB3 multichannel, and SMB3
- encryption (AES-128-GCM). Wire parsers are fuzzed in CI.
+ encryption (AES-128/256-GCM and -CCM), read/handle-caching leases.
+ Wire parsers are fuzzed in CI.
 
  Packaging via the Debian Rust team (dh-cargo). I am looking for a DD/DM
  sponsor; I'll upload to mentors.debian.net. It is also on crates.io
@@ -183,11 +192,13 @@ Until official inclusion, users can install today from:
 
 ## Status
 
-- GitHub releases: **live** (v1.1.0, x86_64 + aarch64 `.deb`/`.rpm`/binary + SRPM).
-- crates.io: **published** (<https://crates.io/crates/rocketsmbd>, v1.1.0).
+- GitHub releases: **live** (v1.4.0, x86_64 + aarch64 `.deb`/`.rpm`/binary; SRPM attached).
+- crates.io: **published** (<https://crates.io/crates/rocketsmbd>, v1.4.0).
 - Fedora COPR: **live** (<https://copr.fedorainfracloud.org/coprs/glennswest/rocketsmbd/>).
-  Official review: package is review-clean + `fedora-review`-passing; needs a
-  Rust SIG sponsor + the Package Review bug filed (#22, see docs/fedora-submission.md).
-- Debian: `packaging/debian/` current (1.1.0); ITP drafted above; needs the ITP
-  filed + a DD/DM sponsor (#23).
+  Official review: the Package Review bug is filed
+  (<https://bugzilla.redhat.com/show_bug.cgi?id=2488339>). The package is
+  review-clean and passes `fedora-review`; it still needs a Rust SIG sponsor
+  (#22, see docs/fedora-submission.md).
+- Debian: `packaging/debian/` current (1.4.0-1); ITP drafted above but **not
+  filed yet**; also needs a DD/DM sponsor (#23).
 - 1.0 ✅, fuzzing in CI ✅ — no longer blocking.
