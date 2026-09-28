@@ -189,12 +189,16 @@ Order:
 - [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
 
 ### Open work (priorities in stormcentral)
-- **Where we are (2026-09-27):** docs refresh complete and pushed (d62ca5a, sc-build green); second pass fixed the stale docs/UPSTREAM.md (distro packaging status). Nothing in progress. Next up: #41 (guard test loading `rocketsmbd.toml.example`, then 1.4.1 release; golden once #46 registers the component), then #42.
+- **Where we are (2026-09-27):** #46 is checked and waiting on the owner's health-endpoint decision. Next up: #41 (guard test, 1.4.1), then #42.
 - #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load — example fixed (d0b114c); needs guard test + 1.4.1
 - #42 P1 lease breaks only on WRITE (truncate/overwrite/rename leave stale caches)
 - #39 P2 external security review; #40 P2 per-share authz (PAC) + idmap
 - #43 P2 CI feature matrix; #44 P2 `rocketsmbd-test` container (test standard)
-- #46 (unprioritized) register rocketsmbd as a stormcos service golden for smbop
+- #46 P1 rocketsmbd as a stormcos service golden for smbop. The service_golden build was verified on 2026-09-27
+  (static-pie musl, default features, operator-shaped config passes `--check`). Registration is stormcos#149
+  in stormcentral. **Waiting on an owner decision:** stormcentral's service generator always writes an HTTP
+  liveness probe, so either rocketsmbd adds an opt-in HTTP health listener or stormcentral adds a TCP probe type
+  (see the #46 comment).
 - #47 P3 SMB1-only clients get the SMB2 wildcard and hang ~20 s instead of a refusal
 - #38, #45, #27, #22, #23, #19, #14 P3
 
