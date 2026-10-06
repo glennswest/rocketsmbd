@@ -37,6 +37,11 @@ cd "$work/src"
 got=$(awk -F\" '/^version =/{print $2; exit}' Cargo.toml)
 [ "$got" = "$v" ] || { echo "Cargo.toml says $got, tag says $v" >&2; exit 1; }
 
+# Build into this tree's own target/ (sc-build points CARGO_TARGET_DIR at
+# its checkout's): cargo-deb, cargo-generate-rpm and the copy below all
+# expect ./target.
+unset CARGO_TARGET_DIR
+
 echo "==> packaging tools"
 cargo install -q --locked cargo-deb cargo-generate-rpm
 export PATH=$HOME/.cargo/bin:$PATH
