@@ -176,7 +176,7 @@ pub fn dispatch(
                 CMD_WRITE => write(srv, &mut sess, h, msg, chain, tx, tree),
                 CMD_QUERY_DIRECTORY => query_directory(&mut sess, h, msg, chain, tx),
                 CMD_QUERY_INFO => query_info(srv, &mut sess, h, body, chain, tx),
-                CMD_SET_INFO => set_info(&mut sess, h, msg, chain, tx, share, tree.read_only),
+                CMD_SET_INFO => set_info(srv, &mut sess, h, msg, chain, tx, share, tree.read_only),
                 CMD_IOCTL => {
                     drop(sess);
                     ioctl(srv, pc, h, msg, chain, tx);
@@ -1273,6 +1273,11 @@ fn create(
     if !is_dir {
         vfs::advise_sequential(fd);
     }
+    // An overwrite/supersede truncated an existing file: every other client's
+    // cached data for it is now stale (#42).
+    if action == CREATE_ACTION_OVERWRITTEN {
+        break_leases(srv, (share_idx, meta.ino), req.lease.as_ref().map(|l| l.key));
+    }
     let leaf = rel.rsplit('\\').next().unwrap_or("").to_string();
     let attrs = vfs::finalize_attrs(meta.attrs, &leaf);
     // Grant a read-caching lease when the client requests one (RqLs) on a file.
@@ -1370,6 +1375,23 @@ fn create(
     }
 }
 
+// ------------------------------------------------------------ lease breaks
+
+/// Break every lease on file `key` except the one held under `except` (the
+/// acting handle's own lease key), and post each break to the worker that owns
+/// the holder's connection. Called after any operation that changes what a
+/// read- or handle-caching holder has cached: WRITE, truncate, overwriting
+/// CREATE, rename and delete (#42). R/H → none needs no ack, so the caller
+/// doesn't wait.
+fn break_leases(srv: &Srv, key: (u32, u64), except: Option<[u8; 16]>) {
+    for b in srv.leases.break_conflicts(key, except) {
+        crate::logd!("lease: breaking {:#x} → none (share {}, ino {})", b.cur_state, key.0, key.1);
+        if let Some(mb) = srv.mailboxes.get(b.wid) {
+            mb.post(b);
+        }
+    }
+}
+
 // -------------------------------------------------------------------- CLOSE
 
 fn close(srv: &Srv, pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
@@ -1416,6 +1438,12 @@ fn close(srv: &Srv, pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, bod
 
     let mut st = status::SUCCESS;
     if of.delete_on_close {
+        // The file goes away: break other holders' leases on it (#42).
+        if !of.is_dir {
+            if let Ok(m) = vfs::fstat_meta(of.fd) {
+                break_leases(srv, (of.share_idx, m.ino), of.lease_key);
+            }
+        }
         let res = if of.is_dir {
             std::fs::remove_dir(&of.path)
         } else {
@@ -1629,9 +1657,7 @@ fn write(
             // the final content rather than racing a mid-write partial. The
             // write handle's own lease key is exempt; read → none needs no ack.
             if let Some(ino) = ino {
-                for b in srv.leases.break_conflicts((share_idx, ino), writer_key) {
-                    srv.mailboxes[b.wid].post(b);
-                }
+                break_leases(srv, (share_idx, ino), writer_key);
             }
             begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
             tx.p16(17);
@@ -2044,7 +2070,9 @@ fn fs_info(srv: &Srv, of: &vfs::OpenFile, class: u8, b: &mut Vec<u8>) -> u32 {
 
 // ----------------------------------------------------------------- SET_INFO
 
+#[allow(clippy::too_many_arguments)]
 fn set_info(
+    srv: &Srv,
     sess: &mut SessionInner,
     h: &ReqHdr,
     msg: &[u8],
@@ -2086,17 +2114,39 @@ fn set_info(
         return;
     };
 
+    // Leases to break once the change has been made (#42): the file's own
+    // (from other lease keys), plus a rename's replaced target.
+    let own = vfs::fstat_meta(of.fd).ok().filter(|m| !m.is_dir).map(|m| (of.share_idx, m.ino));
+    let mut broken: Vec<(u32, u64)> = Vec::new();
     let st = match class {
         4 => set_basic_info(of, data),
-        13 => set_disposition(of, data),
-        10 => set_rename(of, data, &share_root),
-        19 => status::SUCCESS, // FileAllocationInformation: best-effort no-op
+        13 => {
+            let st = set_disposition(of, data);
+            if st == status::SUCCESS && of.delete_on_close {
+                broken.extend(own);
+            }
+            st
+        }
+        10 => {
+            let (st, replaced) = set_rename(of, data, &share_root);
+            if st == status::SUCCESS {
+                broken.extend(own);
+                broken.extend(replaced.map(|ino| (of.share_idx, ino)));
+            }
+            st
+        }
+        // FileAllocationInformation: a no-op here (the data doesn't change),
+        // so there's nothing to break.
+        19 => status::SUCCESS,
         20 => {
-            // FileEndOfFileInformation
+            // FileEndOfFileInformation: truncate or extend.
             let mut r = Rdr::new(data);
             match r.u64() {
                 Some(len) => match vfs::ftruncate(of.fd, len) {
-                    Ok(()) => status::SUCCESS,
+                    Ok(()) => {
+                        broken.extend(own);
+                        status::SUCCESS
+                    }
                     Err(e) => status::from_errno(e),
                 },
                 None => status::INVALID_PARAMETER,
@@ -2104,6 +2154,10 @@ fn set_info(
         }
         _ => status::NOT_SUPPORTED,
     };
+    let except = of.lease_key;
+    for key in broken {
+        break_leases(srv, key, except);
+    }
     if st != status::SUCCESS {
         err_resp(tx, h, st, chain);
         return;
@@ -2160,7 +2214,9 @@ fn set_disposition(of: &mut vfs::OpenFile, data: &[u8]) -> u32 {
     status::SUCCESS
 }
 
-fn set_rename(of: &mut vfs::OpenFile, data: &[u8], share_root: &Path) -> u32 {
+/// Rename the open file. Returns the status and, when an existing file was
+/// replaced, that file's inode (its holders' leases must break).
+fn set_rename(of: &mut vfs::OpenFile, data: &[u8], share_root: &Path) -> (u32, Option<u64>) {
     let mut r = Rdr::new(data);
     let parsed = (|| {
         let replace = r.u8()? != 0;
@@ -2170,22 +2226,27 @@ fn set_rename(of: &mut vfs::OpenFile, data: &[u8], share_root: &Path) -> u32 {
         Some((replace, name))
     })();
     let Some((replace, name)) = parsed else {
-        return status::INVALID_PARAMETER;
+        return (status::INVALID_PARAMETER, None);
     };
     let (new_path, new_rel) = match vfs::resolve(share_root, &name) {
         Ok(v) => v,
-        Err(st) => return st,
+        Err(st) => return (st, None),
     };
     if !replace && new_path.exists() {
-        return status::OBJECT_NAME_COLLISION;
+        return (status::OBJECT_NAME_COLLISION, None);
     }
+    let replaced = vfs::stat_meta(&new_path)
+        .ok()
+        .filter(|m| !m.is_dir)
+        .map(|m| m.ino)
+        .filter(|&ino| vfs::fstat_meta(of.fd).map(|m| m.ino != ino).unwrap_or(true));
     if let Err(e) = std::fs::rename(&of.path, &new_path) {
-        return status::from_errno(e.raw_os_error().unwrap_or(libc::EIO));
+        return (status::from_errno(e.raw_os_error().unwrap_or(libc::EIO)), None);
     }
     of.leaf = new_rel.rsplit('\\').next().unwrap_or("").to_string();
     of.path = new_path;
     of.rel = new_rel;
-    status::SUCCESS
+    (status::SUCCESS, replaced)
 }
 
 // --------------------------------------------------------------------- LOCK

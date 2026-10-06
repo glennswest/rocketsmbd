@@ -1083,6 +1083,201 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// CREATE with an RqLs (v1) lease request for R|H under `key`. Returns
+    /// (status, fid, granted OplockLevel byte).
+    #[cfg(feature = "ntlm")]
+    #[allow(clippy::too_many_arguments)]
+    fn create_leased(srv: &Srv, pc: &mut ProtoConn, sess: u64, tree: u32, name: &str, disp: u32, key: u8, desired: u32) -> (u32, u64, u8) {
+        let n = utf16le(name);
+        let mut data = Vec::new();
+        data.extend_from_slice(&[key; 16]);
+        data.extend_from_slice(&(LEASE_READ_CACHING | LEASE_HANDLE_CACHING).to_le_bytes());
+        data.extend_from_slice(&[0; 12]); // flags + duration
+        let mut ctx: Vec<u8> = Vec::new();
+        ctx.p32(0); // Next
+        ctx.p16(16); // NameOffset
+        ctx.p16(4);
+        ctx.p16(0);
+        ctx.p16(24); // DataOffset
+        ctx.p32(data.len() as u32);
+        ctx.pbytes(CTX_NAME_RQLS);
+        ctx.zeros(4);
+        ctx.pbytes(&data);
+        let ctx_off = (120 + n.len()).div_ceil(8) * 8;
+        let mut f = req_hdr(CMD_CREATE, 10, tree, sess);
+        f.p16(57);
+        f.p8(0);
+        f.p8(OPLOCK_LEASE);
+        f.p32(2);
+        f.p64(0);
+        f.p64(0);
+        f.p32(desired);
+        f.p32(0);
+        f.p32(7);
+        f.p32(disp);
+        f.p32(0);
+        f.p16(120);
+        f.p16(n.len() as u16);
+        f.p32(ctx_off as u32);
+        f.p32(ctx.len() as u32);
+        f.pbytes(&n);
+        while f.len() < ctx_off {
+            f.p8(0);
+        }
+        f.pbytes(&ctx);
+        let r = roundtrip(srv, pc, f);
+        if r.status != status::SUCCESS {
+            return (r.status, 0, 0);
+        }
+        (r.status, u64::from_le_bytes(r.body[72..80].try_into().unwrap()), r.body[2])
+    }
+
+    #[cfg(feature = "ntlm")]
+    #[allow(clippy::too_many_arguments)]
+    fn set_info_file(srv: &Srv, pc: &mut ProtoConn, sess: u64, tree: u32, fid: u64, class: u8, buf: &[u8]) -> u32 {
+        let mut f = req_hdr(CMD_SET_INFO, 12, tree, sess);
+        f.p16(33);
+        f.p8(1); // SMB2_0_INFO_FILE
+        f.p8(class);
+        f.p32(buf.len() as u32);
+        f.p16(96); // BufferOffset (64 header + 32 fixed)
+        f.p16(0);
+        f.p32(0);
+        f.p64(fid);
+        f.p64(fid);
+        f.pbytes(buf);
+        roundtrip(srv, pc, f).status
+    }
+
+    #[cfg(feature = "ntlm")]
+    fn close_fid(srv: &Srv, pc: &mut ProtoConn, sess: u64, tree: u32, fid: u64) -> u32 {
+        let mut f = req_hdr(CMD_CLOSE, 13, tree, sess);
+        f.p16(24);
+        f.p16(0);
+        f.p32(0);
+        f.p64(fid);
+        f.p64(fid);
+        roundtrip(srv, pc, f).status
+    }
+
+    /// Lease breaks beyond WRITE (#42). Connection A (conn slot 1) holds an
+    /// R|H lease; connection B (slot 2, its own session) truncates,
+    /// overwrites, renames, replaces by rename, and deletes the file. Each must
+    /// post exactly one break for A's lease key to worker 0's mailbox. A's own
+    /// truncate, and B's no-op allocation set, must break nothing.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn lease_breaks_on_truncate_overwrite_rename_delete() {
+        let dir = std::env::temp_dir().join(format!("rsmbd-lease42-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut srv = test_srv(&dir);
+        srv.cfg.oplocks = true;
+        srv.mailboxes = vec![crate::lease::Mailbox::new().unwrap()];
+        let mut pa = ProtoConn::new(&srv, 0, 1, 1);
+        let mut pb = ProtoConn::new(&srv, 0, 2, 1);
+        let (sa, ta) = establish(&srv, &mut pa);
+        let (sb, tb) = establish(&srv, &mut pb);
+        const OPEN_IF: u32 = 3;
+        const OVERWRITE_IF: u32 = 5;
+        const FILE_OPEN: u32 = 1;
+        let rw = 0x0012_019F | 0x0001_0000; // generic read/write + DELETE
+
+        let lease_a = |srv: &Srv, pa: &mut ProtoConn, name: &str| {
+            let (st, fid, lvl) = create_leased(srv, pa, sa, ta, name, OPEN_IF, 0xAA, 0x0012_0089);
+            assert_eq!(st, status::SUCCESS, "A open {name}");
+            assert_eq!(lvl, OPLOCK_LEASE, "A granted a lease on {name}");
+            fid
+        };
+        let expect_break = |srv: &Srv, what: &str| {
+            let b = srv.mailboxes[0].drain();
+            assert_eq!(b.len(), 1, "{what}: expected one break, got {b:?}");
+            assert_eq!(b[0].lease_key, [0xAA; 16], "{what}");
+            assert_eq!(b[0].conn_idx, 1, "{what}: routed to conn A");
+            assert_eq!(b[0].session_id, sa, "{what}");
+            assert_eq!(b[0].new_state, 0, "{what}");
+        };
+        let expect_none = |srv: &Srv, what: &str| {
+            assert!(srv.mailboxes[0].drain().is_empty(), "{what}: unexpected break");
+        };
+        std::fs::write(dir.join("f"), b"original contents").unwrap();
+
+        // 1. B truncates (FileEndOfFileInformation).
+        let fa = lease_a(&srv, &mut pa, "f");
+        let (st, fb) = create_file(&srv, &mut pb, sb, tb, "f", FILE_OPEN, 0, rw);
+        assert_eq!(st, status::SUCCESS);
+        expect_none(&srv, "plain open by B");
+        assert_eq!(set_info_file(&srv, &mut pb, sb, tb, fb, 19, &4u64.to_le_bytes()), status::SUCCESS);
+        expect_none(&srv, "allocation set (no data change)");
+        assert_eq!(set_info_file(&srv, &mut pb, sb, tb, fb, 20, &4u64.to_le_bytes()), status::SUCCESS);
+        expect_break(&srv, "truncate");
+        assert_eq!(std::fs::metadata(dir.join("f")).unwrap().len(), 4);
+        assert_eq!(close_fid(&srv, &mut pb, sb, tb, fb), status::SUCCESS);
+
+        // 1b. A truncating through its own leased handle breaks nothing.
+        let (st, fa_rw, lvl) = create_leased(&srv, &mut pa, sa, ta, "f", OPEN_IF, 0xAA, rw);
+        assert_eq!((st, lvl), (status::SUCCESS, OPLOCK_LEASE));
+        assert_eq!(set_info_file(&srv, &mut pa, sa, ta, fa_rw, 20, &2u64.to_le_bytes()), status::SUCCESS);
+        expect_none(&srv, "holder truncating under its own lease key");
+        assert_eq!(close_fid(&srv, &mut pa, sa, ta, fa_rw), status::SUCCESS);
+        assert_eq!(close_fid(&srv, &mut pa, sa, ta, fa), status::SUCCESS);
+
+        // 2. B overwrites (CREATE OVERWRITE_IF on the existing file).
+        let (st, fb) = create_file(&srv, &mut pb, sb, tb, "f", OVERWRITE_IF, 0, rw);
+        assert_eq!(st, status::SUCCESS);
+        expect_break(&srv, "overwrite");
+        assert_eq!(close_fid(&srv, &mut pb, sb, tb, fb), status::SUCCESS);
+
+        // 3. B renames f → g.
+        lease_a(&srv, &mut pa, "f");
+        let (st, fb) = create_file(&srv, &mut pb, sb, tb, "f", FILE_OPEN, 0, rw);
+        assert_eq!(st, status::SUCCESS);
+        let rename = |to: &str, replace: bool| {
+            let n = utf16le(to);
+            let mut b: Vec<u8> = Vec::new();
+            b.p8(replace as u8);
+            b.zeros(7 + 8);
+            b.p32(n.len() as u32);
+            b.pbytes(&n);
+            b
+        };
+        assert_eq!(set_info_file(&srv, &mut pb, sb, tb, fb, 10, &rename("g", false)), status::SUCCESS);
+        expect_break(&srv, "rename source");
+        assert_eq!(close_fid(&srv, &mut pb, sb, tb, fb), status::SUCCESS);
+
+        // 4. B replaces g by renaming h onto it: g's holder must break.
+        lease_a(&srv, &mut pa, "g");
+        std::fs::write(dir.join("h"), b"replacement").unwrap();
+        let (st, fb) = create_file(&srv, &mut pb, sb, tb, "h", FILE_OPEN, 0, rw);
+        assert_eq!(st, status::SUCCESS);
+        assert_eq!(set_info_file(&srv, &mut pb, sb, tb, fb, 10, &rename("g", true)), status::SUCCESS);
+        expect_break(&srv, "rename replaces target");
+        assert_eq!(std::fs::read(dir.join("g")).unwrap(), b"replacement");
+        assert_eq!(close_fid(&srv, &mut pb, sb, tb, fb), status::SUCCESS);
+
+        // 5. B deletes g (FileDispositionInformation, then CLOSE unlinks).
+        lease_a(&srv, &mut pa, "g");
+        let (st, fb) = create_file(&srv, &mut pb, sb, tb, "g", FILE_OPEN, 0, rw);
+        assert_eq!(st, status::SUCCESS);
+        assert_eq!(set_info_file(&srv, &mut pb, sb, tb, fb, 13, &[1]), status::SUCCESS);
+        expect_break(&srv, "delete disposition");
+        assert_eq!(close_fid(&srv, &mut pb, sb, tb, fb), status::SUCCESS);
+        expect_none(&srv, "unlink at close (already broken)");
+        assert!(!dir.join("g").exists());
+
+        // 6. B deletes via CREATE with FILE_DELETE_ON_CLOSE: break at CLOSE.
+        std::fs::write(dir.join("k"), b"k").unwrap();
+        lease_a(&srv, &mut pa, "k");
+        let (st, fb) = create_file(&srv, &mut pb, sb, tb, "k", FILE_OPEN, 0x1000, rw);
+        assert_eq!(st, status::SUCCESS);
+        expect_none(&srv, "delete-on-close open");
+        assert_eq!(close_fid(&srv, &mut pb, sb, tb, fb), status::SUCCESS);
+        expect_break(&srv, "delete-on-close at CLOSE");
+        assert!(!dir.join("k").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[cfg(feature = "ntlm")]
     #[test]
     fn full_session_create_write_read_dir() {
