@@ -82,10 +82,13 @@ encryption (AES-128/256-GCM and -CCM).
 # Static musl binary — no shared-library dependencies.
 depends = ""
 conf-files = ["/etc/rocketsmbd.toml"]
+# postinst creates the rocketsmbd service user (#39).
+maintainer-scripts = "packaging/deb/"
 assets = [
     ["target/release/rocketsmbd", "usr/bin/", "755"],
     ["rocketsmbd.toml.example", "etc/rocketsmbd.toml", "644"],
     ["packaging/rocketsmbd.service", "lib/systemd/system/", "644"],
+    ["packaging/rocketsmbd.sysusers", "usr/lib/sysusers.d/rocketsmbd.conf", "644"],
     ["docs/rocketsmbd.8", "usr/share/man/man8/", "644"],
     ["README.md", "usr/share/doc/rocketsmbd/", "644"],
     ["SECURITY.md", "usr/share/doc/rocketsmbd/", "644"],
@@ -93,10 +96,17 @@ assets = [
 
 [package.metadata.generate-rpm]
 summary = "io_uring SMB2/SMB3 file server (zero-copy, multichannel)"
+# Create the rocketsmbd service user before the files land (#39).
+pre_install_script = """
+getent group rocketsmbd >/dev/null || groupadd -r rocketsmbd
+getent passwd rocketsmbd >/dev/null || useradd -r -g rocketsmbd -d /var/lib/rocketsmbd -s /usr/sbin/nologin -c "rocketsmbd SMB file server" rocketsmbd
+exit 0
+"""
 assets = [
     { source = "target/release/rocketsmbd", dest = "/usr/bin/rocketsmbd", mode = "755" },
     { source = "rocketsmbd.toml.example", dest = "/etc/rocketsmbd.toml", mode = "644", config = true },
     { source = "packaging/rocketsmbd.service", dest = "/usr/lib/systemd/system/rocketsmbd.service", mode = "644" },
+    { source = "packaging/rocketsmbd.sysusers", dest = "/usr/lib/sysusers.d/rocketsmbd.conf", mode = "644" },
     { source = "docs/rocketsmbd.8", dest = "/usr/share/man/man8/rocketsmbd.8", mode = "644", doc = true },
     { source = "README.md", dest = "/usr/share/doc/rocketsmbd/README.md", mode = "644", doc = true },
     { source = "SECURITY.md", dest = "/usr/share/doc/rocketsmbd/SECURITY.md", mode = "644", doc = true },

@@ -1,0 +1,4 @@
+# rocketsmbd runs as this unprivileged system user (#39). Share directories
+# must be readable (and, for writable shares, writable) by it — see README,
+# "Service user".
+u rocketsmbd - "rocketsmbd SMB file server" /var/lib/rocketsmbd /usr/sbin/nologin

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Create the rocketsmbd system user (packaging/rocketsmbd.sysusers, #39).
+set -e
+if [ "$1" = "configure" ]; then
+    if command -v systemd-sysusers >/dev/null 2>&1; then
+        systemd-sysusers rocketsmbd.conf
+    elif ! getent passwd rocketsmbd >/dev/null; then
+        adduser --system --group --home /var/lib/rocketsmbd --no-create-home \
+            --gecos "rocketsmbd SMB file server" rocketsmbd
+    fi
+fi
+exit 0

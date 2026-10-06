@@ -31,11 +31,11 @@ Status: **fixed** (commit noted), **risk-accepted** (stated in SECURITY.md),
 | R8 | High | `encrypt = true` was silently ignored when no cipher was negotiated (SMB 2.x/3.0/3.0.2, or 3.1.1 without an encryption context): the session came up in cleartext. Combined with FSCTL_VALIDATE_NEGOTIATE_INFO never being checked against what the client sent, an on-path attacker could strip 3.1.1 from the dialect list to get an unencrypted session. | fixed (a1686f8): `encrypt = true` refuses sessions that can't be sealed; VALIDATE_NEGOTIATE_INFO checked, mismatch disconnects |
 | R9 | High | No MessageId window: a captured signed (or sealed) request could be replayed on the same connection and would execute again (re-delete, re-truncate, roll back a WRITE). | fixed (a1686f8): per-connection MessageId window, reuse disconnects |
 | R10 | Medium | Session binding: an unauthenticated client could bind to any session ID (they were sequential), then LOGOFF it from the pending channel, destroying another user's session; binding to an established guest session needed no proof at all (hijack of its trees and handles). Binding was accepted with `multichannel = false` and below SMB 3.0. | fixed (a1686f8): random session ids; binding needs `multichannel`, SMB 3.x and an established non-guest session; LOGOFF needs an established channel |
-| R11 | Medium | Signing is optional by default and the client decides (`require_signing = false`; unsigned requests accepted unless the client set REQUIRED). With NTLM and no MIC/channel binding, that is the classic SMB relay/tamper setup. | risk-accepted for now (SECURITY.md: set `require_signing = true`); default change is the owner's call |
-| R12 | Medium | Guest is allowed by default when no `[[user]]` exists — including Kerberos/AD-only configs — and `invalid_users` never matches a guest, so a deny-list-only share is open to guests. | risk-accepted for now (SECURITY.md: set `allow_guest = false` explicitly); default change is the owner's call |
+| R11 | Medium | Signing is optional by default and the client decides (`require_signing = false`; unsigned requests accepted unless the client set REQUIRED). With NTLM and no MIC/channel binding, that is the classic SMB relay/tamper setup. | owner's decision: default `true` in 2.0 (#64); until then an unset `require_signing` warns at startup and `--check` |
+| R12 | Medium | Guest is allowed by default when no `[[user]]` exists — including Kerberos/AD-only configs — and `invalid_users` never matches a guest, so a deny-list-only share is open to guests. | fixed: unset `allow_guest` is false whenever Kerberos is configured. `invalid_users` still doesn't match guests (documented) |
 | R13 | Medium | CHANGE_NOTIFY completions on an encrypted session went out unsealed (and usually unsigned), leaking changed file names and allowing a forged completion. (Lease breaks avoid this only because leases aren't granted on encrypted sessions.) | fixed (25792f0) |
 | R14 | Medium | No per-session/connection caps on open handles, trees, or pended CHANGE_NOTIFYs; one inotify instance per connection (default `max_user_instances` 128) lets 128 clients exhaust notify for everyone. | partly fixed (25792f0): ≤ 16384 opens and 1024 trees per session, 1024 pended notifies per connection. Shared inotify: #55 |
-| R15 | Medium | The packaged systemd unit runs as root, and paths are opened by plain joins (no `openat2(RESOLVE_BENEATH)`), so a symlink planted in a share by anyone with local write access reaches anything root can. | open: `*at()`/`openat2` resolution is #56; running the packaged unit as a dedicated user is the owner's call |
+| R15 | Medium | The packaged systemd unit runs as root, and paths are opened by plain joins (no `openat2(RESOLVE_BENEATH)`), so a symlink planted in a share by anyone with local write access reaches anything root can. | partly fixed: the packaged unit runs as the `rocketsmbd` user with only `CAP_NET_BIND_SERVICE` (README, "Service user"); `openat2` resolution is #56 |
 | R16 | Low | Encrypted frames called `tx.clear()`, discarding responses (and deferred notify finals) already batched for the connection in the same pass — pipelined sealed clients lost responses. | fixed (a1686f8) |
 | R17 | Low | A second NEGOTIATE on a connection was accepted and reset dialect/cipher/preauth state under live sessions. | fixed (a1686f8) |
 | R18 | Low | The decrypted inner SessionId wasn't tied to the transform's SessionId; a sealed frame naming another (unencrypted) session on the same connection could take the zero-copy READ path, whose plan (and dup'd fd) was then dropped — an fd leak and no response. | fixed (a1686f8) |
@@ -123,9 +123,10 @@ encrypting sessions (R1).
 
 ## Not done
 
-- **External review.** Still needed before the "don't expose 445 to the
-  internet" caveat can go.
-- Owner decisions: secure-by-default `require_signing` (R11) and `allow_guest`
-  with Kerberos (R12), and a dedicated service user in the packaged unit (R15).
+- **External review** (#63): before rocketsmbd is offered publicly; until
+  then the "don't expose 445 to the internet" caveat stays.
+- Owner decisions (2026-10-06), carried out: guest off by default with
+  Kerberos (R12), dedicated service user (R15); `require_signing` defaults to
+  true in 2.0 (R11, #64); external review before a public offering (#63).
 - Follow-ups: #55 (connection caps, timeouts, keepalive, shared inotify),
   #56 (`openat2` path resolution), #57 (lease table), #58 (interop).

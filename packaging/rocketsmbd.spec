@@ -25,11 +25,13 @@ Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 # Vendored crates (not a URL): rocketsmbd needs io-uring 0.7, newer than Fedora.
 Source1:        %{name}-%{version}-vendor.tar.xz
 Source2:        %{name}.rpmlintrc
+Source3:        %{name}.sysusers
 
 ExclusiveArch:  x86_64 aarch64
 BuildRequires:  cargo
 BuildRequires:  rust
 BuildRequires:  systemd-rpm-macros
+%{?sysusers_requires_compat}
 
 # Bundled (vendored) crates — see the header note for why.
 Provides:       bundled(crate(aead)) = 0.5.2
@@ -115,9 +117,13 @@ install -Dpm0755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
 install -Dpm0644 rocketsmbd.toml.example %{buildroot}%{_sysconfdir}/%{name}.toml
 install -Dpm0644 packaging/%{name}.service %{buildroot}%{_unitdir}/%{name}.service
 install -Dpm0644 docs/%{name}.8 %{buildroot}%{_mandir}/man8/%{name}.8
+install -Dpm0644 %{SOURCE3} %{buildroot}%{_sysusersdir}/%{name}.conf
 
 %check
 cargo test --release --offline
+
+%pre
+%sysusers_create_compat %{SOURCE3}
 
 %post
 %systemd_post %{name}.service
@@ -134,6 +140,7 @@ cargo test --release --offline
 %{_bindir}/%{name}
 %config(noreplace) %{_sysconfdir}/%{name}.toml
 %{_unitdir}/%{name}.service
+%{_sysusersdir}/%{name}.conf
 %{_mandir}/man8/%{name}.8*
 
 %changelog

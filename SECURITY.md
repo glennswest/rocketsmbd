@@ -33,7 +33,8 @@ freed when their connection dropped. An external review is still to be done
   `encrypt = true` on untrusted networks.
 - **Signing** — SMB2 HMAC-SHA256 and SMB3 AES-CMAC; SMB 3.1.1 preauth
   integrity (SHA-512). Signing is **off unless the client asks** by default
-  (`require_signing = false`); without it, an on-path attacker can tamper
+  (`require_signing` unset or `false`; unset logs a warning, and the default
+  becomes `true` in 2.0, #64); without it, an on-path attacker can tamper
   with requests, and NTLM (which has no MIC check here) can be relayed. Set
   `require_signing = true` on anything but a trusted LAN. Each MessageId is
   accepted once per connection, so captured signed or sealed requests can't
@@ -45,10 +46,11 @@ freed when their connection dropped. An external review is still to be done
     (MIT/Heimdal) — domain/AD integration. Build with `--features kerberos`.
   - **NTLMv2** against a local user database (the `ntlm` feature, on by
     default; compile out with `--no-default-features`).
-  - **Guest/anonymous** when enabled — and it is enabled by default whenever
-    no `[[user]]` exists, **including Kerberos-only configs**: set
-    `allow_guest = false` explicitly there. An unknown NTLM user is mapped to
-    guest when guest is allowed. `invalid_users` never matches a guest, so
+  - **Guest/anonymous** when enabled. Unset, `allow_guest` is true only on a
+    server with no `[[user]]` entries and no Kerberos (an enabled `[kerberos]`
+    table or `auth = "kerberos"`); releases up to 1.4.1 also allowed guest on
+    Kerberos-only configs. An unknown NTLM user is mapped to guest when guest
+    is allowed. `invalid_users` never matches a guest, so
     use `valid_users` to keep guests off a share. No account lockout yet.
   - Kerberos accepts single-leg AP-REQ exchanges only (#38).
 - **Authorization is per share** — `valid_users` / `invalid_users` /
@@ -88,8 +90,10 @@ freed when their connection dropped. An external review is still to be done
   point outside it** (like Samba's `wide links`). Clients can't create
   symlinks over SMB, so only someone with local access to the share tree can
   plant one (`openat2(RESOLVE_BENEATH)` resolution is #56). The packaged
-  systemd unit runs as root with `CAP_DAC_OVERRIDE` in its bounding set, so a
-  planted symlink reaches anything root can outside `ProtectSystem=full`.
+  systemd unit runs as the unprivileged `rocketsmbd` user with only
+  `CAP_NET_BIND_SERVICE`, so a planted symlink reaches only what that user
+  can (on `main`; releases up to 1.4.1 ran as root with `CAP_DAC_OVERRIDE` —
+  see README, "Service user", for the ownership migration).
 - **Health endpoint** — off by default. With `health_listen` set, the server
   also accepts plain HTTP on that address (`GET /healthz` only; no auth, no
   share names or paths in the reply, one request at a time with a 2 s timeout
@@ -99,11 +103,12 @@ freed when their connection dropped. An external review is still to be done
   true`, `allow_guest = false`, optionally `encrypt = true`, run as a
   dedicated unprivileged user) is reasonable beyond a trusted LAN. An
   external security review has not been done; do not expose port 445 to the
-  public internet until it has (#39).
+  public internet until it has (#63: before rocketsmbd is offered publicly).
 
 ## Hardening roadmap
 
-An external security review pass is still planned (#39). Open follow-ups from
+An external security review is planned before rocketsmbd is offered publicly
+(#63); `require_signing` defaults to true in 2.0 (#64). Open follow-ups from
 the self-review: connection caps and timeouts (#55), `openat2` path
 resolution (#56), lease-table hardening (#57).
 Done: SMB3 encryption (AES-128/256-GCM/CCM), SMB2/3 signing, Kerberos auth, an

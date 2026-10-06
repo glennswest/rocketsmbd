@@ -44,10 +44,13 @@ Advertised server name.
 0 = warn, 1 = info, 2 = debug.
 .TP
 .B allow_guest
-Allow unauthenticated guest sessions. Defaults true only when no users exist.
+Allow unauthenticated guest sessions. Unset: true only when no users exist and
+Kerberos isn't configured (no enabled \fB[kerberos]\fR table, \fBauth\fR not
+\fB"kerberos"\fR).
 .TP
 .B require_signing
-Reject unsigned requests on authenticated sessions.
+Reject unsigned requests on authenticated sessions. Unset means false and logs
+a warning; the default becomes true in 2.0. Recommended: true.
 .TP
 .B multichannel
 Advertise SMB3 multichannel and accept session binding (SMB 3.x, to an
@@ -132,10 +135,15 @@ mount -t cifs //server/data /mnt -o username=alice,password=secret,vers=3.1.1
 A self-review was done in October 2026 (docs/SECURITY-REVIEW.md), but no
 external security review yet; do not expose port 445 to the public internet. Authorization is per share (the access lists above); file I/O
 runs as the server's Unix user, so on-disk permissions don't distinguish
-clients. For untrusted
+clients. The packaged systemd unit runs it as the unprivileged \fBrocketsmbd\fR
+user (only \fBCAP_NET_BIND_SERVICE\fR): share trees, and a keytab, must be
+accessible to that user. For untrusted
 networks, use Kerberos or NTLMv2 users with \fBrequire_signing\fR and
 \fBencrypt\fR. See SECURITY.md.
 .SH FILES
+.TP
+.I /usr/lib/sysusers.d/rocketsmbd.conf
+Defines the \fBrocketsmbd\fR service user the packages create.
 .TP
 .I /etc/rocketsmbd.toml
 Configuration file installed by the packages and used by the systemd unit.

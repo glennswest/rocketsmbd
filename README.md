@@ -59,12 +59,42 @@ with io_uring ≥ 5.15) are attached to each [release](https://github.com/glenns
 
 ```sh
 # Fedora / RHEL (x86_64 or aarch64)
-sudo dnf install ./rocketsmbd-1.4.0-1.x86_64.rpm
+sudo dnf install ./rocketsmbd-1.4.1-1.x86_64.rpm
 # Debian / Ubuntu
-sudo dpkg -i ./rocketsmbd_1.4.0-1_amd64.deb
-# then edit /etc/rocketsmbd.toml and:
+sudo dpkg -i ./rocketsmbd_1.4.1-1_amd64.deb
+# then edit /etc/rocketsmbd.toml, give the service user the share trees
+# (see "Service user" below), and:
 sudo systemctl enable --now rocketsmbd
 ```
+
+### Service user
+
+From the next release on (unreleased on `main`), the packaged systemd unit runs
+rocketsmbd as the unprivileged system user **`rocketsmbd`**, created by the
+package from `/usr/lib/sysusers.d/rocketsmbd.conf`. Its only capability is
+binding port 445 (`CAP_NET_BIND_SERVICE`). Releases up to 1.4.1 ran it as
+root with `CAP_DAC_OVERRIDE`, so file permissions never stopped it (#39).
+All client file I/O happens as this user, so each share tree must be readable
+by it, and writable for shares that aren't `read_only`. A keytab must be
+readable by it too.
+
+**Migrating an existing install** before restarting the upgraded service:
+
+```sh
+# Option 1: the service user owns the share trees
+sudo chown -R rocketsmbd:rocketsmbd /srv/data
+# Option 2: keep the current owners and grant access with ACLs
+sudo setfacl -R -m u:rocketsmbd:rwX -m d:u:rocketsmbd:rwX /srv/data
+# Kerberos keytab (if used)
+sudo chgrp rocketsmbd /etc/rocketsmbd.keytab && sudo chmod 640 /etc/rocketsmbd.keytab
+sudo systemctl restart rocketsmbd
+```
+
+Once it is running, a share it can't read shows up as `ACCESS_DENIED` on the
+client and as `503` from the health endpoint, if enabled. To keep the old
+behaviour, add a drop-in with `systemctl edit rocketsmbd` containing
+`[Service]` and `User=root`. That's not recommended: as root, a symlink
+planted in a share reaches anything root can.
 
 Or build from source via [crates.io](https://crates.io/crates/rocketsmbd)
 (Linux; needs a Rust toolchain):
@@ -175,8 +205,8 @@ Unknown keys are rejected. A full example is in
 | `workers` | `0` | Worker threads, each with its own io_uring and `SO_REUSEPORT` listener. `0` = one per CPU core. |
 | `server_name` | `"ROCKETSMBD"` | Advertised server name; also the default Kerberos SPN host (`cifs/<server_name>`). |
 | `log_level` | `1` | `0` = warn, `1` = info, `2` = debug. |
-| `allow_guest` | true if there are no `[[user]]` entries, else false | Allow unauthenticated guest sessions. |
-| `require_signing` | `false` | Reject unsigned requests on authenticated sessions. |
+| `allow_guest` | true only if there are no `[[user]]` entries and Kerberos isn't configured (no enabled `[kerberos]` table, `auth` ≠ `"kerberos"`) | Allow unauthenticated guest sessions. |
+| `require_signing` | `false` (becomes `true` in 2.0; unset logs a warning) | Reject unsigned requests on authenticated sessions. Recommended: `true`. |
 | `encrypt` | `false` | Require SMB3 encryption for all post-auth traffic. A session that can't be encrypted (SMB 2.x/3.0.x, SMB 3.1.1 without a cipher, or guest) is refused. When false, encryption a client asks for (e.g. cifs `seal`) is still honored; either way, an encrypting session takes no plaintext requests. |
 | `prefer_aes256` | `false` | Pick AES-256 (GCM, then CCM) when offered, instead of the client's order. |
 | `multichannel` | `false` | Advertise SMB3 multichannel and accept session binding (SMB 3.x, to an established non-guest session only). |

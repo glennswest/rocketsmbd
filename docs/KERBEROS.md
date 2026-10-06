@@ -57,6 +57,8 @@ gssapi-sys = { version = "0.2", optional = true }
 - Keytab: path from config (`kerberos.keytab = "/etc/rocketsmbd.keytab"`), or
   fall back to `KRB5_KTNAME`. The acceptor acquires its credential for the SPN
   from this keytab via `gss_acquire_cred` (or `gss_krb5_import_cred`).
+- The keytab must be readable by the service user: the packaged unit runs as
+  `rocketsmbd` (`chgrp rocketsmbd <keytab> && chmod 640 <keytab>`).
 - AD join produces the keytab: `net ads keytab` (Samba) or `ktpass` (Windows) or
   `ipa-getkeytab` (FreeIPA). Document all three in #37's runbook.
 
