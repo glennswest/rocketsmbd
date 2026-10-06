@@ -858,8 +858,7 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
         let spn = kcfg
             .and_then(|k| k.spn.clone())
             .unwrap_or_else(|| format!("cifs/{}", srv.cfg.server_name));
-        let keytab = kcfg.and_then(|k| k.keytab.as_deref());
-        match crate::krb5::Acceptor::new(&spn, keytab) {
+        match crate::krb5::Acceptor::new(&spn) {
             Ok(a) => pc.krb_acceptor = Some(a),
             Err(e) => {
                 crate::logw!("kerberos: acceptor init failed ({e})");
@@ -1211,6 +1210,8 @@ fn create(
                     return;
                 }
             };
+            // SAFETY: c is a NUL-terminated CString alive for the call; the kernel copies
+            // the path.
             if unsafe { libc::mkdir(c.as_ptr(), 0o755) } < 0 {
                 err_resp(tx, h, status::from_errno(vfs::errno()), chain);
                 return;
@@ -1264,6 +1265,8 @@ fn create(
     let meta = match vfs::fstat_meta(fd) {
         Ok(m) => m,
         Err(e) => {
+            // SAFETY: fd was opened above and not yet stored in the handle table; this
+            // error path is its only owner.
             unsafe { libc::close(fd) };
             err_resp(tx, h, status::from_errno(e), chain);
             return;
@@ -1553,7 +1556,10 @@ fn read(
             err_resp(tx, h, status::INVALID_DEVICE_REQUEST, chain);
             return None;
         }
-        unsafe { libc::dup(of.fd) }
+        // SAFETY: the session lock is held, so of.fd can't be closed under us;
+        // the dup (close-on-exec) is owned by the caller — closed below, or by
+        // the reactor via the ZcReadPlan.
+        unsafe { libc::fcntl(of.fd, libc::F_DUPFD_CLOEXEC, 0) }
     };
     if dup < 0 {
         err_resp(tx, h, status::INSUFFICIENT_RESOURCES, chain);
@@ -1587,6 +1593,8 @@ fn read(
     // Buffered path (small reads, compounds, signed) — lock-free pread.
     let mut buf = vec![0u8; length as usize];
     let res = vfs::pread(dup, &mut buf, offset);
+    // SAFETY: dup is owned solely by this buffered-read path (it was not handed to a
+    // ZcReadPlan); closed once.
     unsafe { libc::close(dup) };
     match res {
         Ok(0) if length > 0 => err_resp(tx, h, status::END_OF_FILE, chain),
@@ -2179,12 +2187,16 @@ fn set_basic_info(of: &vfs::OpenFile, data: &[u8]) -> u32 {
         } else {
             let unix100 = ft as i64 - 116_444_736_000_000_000;
             libc::timespec {
-                tv_sec: (unix100 / 10_000_000) as _,
-                tv_nsec: ((unix100 % 10_000_000) * 100) as _,
+                // Euclidean: pre-1970 times keep tv_nsec in 0..1e9 (futimens
+                // rejects a negative one with EINVAL).
+                tv_sec: unix100.div_euclid(10_000_000) as _,
+                tv_nsec: (unix100.rem_euclid(10_000_000) * 100) as _,
             }
         }
     }
     let times = [ts(at), ts(mt)];
+    // SAFETY: times is a live [timespec; 2], exactly what futimens reads; of.fd is held
+    // under the session lock.
     if unsafe { libc::futimens(of.fd, times.as_ptr()) } < 0 {
         // Attribute-only updates (archive bit etc.) succeed as a no-op.
         let e = vfs::errno();

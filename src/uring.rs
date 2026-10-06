@@ -84,11 +84,15 @@ pub fn probe_io_uring() -> Result<(), String> {
 /// MaxReadSize is bounded by it so a zero-copy READ always fits the pipe.
 pub fn probe_pipe_size(want: u32) -> u32 {
     let mut fds = [0i32; 2];
+    // SAFETY: fds is a live [c_int; 2], exactly what pipe2 writes.
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
         return 64 * 1024;
     }
+    // SAFETY: integer-only fcntls on the pipe just created; a failed resize is tolerated
+    // (the size is read back).
     unsafe { libc::fcntl(fds[0], libc::F_SETPIPE_SZ, want as libc::c_int) };
     let got = unsafe { libc::fcntl(fds[0], libc::F_GETPIPE_SZ) };
+    // SAFETY: both fds were created above and are owned only here; each is closed once.
     unsafe {
         libc::close(fds[0]);
         libc::close(fds[1]);
@@ -174,6 +178,10 @@ struct Conn {
 
 impl Drop for Conn {
     fn drop(&mut self) {
+        // SAFETY: Conn uniquely owns its socket, pipe, inotify and dup'd fds and is only
+        // dropped (finalize_close) once inflight == 0, so no SQE still references them or
+        // its buffers. Each fd below is closed exactly once (zc and pending_zc
+        // are take()n); this covers every close in this Drop.
         unsafe { libc::close(self.fd) };
         if let Some((r, w)) = self.pipe {
             unsafe {
@@ -184,9 +192,13 @@ impl Drop for Conn {
         if let Some(ifd) = self.inotify_fd {
             unsafe { libc::close(ifd) };
         }
-        // A zero-copy read in flight owns a dup'd file fd.
+        // A zero-copy read in flight owns a dup'd file fd, and so does one
+        // still queued behind a buffered send.
         if let Some(zc) = self.zc.take() {
             unsafe { libc::close(zc.plan.fd) };
+        }
+        if let Some(plan) = self.pending_zc.take() {
+            unsafe { libc::close(plan.fd) };
         }
     }
 }
@@ -238,7 +250,6 @@ pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
             if send_zc_ok { "supported" } else { "unsupported (kernel < 5.19) — using copying send" }
         );
     }
-    let mut ring = ring;
     let mut w = Worker {
         srv,
         wid,
@@ -250,6 +261,10 @@ pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
         send_zc_ok,
         wake_buf: 0,
     };
+    // Declared after `w` so it drops first: if this function unwinds, the
+    // ring (and with it every armed op) must be gone before the Worker frees
+    // the connection buffers and `wake_buf` those ops point into.
+    let mut ring = ring;
     arm_accept(&mut ring, &w);
     arm_wake(&mut ring, &mut w);
     logd!("worker {wid} ready");
@@ -259,7 +274,13 @@ pub fn run_worker(wid: usize, srv: Arc<Srv>) -> std::io::Result<()> {
         match ring.submit_and_wait(1) {
             Ok(_) => {}
             Err(e) if e.raw_os_error() == Some(libc::EINTR) => continue,
-            Err(e) => return Err(e),
+            Err(e) => {
+                // Ops may still be armed: tear the ring down, then leak the
+                // Worker rather than free buffers the kernel could still write.
+                drop(ring);
+                std::mem::forget(w);
+                return Err(e);
+            }
         }
         cqes.clear();
         {
@@ -283,11 +304,14 @@ const CQE_F_NOTIF: u32 = 1 << 3;
 /// each ring, its NIC softirqs, and its cache footprint on a single core,
 /// avoiding cross-core traffic under SO_REUSEPORT. Best-effort.
 fn pin_to_core(wid: usize) {
+    // SAFETY: sysconf takes and returns integers only.
     let ncpu = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
     if ncpu <= 0 {
         return;
     }
     let core = wid % ncpu as usize;
+    // SAFETY: cpu_set_t is POD (zeroed is valid); set is a live local whose exact size is
+    // passed to sched_setaffinity.
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_ZERO(&mut set);
@@ -298,11 +322,15 @@ fn pin_to_core(wid: usize) {
 
 fn listener(addr: &std::net::SocketAddr) -> std::io::Result<RawFd> {
     let (domain, sa, sa_len) = sockaddr(addr);
+    // SAFETY: integer-only syscall; the new fd is owned here (closed on error below, else
+    // returned).
     let fd = unsafe { libc::socket(domain, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
     let one: libc::c_int = 1;
+    // SAFETY: &one is a live c_int with optlen 4; sa is a live sockaddr_storage and sa_len
+    // is the size of the family struct copied into it; fd is closed once on error.
     unsafe {
         libc::setsockopt(
             fd,
@@ -330,6 +358,7 @@ fn listener(addr: &std::net::SocketAddr) -> std::io::Result<RawFd> {
 }
 
 fn sockaddr(addr: &std::net::SocketAddr) -> (libc::c_int, libc::sockaddr_storage, libc::socklen_t) {
+    // SAFETY: sockaddr_storage is POD; all-zero is valid.
     let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     match addr {
         std::net::SocketAddr::V4(a) => {
@@ -339,6 +368,8 @@ fn sockaddr(addr: &std::net::SocketAddr) -> (libc::c_int, libc::sockaddr_storage
                 sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) },
                 sin_zero: [0; 8],
             };
+            // SAFETY: sockaddr_in fits in sockaddr_storage; distinct locals (non-
+            // overlapping) POD byte copy.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     &sa as *const _ as *const u8,
@@ -356,6 +387,8 @@ fn sockaddr(addr: &std::net::SocketAddr) -> (libc::c_int, libc::sockaddr_storage
                 sin6_addr: libc::in6_addr { s6_addr: a.ip().octets() },
                 sin6_scope_id: a.scope_id(),
             };
+            // SAFETY: sockaddr_in6 fits in sockaddr_storage; distinct locals (non-
+            // overlapping) POD byte copy.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     &sa as *const _ as *const u8,
@@ -370,6 +403,11 @@ fn sockaddr(addr: &std::net::SocketAddr) -> (libc::c_int, libc::sockaddr_storage
 
 fn sq_push(ring: &mut IoUring, e: &squeue::Entry) {
     loop {
+        // SAFETY: every pointer in an SQE targets a heap buffer owned by a Conn (rx tail /
+        // tx / ibuf) or w.wake_buf, none of which is resized, replaced or freed until that
+        // op's CQE: conn ops are counted in `inflight` and a Conn drops only at 0;
+        // rx/tx/ibuf change only when their op is not armed. run_worker drops the ring
+        // before the Worker.
         if unsafe { ring.submission().push(e) }.is_ok() {
             return;
         }
@@ -513,8 +551,20 @@ fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32, flags: u
     }
 }
 
+/// Connection slots per worker: `ud()` packs the slot index into 24 bits and
+/// reserves 0xFF_FFFF as the cancel sentinel, so a larger index would route
+/// completions to the wrong connection.
+const MAX_CONN_SLOTS: usize = 0xFF_FFFF;
+
 fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
+    if w.free.is_empty() && w.conns.len() >= MAX_CONN_SLOTS {
+        logw!("worker {}: connection slots exhausted, refusing a connection", w.wid);
+        // SAFETY: fd was just accepted and is owned only here.
+        unsafe { libc::close(fd) };
+        return;
+    }
     let one: libc::c_int = 1;
+    // SAFETY: &one is a live c_int with optlen 4; fd is the just-accepted socket.
     unsafe {
         libc::setsockopt(
             fd,
@@ -583,6 +633,12 @@ fn close_conn_ring(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     }
     if c.inflight == 0 {
         finalize_close(w, idx);
+    } else {
+        // An armed recv only completes when the peer acts; shut the socket
+        // down so it (and any send) completes now and the connection drains
+        // instead of lingering until the client goes away.
+        // SAFETY: integer-only syscall on the socket this Conn owns.
+        unsafe { libc::shutdown(c.fd, libc::SHUT_RDWR) };
     }
 }
 
@@ -755,6 +811,8 @@ fn service_notify(ring: &mut IoUring, w: &mut Worker, idx: usize) {
 
     for pend in new {
         if c.inotify_fd.is_none() {
+            // SAFETY: integer-only syscall; the fd becomes owned by this Conn (closed in
+            // Drop or on_inotify).
             let ifd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
             if ifd < 0 {
                 complete_notify(c, &pend, status::INSUFFICIENT_RESOURCES, &[]);
@@ -766,6 +824,8 @@ fn service_notify(ring: &mut IoUring, w: &mut Worker, idx: usize) {
         }
         let ifd = c.inotify_fd.unwrap();
         let wd = match crate::vfs::cpath(&pend.path) {
+            // SAFETY: cp is a NUL-terminated CString alive for the call; the kernel copies
+            // the path.
             Ok(cp) => unsafe { libc::inotify_add_watch(ifd, cp.as_ptr(), IN_MASK) },
             Err(_) => -1,
         };
@@ -784,6 +844,8 @@ fn service_notify(ring: &mut IoUring, w: &mut Worker, idx: usize) {
             // the kernel watch when the last one goes.
             if !c.watches.iter().any(|x| x.wd == watch.wd) {
                 if let Some(ifd) = c.inotify_fd {
+                    // SAFETY: integer-only syscall on our own inotify fd; a stale wd just
+                    // yields EINVAL.
                     unsafe { libc::inotify_rm_watch(ifd, watch.wd) };
                 }
             }
@@ -823,6 +885,8 @@ fn on_inotify(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
     if res <= 0 {
         // inotify instance died; pending notifies will complete via
         // cancel/close paths.
+        // SAFETY: the inotify Read just completed (none armed), and take() makes this the
+        // only close of fd.
         conn_mut(w, idx).inotify_fd.take().map(|fd| unsafe { libc::close(fd) });
         return;
     }
@@ -877,6 +941,8 @@ fn on_inotify(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
             fired.push((watch, events.clone()));
         }
         if let Some(ifd) = c.inotify_fd {
+            // SAFETY: integer-only syscall on our own inotify fd; a stale wd just yields
+            // EINVAL.
             unsafe { libc::inotify_rm_watch(ifd, wd) };
         }
     }
@@ -1010,10 +1076,14 @@ fn start_zc(ring: &mut IoUring, w: &mut Worker, idx: usize, plan: ZcReadPlan) {
     debug_assert!(c.tx.is_empty());
     if c.pipe.is_none() {
         let mut fds = [0i32; 2];
+        // SAFETY: fds is a live [c_int; 2]; on success the pair is owned by this Conn
+        // (closed in Drop).
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
             let mut tx = std::mem::take(&mut c.tx);
             smb2::build_read_err(&plan, status::INSUFFICIENT_RESOURCES, &mut tx);
             // The plan owns a dup of the file fd; release it on this error path.
+            // SAFETY: plan.fd is the READ's dup, owned by this plan alone and never
+            // submitted to the ring; closed once.
             unsafe { libc::close(plan.fd) };
             c.tx = tx;
             c.tx_off = 0;
@@ -1021,6 +1091,8 @@ fn start_zc(ring: &mut IoUring, w: &mut Worker, idx: usize, plan: ZcReadPlan) {
             submit_send(ring, w, idx, 0);
             return;
         }
+        // SAFETY: integer-only fcntls on our new pipe; a failed resize is tolerated (the
+        // size is read back).
         unsafe { libc::fcntl(fds[0], libc::F_SETPIPE_SZ, max_read as libc::c_int) };
         let got = unsafe { libc::fcntl(fds[0], libc::F_GETPIPE_SZ) };
         c.pipe = Some((fds[0], fds[1]));
@@ -1131,6 +1203,8 @@ fn on_linked_cqe(ring: &mut IoUring, w: &mut Worker, idx: usize, op: u8, res: i3
     }
     let dupfd = zc.plan.fd;
     c.zc = None;
+    // SAFETY: all three linked CQEs have arrived (chain == 0), so no SQE references dupfd;
+    // zc was cleared first, so Drop won't close it again.
     unsafe { libc::close(dupfd) };
     c.tx.clear();
     c.tx_off = 0;
@@ -1188,6 +1262,9 @@ fn zc_fail(ring: &mut IoUring, w: &mut Worker, idx: usize, st: u32) {
         let mut left = zc.got as usize;
         let mut scratch = [0u8; 16384];
         while left > 0 {
+            // SAFETY: reads at most min(16 KiB, left) bytes into the live stack buffer
+            // `scratch`; no splice is in flight and the pipe holds exactly zc.got bytes, so
+            // this blocking read cannot stall.
             let n = unsafe {
                 libc::read(pipe_r, scratch.as_mut_ptr() as *mut libc::c_void, scratch.len().min(left))
             };
@@ -1200,6 +1277,8 @@ fn zc_fail(ring: &mut IoUring, w: &mut Worker, idx: usize, st: u32) {
     let mut tx = std::mem::take(&mut c.tx);
     smb2::build_read_err(&zc.plan, st, &mut tx);
     // Release the plan's dup'd file fd.
+    // SAFETY: zc was take()n and no splice referencing plan.fd is in flight (this is its
+    // completion), so this is the only close.
     unsafe { libc::close(zc.plan.fd) };
     c.tx = tx;
     c.tx_off = 0;
@@ -1241,6 +1320,8 @@ fn on_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
     }
     // Zero-copy read done: release the plan's dup'd file fd.
     if let Some(zc) = c.zc.take() {
+        // SAFETY: the final splice-out completed (nothing in flight uses plan.fd) and zc
+        // was take()n, so no double close.
         unsafe { libc::close(zc.plan.fd) };
     }
     c.tx.clear();

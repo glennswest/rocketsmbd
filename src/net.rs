@@ -47,17 +47,24 @@ fn link_speed_bps(name: &str, loopback: bool) -> u64 {
 pub fn interfaces() -> Vec<Iface> {
     let mut out = Vec::new();
     let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: ifap is a live out-pointer; on success the list is ours and is freed exactly
+    // once below (no early return in between).
     if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
         return out;
     }
     let mut cur = ifap;
     while !cur.is_null() {
+        // SAFETY: cur is non-null and points into the getifaddrs list, alive until
+        // freeifaddrs after the loop.
         let ifa = unsafe { &*cur };
         cur = ifa.ifa_next;
         if ifa.ifa_addr.is_null() {
             continue;
         }
+        // SAFETY: ifa_addr was null-checked above and points into the live ifaddrs list.
         let family = unsafe { (*ifa.ifa_addr).sa_family } as i32;
+        // SAFETY: getifaddrs guarantees ifa_name is a non-null NUL-terminated string living
+        // as long as the list; it is copied before the list is freed.
         let name = unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }
             .to_string_lossy()
             .into_owned();
@@ -68,15 +75,20 @@ pub fn interfaces() -> Vec<Iface> {
         }
         let addr = match family {
             libc::AF_INET => {
+                // SAFETY: sa_family == AF_INET, so libc allocated (and aligned) at least a
+                // sockaddr_in at ifa_addr.
                 let sa = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
                 IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(sa.sin_addr.s_addr)))
             }
             libc::AF_INET6 => {
+                // SAFETY: sa_family == AF_INET6, so libc allocated (and aligned) a full
+                // sockaddr_in6 at ifa_addr.
                 let sa = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in6) };
                 IpAddr::V6(std::net::Ipv6Addr::from(sa.sin6_addr.s6_addr))
             }
             _ => continue,
         };
+        // SAFETY: ifa_name is a valid NUL-terminated string in the still-live ifaddrs list.
         let index = unsafe { libc::if_nametoindex(ifa.ifa_name) };
         out.push(Iface {
             index,
@@ -86,6 +98,8 @@ pub fn interfaces() -> Vec<Iface> {
             loopback,
         });
     }
+    // SAFETY: ifap came from a successful getifaddrs and is freed exactly once; nothing
+    // borrowed from it survives (names/addrs were copied).
     unsafe { libc::freeifaddrs(ifap) };
     out
 }

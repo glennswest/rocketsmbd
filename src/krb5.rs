@@ -34,6 +34,9 @@ struct GssBufferSetDesc {
 }
 type GssBufferSetT = *mut GssBufferSetDesc;
 
+// SAFETY (FFI declarations): these prototypes match MIT krb5 `gssapi_ext.h`
+// (and Heimdal) in types, argument order and return type; `GssBufferSetDesc`
+// mirrors `gss_buffer_set_desc { size_t count; gss_buffer_desc *elements; }`.
 extern "C" {
     fn gss_inquire_sec_context_by_oid(
         minor_status: *mut gss::OM_uint32,
@@ -94,19 +97,28 @@ pub struct Acceptor {
     cred: gss::gss_cred_id_t,
 }
 
-// The credential handle is owned by this worker's Acceptor and only touched on
-// that worker's thread; we never move it across threads.
+// SAFETY: a gss_cred_id_t has no thread affinity in MIT/Heimdal, so moving the
+// owning Acceptor to another thread is fine; Acceptor is !Sync, so the handle is
+// never used from two threads at once (in practice it stays on one worker).
 unsafe impl Send for Acceptor {}
+
+/// Point the GSS library at the configured keytab (`KRB5_KTNAME`). Must be
+/// called once at startup, before any worker or health thread exists:
+/// `setenv` while another thread calls C `getenv` (GSS does, per accept) is a
+/// use-after-free in glibc.
+pub fn set_keytab_env(keytab: Option<&std::path::Path>) {
+    if let Some(kt) = keytab {
+        std::env::set_var("KRB5_KTNAME", kt);
+    }
+}
 
 impl Acceptor {
     /// Acquire the acceptor credential for `spn` (e.g. `cifs/host.example.com`)
-    /// from `keytab` (or the default keytab / `$KRB5_KTNAME` when `None`).
-    pub fn new(spn: &str, keytab: Option<&std::path::Path>) -> Result<Acceptor, String> {
-        // The keytab is selected per-process via the krb5 env var; set it
-        // before acquiring the credential so the GSS layer reads from it.
-        if let Some(kt) = keytab {
-            std::env::set_var("KRB5_KTNAME", kt);
-        }
+    /// from the keytab `$KRB5_KTNAME` names (set once at startup by
+    /// [`set_keytab_env`]) or the system default keytab.
+    pub fn new(spn: &str) -> Result<Acceptor, String> {
+        // SAFETY: name is released on every path; cred is only wrapped in an
+        // Acceptor on GSS_S_COMPLETE. Optional out-params are NULL.
         unsafe {
             // Import the SPN. SMB SPNs are `service/host`; the GSS hostbased
             // form is `service@host`, so translate the first `/`.
@@ -140,6 +152,8 @@ impl Acceptor {
 
 impl Drop for Acceptor {
     fn drop(&mut self) {
+        // SAFETY: cred came from a successful gss_acquire_cred and is released exactly once
+        // (gss_release_cred nulls it).
         unsafe {
             let mut minor: gss::OM_uint32 = 0;
             gss::gss_release_cred(&mut minor, &mut self.cred);
@@ -157,6 +171,9 @@ impl AcceptCtx<'_> {
     /// Feed one client token (the GSS AP-REQ, unwrapped from SPNEGO by
     /// `spnego::classify`). On completion, extracts the session key.
     pub fn step(&mut self, token: &[u8]) -> Step {
+        // SAFETY: input borrows `token` for the call only (GSS treats it as const); output
+        // and src_name are GSS-allocated and released on every path (take_buf /
+        // release_name); ctx is owned by self and freed in Drop.
         unsafe {
             let mut minor: gss::OM_uint32 = 0;
             let mut input = buf_from(token);
@@ -198,6 +215,9 @@ impl AcceptCtx<'_> {
 
     /// Extract the session key via `gss_inquire_sec_context_by_oid`.
     fn session_key(&self) -> Result<Vec<u8>, String> {
+        // SAFETY: oid_val outlives the call; set is null-checked, element 0 and its value
+        // are null-checked before from_raw_parts, and set is released on every path after
+        // the copy.
         unsafe {
             let mut minor: gss::OM_uint32 = 0;
             let mut oid_val = SESSION_KEY_OID.to_vec();
@@ -212,11 +232,19 @@ impl AcceptCtx<'_> {
                 &oid as *const _ as gss::gss_OID,
                 &mut set,
             );
-            if major != gss::GSS_S_COMPLETE || set.is_null() || (*set).count == 0 {
+            if major != gss::GSS_S_COMPLETE || set.is_null() {
                 return Err(status_str(major, minor));
             }
-            let b = &*(*set).elements;
-            let key = std::slice::from_raw_parts(b.value as *const u8, b.length).to_vec();
+            let key = if (*set).count == 0 || (*set).elements.is_null() {
+                Vec::new()
+            } else {
+                let b = &*(*set).elements;
+                if b.value.is_null() {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(b.value as *const u8, b.length).to_vec()
+                }
+            };
             gss_release_buffer_set(&mut minor, &mut set);
             if key.is_empty() {
                 return Err("empty session key".into());
@@ -228,6 +256,8 @@ impl AcceptCtx<'_> {
 
 impl Drop for AcceptCtx<'_> {
     fn drop(&mut self) {
+        // SAFETY: ctx is NO_CONTEXT or a live context owned solely by this AcceptCtx;
+        // deleted once, and GSS resets the handle.
         unsafe {
             if !self.ctx.is_null() {
                 let mut minor: gss::OM_uint32 = 0;
@@ -239,6 +269,8 @@ impl Drop for AcceptCtx<'_> {
 
 // ----------------------------------------------------------- FFI helper glue
 
+// SAFETY: (# Safety) returns an owned gss_name_t the caller must release_name exactly once;
+// `bytes` outlives gss_import_name, which copies it.
 unsafe fn import_name(s: &str) -> Result<gss::gss_name_t, String> {
     let mut minor: gss::OM_uint32 = 0;
     let mut bytes = s.as_bytes().to_vec();
@@ -260,6 +292,8 @@ unsafe fn import_name(s: &str) -> Result<gss::gss_name_t, String> {
     Ok(name)
 }
 
+// SAFETY: (# Safety) name must be NULL or a live GSS-owned name not released elsewhere;
+// consumed here.
 unsafe fn release_name(mut name: gss::gss_name_t) {
     if !name.is_null() {
         let mut minor: gss::OM_uint32 = 0;
@@ -267,6 +301,8 @@ unsafe fn release_name(mut name: gss::gss_name_t) {
     }
 }
 
+// SAFETY: (# Safety) name must be NULL or live; the display buffer is copied and released
+// by take_buf; the returned name-type OID is static and not freed.
 unsafe fn display_name(name: gss::gss_name_t) -> String {
     if name.is_null() {
         return String::new();
@@ -277,13 +313,7 @@ unsafe fn display_name(name: gss::gss_name_t) -> String {
     if gss::gss_display_name(&mut minor, name, &mut out, &mut oid) != gss::GSS_S_COMPLETE {
         return String::new();
     }
-    let s = String::from_utf8_lossy(std::slice::from_raw_parts(
-        out.value as *const u8,
-        out.length,
-    ))
-    .into_owned();
-    gss::gss_release_buffer(&mut minor, &mut out);
-    s
+    String::from_utf8_lossy(&take_buf(&mut out)).into_owned()
 }
 
 /// Read the PAC off an accepted client name and decode its LOGON_INFO. Tries
@@ -291,6 +321,9 @@ unsafe fn display_name(name: gss::gss_name_t) -> String {
 /// (`urn:mspac:`); a PAC without LOGON_INFO (MIT KDC) is "no groups". Only an *authenticated* attribute is used: the
 /// GSS library sets that once it has verified the PAC's server signature with
 /// our service key, so a client can't forge group membership.
+// SAFETY: (# Safety) name must be NULL or a live mechanism name from accept; attr borrows a
+// 'static str (read-only to GSS); value/display are GSS-allocated and released via take_buf
+// on every path; more = -1 per RFC 6680.
 unsafe fn name_pac(name: gss::gss_name_t, client: &str) -> Option<crate::pac::LogonInfo> {
     if name.is_null() {
         return None;
@@ -340,6 +373,8 @@ unsafe fn name_pac(name: gss::gss_name_t, client: &str) -> Option<crate::pac::Lo
     None
 }
 
+// SAFETY: the returned descriptor borrows `b`; use it only as a GSS *input* buffer (never
+// written or released) while `b` is alive.
 unsafe fn buf_from(b: &[u8]) -> gss::gss_buffer_desc {
     gss::gss_buffer_desc {
         length: b.len(),
@@ -347,13 +382,17 @@ unsafe fn buf_from(b: &[u8]) -> gss::gss_buffer_desc {
     }
 }
 
+// SAFETY: an empty output descriptor for GSS to fill; whatever GSS stores must be released
+// with take_buf.
 unsafe fn empty_buf() -> gss::gss_buffer_desc {
     gss::gss_buffer_desc { length: 0, value: ptr::null_mut() }
 }
 
 /// Copy an output buffer to a Vec and release the GSS-allocated storage.
+// SAFETY: (# Safety) b must be a GSS-allocated output buffer or empty; copied when value is
+// non-null, then released exactly once.
 unsafe fn take_buf(b: &mut gss::gss_buffer_desc) -> Vec<u8> {
-    if b.value.is_null() || b.length == 0 {
+    if b.value.is_null() {
         return Vec::new();
     }
     let v = std::slice::from_raw_parts(b.value as *const u8, b.length).to_vec();
@@ -390,6 +429,8 @@ fn display_status(value: gss::OM_uint32, status_type: i32) -> String {
     let mut msg_ctx: gss::OM_uint32 = 0;
     // Bound the loop defensively; GSS sets msg_ctx back to 0 when done.
     for _ in 0..8 {
+        // SAFETY: buf is a fresh output descriptor, copied only when non-null and released
+        // each iteration; msg_ctx is a live local.
         unsafe {
             let mut minor: gss::OM_uint32 = 0;
             let mut buf = empty_buf();

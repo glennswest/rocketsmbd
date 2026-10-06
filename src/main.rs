@@ -59,7 +59,12 @@ fn run(cfg: Config) {
         die(&e);
     }
     // splice()d sends must not raise SIGPIPE on dead sockets.
+    // SAFETY: installs SIG_IGN (no Rust handler runs) before any thread exists.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    // The keytab is chosen via the environment; set it while still
+    // single-threaded (setenv races C getenv in other threads).
+    #[cfg(feature = "kerberos")]
+    rocketsmbd::krb5::set_keytab_env(cfg.kerberos.as_ref().and_then(|k| k.keytab.as_deref()));
 
     let mut guid = [0u8; 16];
     config::urandom(&mut guid);

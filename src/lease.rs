@@ -139,6 +139,8 @@ impl Mailbox {
     pub fn new() -> std::io::Result<Self> {
         #[cfg(target_os = "linux")]
         let efd = {
+            // SAFETY: creates a new fd, no pointers; ownership passes to Mailbox, which
+            // closes it in Drop.
             let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
             if fd < 0 {
                 return Err(std::io::Error::last_os_error());
@@ -162,6 +164,9 @@ impl Mailbox {
         self.queue.lock().unwrap().push(msg);
         if self.efd >= 0 {
             let one: u64 = 1;
+            // SAFETY: writes exactly 8 bytes from a live local u64, as eventfd requires;
+            // efd is open while self lives. EAGAIN on overflow is harmless (counter already
+            // non-zero).
             unsafe {
                 libc::write(self.efd, &one as *const u64 as *const libc::c_void, 8);
             }
@@ -177,6 +182,8 @@ impl Mailbox {
 impl Drop for Mailbox {
     fn drop(&mut self) {
         if self.efd >= 0 {
+            // SAFETY: Mailbox uniquely owns efd; closed exactly once here (an armed ring
+            // Read holds its own file reference).
             unsafe { libc::close(self.efd) };
         }
     }
@@ -274,6 +281,8 @@ mod tests {
         mb.post(msg());
         // EFD_NONBLOCK read returns the accumulated counter (2) and clears it.
         let mut v: u64 = 0;
+        // SAFETY: reads at most 8 bytes into a live local u64; mb (and its eventfd) outlive
+        // the call.
         let n = unsafe { libc::read(mb.event_fd(), &mut v as *mut u64 as *mut libc::c_void, 8) };
         assert_eq!(n, 8);
         assert_eq!(v, 2);

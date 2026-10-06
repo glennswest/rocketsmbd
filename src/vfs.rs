@@ -87,6 +87,11 @@ pub fn stat_meta(p: &Path) -> Result<Meta, i32> {
 }
 
 pub fn fstat_meta(fd: RawFd) -> Result<Meta, i32> {
+    if fd < 0 {
+        return Err(libc::EBADF);
+    }
+    // SAFETY: fd >= 0 (OwnedFd's -1 niche is excluded) and the caller holds it
+    // open for this call; ManuallyDrop borrows it without ever closing it.
     let f = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
     f.metadata()
         .map(|m| meta_from_std(&m))
@@ -123,6 +128,7 @@ pub fn cpath(p: &Path) -> Result<CString, i32> {
 
 pub fn open_raw(p: &Path, flags: i32, mode: u32) -> Result<RawFd, i32> {
     let c = cpath(p)?;
+    // SAFETY: c is a NUL-terminated CString alive for the call; open copies the path.
     let fd = unsafe { libc::open(c.as_ptr(), flags | libc::O_CLOEXEC, mode) };
     if fd < 0 {
         Err(errno())
@@ -137,6 +143,8 @@ pub fn errno() -> i32 {
 
 pub fn pread(fd: RawFd, buf: &mut [u8], off: u64) -> Result<usize, i32> {
     loop {
+        // SAFETY: buf is an exclusively borrowed slice; the kernel writes at most buf.len()
+        // bytes into it.
         let n = unsafe {
             libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), off as libc::off_t)
         };
@@ -152,6 +160,8 @@ pub fn pread(fd: RawFd, buf: &mut [u8], off: u64) -> Result<usize, i32> {
 
 pub fn pwrite_all(fd: RawFd, mut buf: &[u8], mut off: u64) -> Result<(), i32> {
     while !buf.is_empty() {
+        // SAFETY: buf is a live slice; the kernel reads at most buf.len() bytes, and n <=
+        // buf.len() keeps the re-slice in bounds.
         let n = unsafe {
             libc::pwrite(fd, buf.as_ptr() as *const libc::c_void, buf.len(), off as libc::off_t)
         };
@@ -169,6 +179,7 @@ pub fn pwrite_all(fd: RawFd, mut buf: &[u8], mut off: u64) -> Result<(), i32> {
 }
 
 pub fn ftruncate(fd: RawFd, len: u64) -> Result<(), i32> {
+    // SAFETY: integer-only syscall; a bad fd yields EBADF.
     if unsafe { libc::ftruncate(fd, len as libc::off_t) } < 0 {
         Err(errno())
     } else {
@@ -188,6 +199,8 @@ pub enum LockKind {
 pub fn range_lock(fd: RawFd, off: u64, len: u64, kind: LockKind) -> Result<(), i32> {
     let start = off.min(i64::MAX as u64) as i64;
     let l_len = len.min((i64::MAX as u64) - start as u64) as i64;
+    // SAFETY: libc::flock is a POD C struct; all-zero is valid (and l_pid must be 0 for OFD
+    // locks).
     let mut fl: libc::flock = unsafe { std::mem::zeroed() };
     fl.l_type = match kind {
         LockKind::Shared => libc::F_RDLCK as _,
@@ -201,6 +214,8 @@ pub fn range_lock(fd: RawFd, off: u64, len: u64, kind: LockKind) -> Result<(), i
     let cmd = libc::F_OFD_SETLK;
     #[cfg(not(target_os = "linux"))]
     let cmd = libc::F_SETLK; // dev-host fallback; semantics differ slightly
+    // SAFETY: F_OFD_SETLK/F_SETLK take a *const flock; fl is a fully initialized local
+    // alive for the call.
     if unsafe { libc::fcntl(fd, cmd, &fl) } < 0 {
         Err(errno())
     } else {
@@ -209,6 +224,7 @@ pub fn range_lock(fd: RawFd, off: u64, len: u64, kind: LockKind) -> Result<(), i
 }
 
 pub fn fsync(fd: RawFd) -> Result<(), i32> {
+    // SAFETY: integer-only syscall; a bad fd yields EBADF.
     if unsafe { libc::fsync(fd) } < 0 {
         Err(errno())
     } else {
@@ -222,6 +238,7 @@ pub fn fsync(fd: RawFd) -> Result<(), i32> {
 /// Best-effort: ignored on platforms/filesystems without the syscall.
 pub fn advise_sequential(fd: RawFd) {
     #[cfg(target_os = "linux")]
+    // SAFETY: advisory integer-only syscall; the result is ignored.
     unsafe {
         libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
     }
@@ -232,6 +249,8 @@ pub fn advise_sequential(fd: RawFd) {
 /// (total_units, caller_avail_units, actual_avail_units, sectors_per_unit, bytes_per_sector)
 #[allow(clippy::unnecessary_cast)] // statvfs field widths differ across platforms
 pub fn fs_sizes(fd: RawFd) -> Result<(u64, u64, u64, u32, u32), i32> {
+    // SAFETY: libc::statvfs is a POD C struct (zeroed is valid); fstatvfs writes only
+    // within the live, exclusively borrowed `s`.
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstatvfs(fd, &mut s) } < 0 {
         return Err(errno());
@@ -281,6 +300,8 @@ pub struct OpenFile {
 impl Drop for OpenFile {
     fn drop(&mut self) {
         if self.fd >= 0 {
+            // SAFETY: OpenFile uniquely owns fd (not Clone; I/O paths dup it), so this is
+            // the only close.
             unsafe { libc::close(self.fd) };
         }
     }
