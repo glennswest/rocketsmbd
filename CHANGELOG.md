@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-10-06
+- **build(#41):** `deploy/release-artifacts.sh <tag>` builds a tag's release artifacts through `sc-build` (static musl x86_64/aarch64 binaries, .deb, .rpm, src.rpm) from `git archive <tag>`, checks the shipped config, and prints each artifact base64-encoded for decoding on the caller's side. Releases no longer depend on GitHub Actions; docs/RELEASING.md has the steps.
+
 ## [v1.4.1] — 2026-10-06
 
 ### Fixed
