@@ -920,7 +920,19 @@ mod tests {
     use crate::fuzzing::test_srv;
     use crate::wire::utf16le;
 
-    fn req_hdr(cmd: u16, msg_id: u64, tree: u32, sess: u64) -> Vec<u8> {
+    thread_local! {
+        static NEXT_MSG_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A request header. MessageIds come from a per-test-thread counter: each
+    /// id may be used once per connection (#39 R9), and the fixtures reuse
+    /// the literal they pass, which is kept only as a label.
+    fn req_hdr(cmd: u16, _label: u64, tree: u32, sess: u64) -> Vec<u8> {
+        let msg_id = NEXT_MSG_ID.with(|n| {
+            let v = n.get();
+            n.set(v + 1);
+            v
+        });
         let mut v: Vec<u8> = Vec::with_capacity(64);
         v.pbytes(&[0xFE, b'S', b'M', b'B']);
         v.p16(64);
@@ -1887,5 +1899,280 @@ mod tests {
         }
         assert_eq!(off, tx.len(), "exactly two framed responses");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------ #39 security review
+
+    /// Like `roundtrip`, but returns the FrameAction kind and the raw tx.
+    fn send(srv: &Srv, pc: &mut ProtoConn, frame: &[u8]) -> (bool, Vec<u8>) {
+        let mut tx = Vec::new();
+        let closed = matches!(process_frame(srv, pc, frame, &mut tx), FrameAction::Close);
+        (closed, tx)
+    }
+
+    fn with_msg_id(mut f: Vec<u8>, id: u64) -> Vec<u8> {
+        f[24..32].copy_from_slice(&id.to_le_bytes());
+        f
+    }
+
+    fn echo(sess: u64) -> Vec<u8> {
+        let mut f = req_hdr(CMD_ECHO, 0, 0, sess);
+        f.p16(4);
+        f.p16(0);
+        f
+    }
+
+    #[cfg(feature = "ntlm")]
+    fn ntlm_negotiate_leg(sess: u64, binding: bool) -> Vec<u8> {
+        let mut blob = crate::ntlm::SIG.to_vec();
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        let mut f = req_hdr(CMD_SESSION_SETUP, 0, 0, sess);
+        f.p16(25);
+        f.p8(if binding { 1 } else { 0 });
+        f.p8(1);
+        f.p32(0);
+        f.p32(0);
+        f.p16(88);
+        f.p16(blob.len() as u16);
+        f.p64(0);
+        f.pbytes(&blob);
+        f
+    }
+
+    fn tmp_share(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rsmbd-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// R9: a MessageId is used once per connection; a replay disconnects.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn replayed_message_id_disconnects() {
+        let dir = tmp_share("replay");
+        let srv = test_srv(&dir);
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let (sess, _) = establish(&srv, &mut pc);
+        let f = with_msg_id(echo(sess), 1000);
+        assert!(!send(&srv, &mut pc, &f).0, "first use is fine");
+        assert!(send(&srv, &mut pc, &f).0, "replay must disconnect");
+        // Below the window: ids 0..n used in order, then 0 again.
+        let mut pc = ProtoConn::new(&srv, 0, 0, 2);
+        for id in 0..3 {
+            assert!(!send(&srv, &mut pc, &with_msg_id(echo(0), id)).0);
+        }
+        assert_eq!(pc.msg_low, 3);
+        assert!(send(&srv, &mut pc, &with_msg_id(echo(0), 0)).0, "id 0 was used");
+        // Far beyond the window: refused.
+        let mut pc = ProtoConn::new(&srv, 0, 0, 3);
+        assert!(send(&srv, &mut pc, &with_msg_id(echo(0), 1 << 20)).0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// R17: one NEGOTIATE per connection.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn second_negotiate_disconnects() {
+        let dir = tmp_share("neg2");
+        let srv = test_srv(&dir);
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        establish(&srv, &mut pc);
+        let mut f = req_hdr(CMD_NEGOTIATE, 0, 0, 0);
+        f.p16(36);
+        f.p16(1);
+        f.p16(1);
+        f.p16(0);
+        f.p32(0);
+        f.zeros(16 + 8);
+        f.p16(0x0210);
+        assert!(send(&srv, &mut pc, &f).0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// R3 + R4 + R21: a handle only works on the tree it was opened on (no
+    /// deleting a read-only share's file through a writable tree); a
+    /// read-only tree refuses FILE_OPEN_IF creation; the share root can't be
+    /// marked delete-on-close.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn read_only_tree_cannot_be_bypassed() {
+        let dir = tmp_share("rotree");
+        let mut srv = test_srv(&dir);
+        srv.cfg.shares.push(ShareCfg { name: "ro".into(), path: dir.clone(), read_only: true, ..Default::default() });
+        std::fs::write(dir.join("keep.txt"), b"x").unwrap();
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let (sess, rw) = establish(&srv, &mut pc);
+        let ro = tree_connect_to(&srv, &mut pc, sess, "ro").tree_id;
+
+        let (st, fid) = create_file(&srv, &mut pc, sess, ro, "keep.txt", 1 /*OPEN*/, 0, 0x0012_0089);
+        assert_eq!(st, status::SUCCESS);
+        // FileDispositionInformation (13) via the writable tree: no such handle there.
+        assert_eq!(set_info_file(&srv, &mut pc, sess, rw, fid, 13, &[1]), status::FILE_CLOSED);
+        // Via its own (read-only) tree: refused.
+        assert_ne!(set_info_file(&srv, &mut pc, sess, ro, fid, 13, &[1]), status::SUCCESS);
+        assert_eq!(close_fid(&srv, &mut pc, sess, rw, fid), status::FILE_CLOSED);
+        assert_eq!(close_fid(&srv, &mut pc, sess, ro, fid), status::SUCCESS);
+        assert!(dir.join("keep.txt").exists());
+
+        let (st, _) = create_file(&srv, &mut pc, sess, ro, "made.txt", 3 /*OPEN_IF*/, 0, 0x0012_0089);
+        assert_eq!(st, status::ACCESS_DENIED, "OPEN_IF must not create on a read-only tree");
+        assert!(!dir.join("made.txt").exists());
+        let (st, _) = create_file(&srv, &mut pc, sess, ro, "mkd", 3, 1 /*DIRECTORY_FILE*/, 0x0012_0089);
+        assert_eq!(st, status::ACCESS_DENIED);
+        assert!(!dir.join("mkd").exists());
+
+        let (st, _) = create_file(&srv, &mut pc, sess, rw, "", 1, 0x1000 /*DELETE_ON_CLOSE*/, 0x0001_0080);
+        assert_eq!(st, status::ACCESS_DENIED, "share root is never deleted");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// R5: a dropped connection's sessions (established or half-open) leave
+    /// the registry; half-open setups per connection are capped.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn sessions_end_with_their_connection() {
+        let dir = tmp_share("teardown");
+        let srv = test_srv(&dir);
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let (sess, tree) = establish(&srv, &mut pc);
+        let (st, _) = create_file(&srv, &mut pc, sess, tree, "gone.txt", 2 /*CREATE*/, 0x1000 /*DELETE_ON_CLOSE*/, 0x0013_019F);
+        assert_eq!(st, status::SUCCESS);
+        assert!(dir.join("gone.txt").exists());
+        let mut pending = 0;
+        let mut refused = false;
+        for _ in 0..8 {
+            let r = roundtrip(&srv, &mut pc, ntlm_negotiate_leg(0, false));
+            match r.status {
+                status::MORE_PROCESSING_REQUIRED => pending += 1,
+                status::INSUFFICIENT_RESOURCES => refused = true,
+                s => panic!("unexpected status {s:#x}"),
+            }
+        }
+        assert_eq!(pending, 4, "half-open setups are capped per connection");
+        assert!(refused);
+        assert_eq!(srv.sessions.len(), 5);
+        handlers::teardown_conn(&srv, &mut pc);
+        assert_eq!(srv.sessions.len(), 0, "every session ends with the connection");
+        assert!(!dir.join("gone.txt").exists(), "delete-on-close ran at teardown");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// R10: no binding to a guest session; a pending binding can't LOGOFF the
+    /// session it targets.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn binding_cannot_hijack_or_kill_sessions() {
+        let dir = tmp_share("bind");
+        let mut srv = test_srv(&dir);
+        srv.cfg.multichannel = true;
+        let mut victim = ProtoConn::new(&srv, 0, 0, 1);
+        let (sess, _) = establish(&srv, &mut victim); // guest, SMB 3.0.2
+        let mut attacker = ProtoConn::new(&srv, 0, 0, 2);
+        let mut neg = req_hdr(CMD_NEGOTIATE, 0, 0, 0);
+        neg.p16(36);
+        neg.p16(1);
+        neg.p16(1);
+        neg.p16(0);
+        neg.p32(0);
+        neg.zeros(16 + 8);
+        neg.p16(0x0302);
+        assert_eq!(roundtrip(&srv, &mut attacker, neg).status, status::SUCCESS);
+        let r = roundtrip(&srv, &mut attacker, ntlm_negotiate_leg(sess, true));
+        assert_eq!(r.status, status::USER_SESSION_DELETED, "guest sessions can't be bound");
+        let mut lo = req_hdr(CMD_LOGOFF, 0, 0, sess);
+        lo.p16(4);
+        lo.p16(0);
+        assert_eq!(roundtrip(&srv, &mut attacker, lo).status, status::USER_SESSION_DELETED);
+        assert!(srv.sessions.get(sess).is_some(), "victim session survives");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An established, encrypting SMB 3.1.1 session on `pc` (keys c2s = s2c = 7s).
+    fn encrypted_session(srv: &Srv, pc: &mut ProtoConn) -> (u64, EncCtx) {
+        let (sid, sref) = srv.sessions.create();
+        {
+            let mut s = sref.lock().unwrap();
+            s.established = true;
+            s.channels = 1;
+            s.user = "u".into();
+        }
+        let enc = EncCtx { cipher: crypto::CIPHER_AES128_GCM, c2s: [7; 32], s2c: [7; 32], nonce_ctr: 1000 };
+        pc.dialect = 0x0311;
+        pc.negotiated = true;
+        pc.channels.insert(
+            sid,
+            ChannelState { established: true, enc: Some(enc.clone()), encrypt: true, ..Default::default() },
+        );
+        (sid, enc)
+    }
+
+    fn seal(plain: &[u8], enc: &EncCtx, sid: u64) -> Vec<u8> {
+        let mut e = enc.clone();
+        let mut out = Vec::new();
+        wrap_transform(plain, &mut e, sid, &mut out);
+        out[4..].to_vec()
+    }
+
+    /// R1, R2, R16, R18: an encrypting session refuses plaintext; a sealed
+    /// LOGOFF is answered sealed (it used to panic the worker); responses
+    /// already batched in tx survive a sealed frame; a sealed frame can't
+    /// carry another session's request.
+    #[test]
+    fn encrypted_session_hardening() {
+        let dir = tmp_share("enc");
+        let srv = test_srv(&dir);
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let (sid, enc) = encrypted_session(&srv, &mut pc);
+
+        // Plaintext on an encrypting channel: ACCESS_DENIED.
+        let r = roundtrip(&srv, &mut pc, echo(sid));
+        assert_eq!(r.status, status::ACCESS_DENIED);
+
+        // Sealed ECHO is fine, and tx already holding a response keeps it.
+        let mut tx = b"PREV".to_vec();
+        let act = process_frame(&srv, &mut pc, &seal(&echo(sid), &enc, sid), &mut tx);
+        assert!(matches!(act, FrameAction::Respond));
+        assert_eq!(&tx[..4], b"PREV", "batched bytes before a sealed response are kept");
+        let plain = decrypt_transform(&tx[8..], &EncCtx { c2s: enc.s2c, ..enc.clone() }).expect("sealed reply");
+        assert_eq!(u32::from_le_bytes(plain[8..12].try_into().unwrap()), status::SUCCESS);
+
+        // A sealed frame for `sid` naming another session: disconnect.
+        let (other, _) = srv.sessions.create();
+        assert!(send(&srv, &mut pc, &seal(&echo(other), &enc, sid)).0);
+
+        // Sealed LOGOFF: answered (sealed), no panic, channel gone.
+        let mut pc = ProtoConn::new(&srv, 0, 0, 2);
+        let (sid, enc) = encrypted_session(&srv, &mut pc);
+        let mut lo = req_hdr(CMD_LOGOFF, 0, 0, sid);
+        lo.p16(4);
+        lo.p16(0);
+        let (closed, tx) = send(&srv, &mut pc, &seal(&lo, &enc, sid));
+        assert!(!closed);
+        let plain = decrypt_transform(&tx[4..], &EncCtx { c2s: enc.s2c, ..enc.clone() }).expect("sealed LOGOFF reply");
+        assert_eq!(u32::from_le_bytes(plain[8..12].try_into().unwrap()), status::SUCCESS);
+        assert!(pc.channels.get(&sid).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// R6: a compound past the member cap disconnects instead of growing tx.
+    #[test]
+    fn oversized_compound_disconnects() {
+        let dir = tmp_share("compound");
+        let srv = test_srv(&dir);
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let mut frame = Vec::new();
+        for i in 0..(MAX_COMPOUND + 1) {
+            let mut e = echo(0);
+            if i < MAX_COMPOUND {
+                let next = e.len() as u32; // 68, already 8-aligned? pad below
+                let pad = (8 - next as usize % 8) % 8;
+                e.zeros(pad);
+                let next = e.len() as u32;
+                e[20..24].copy_from_slice(&next.to_le_bytes());
+            }
+            frame.extend_from_slice(&e);
+        }
+        assert!(send(&srv, &mut pc, &frame).0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
