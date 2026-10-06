@@ -194,7 +194,7 @@ Order:
 - [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
 
 ### Open work (priorities in stormcentral)
-- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 is waiting on the owner (Actions disabled, so there are no 1.4.1 artifacts). #42 done on main; #40 waits on the owner (live AD test).
+- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 is waiting on the owner (Actions disabled, so there are no 1.4.1 artifacts). #42 done on main; #40 waits on the owner (live AD test). #39 self-review done on main (docs/SECURITY-REVIEW.md, verified 9124aeb), needs-owner for the external review and secure defaults; #50/#51 closed.
 - #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load. Fixed on main (d0b114c) and on `release/1.4`; guard test on both (it fails on the old layout). `v1.4.1` is tagged (fdac8ef), sc-build verified. **Waiting on the owner:** GitHub Actions is disabled on the repo, so release.yml produced no artifacts; crates.io, COPR and the distro uploads need the owner's tokens.
 - #42 P1 lease breaks — **done on `main` (2026-10-06, e6eb9ed)**: truncate, overwrite,
   rename (source + replaced target) and delete now break other keys' leases;
