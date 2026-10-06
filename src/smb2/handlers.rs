@@ -513,7 +513,7 @@ pub fn negotiate_resp_smb1_wildcard(srv: &Srv, pc: &mut ProtoConn, tx: &mut Vec<
 
 fn negotiate_body(
     srv: &Srv,
-    pc: &ProtoConn,
+    pc: &mut ProtoConn,
     dialect: u16,
     cipher: u16,
     resp_start: usize,
