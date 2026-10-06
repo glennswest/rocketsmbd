@@ -190,7 +190,7 @@ Order:
 
 ### Open work (priorities in stormcentral)
 - **Where we are (2026-10-06):** #46 is parked with `wait-owner` (labelled `needs-owner`). It is waiting on the owner's health-probe decision #49 and on the stormcos#149 registration (P3, still open). Next up: #41 (guard test, 1.4.1), then #42.
-- #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load — example fixed (d0b114c); needs guard test + 1.4.1
+- #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load — example fixed (d0b114c), guard test on main (22cf7fc, verified fails on the old layout). **In progress (2026-10-06):** 1.4.1 cut from a `release/1.4` branch off `v1.4.0` (main has unreleased features, so it can't be a patch): example keys moved above `[[share]]` (1.4.0's key set — no `auth`/`[kerberos]`), the same guard test, version bumps, tag `v1.4.1` → release.yml publishes GitHub artifacts. crates.io/COPR/distro uploads need the owner's tokens.
 - #42 P1 lease breaks only on WRITE (truncate/overwrite/rename leave stale caches)
 - #39 P2 external security review; #40 P2 per-share authz (PAC) + idmap
 - #43 P2 CI feature matrix; #44 P2 `rocketsmbd-test` container (test standard)
