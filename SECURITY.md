@@ -56,6 +56,11 @@ still hasn't been done (#39). Know the following before deploying:
   point outside it** (like Samba's `wide links`). Clients can't create
   symlinks over SMB, so only someone with local access to the share tree can
   plant one.
+- **Health endpoint** — off by default. With `health_listen` set, the server
+  also accepts plain HTTP on that address (`GET /healthz` only; no auth, no
+  share names or paths in the reply, one request at a time with a 2 s timeout
+  and a 4 KiB cap). Bind it to loopback or an admin network, never to a
+  client-facing interface.
 - **Deployment** — a hardened build (Kerberos or NTLMv2 + `require_signing`,
   optionally `encrypt`) is reasonable beyond a trusted LAN, but a full
   security review has not been done; do not expose port 445 to the public

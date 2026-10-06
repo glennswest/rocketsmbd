@@ -9,13 +9,21 @@ as implemented; the work plan in `CLAUDE.md` tracks what's next.
 ```
 main
  ├─ load TOML config, probe pipe capacity (bounds MaxReadSize)
- └─ spawn N worker threads (default: one per core)
+ ├─ spawn N worker threads (default: one per core)
      each worker:
        own io_uring (1024 entries; SQPOLL if `sqpoll = true`)
        pinned to core N mod ncpu (`core_pinning`, default on)
        own listening socket (SO_REUSEPORT → kernel load-balances accepts)
        slab of connections, generation-tagged
+ └─ health thread, only if `health_listen` is set (src/health.rs)
+       plain blocking std::net listener, not an io_uring worker
+       GET /healthz → 200 while all workers live and all share paths are dirs, else 503
 ```
+
+The health endpoint exists for service managers (stormcos's stormd sends an
+HTTP liveness probe). Each worker holds a `WorkerGuard` that counts it live
+until the thread exits, panics included, so a dead worker turns the probe to 503.
+Requests are served one at a time with a 2 s timeout and a 4 KiB cap.
 
 A connection lives its whole life on one worker, and its connection and
 protocol state (`Conn`, `ProtoConn`) is touched only by that worker. Workers do

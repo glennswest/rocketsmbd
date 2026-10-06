@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-06
+- **feat(#46, #49):** **Opt-in HTTP health endpoint.** With the new `health_listen` key set (e.g. `"127.0.0.1:9104"`), a plain std thread, separate from the io_uring workers, serves `GET /healthz`. It returns `200` while every worker thread is running and every share path is a directory, and `503` otherwise, with a JSON body (status, version, worker and share counts). Other paths get `404` and other methods `405`. Off by default, so SMB stays TCP 445 only; the stormcos golden turns it on at loopback for stormd's HTTP liveness probe. A bad or busy address fails startup, not the probe. Documented in README, the man page, ARCHITECTURE, SECURITY and the example config.
 - **chore(#41):** v1.4.1 tagged on `release/1.4` (fdac8ef). GitHub Actions is disabled on the repo, so release.yml hasn't built the release artifacts yet; that is waiting on the owner.
 - **test(#41):** Guard test `config::tests::shipped_example_config_loads` parses `rocketsmbd.toml.example` (the file the packages install as `/etc/rocketsmbd.toml`) through `Config` with `deny_unknown_fields` and runs `validate()` with the share pointed at a directory that exists. A top-level key placed after `[[share]]` now fails `cargo test`.
 

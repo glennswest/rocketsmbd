@@ -15,8 +15,9 @@ are served zero-copy from page cache to socket via linked
 operations. It speaks SMB 2.0.2 through 3.1.1 with NTLMv2 and (in a
 \fBkerberos\fR build) Kerberos authentication, SMB2/3 signing, SMB3
 multichannel, SMB3 encryption (AES-128/256-GCM and -CCM), byte-range locks,
-change notification, and read/handle-caching leases. It listens on TCP 445
-only (direct TCP; no NetBIOS port 139).
+change notification, and read/handle-caching leases. It serves SMB on TCP 445
+only (direct TCP; no NetBIOS port 139). An HTTP health endpoint is available
+only when \fBhealth_listen\fR is set.
 .SH OPTIONS
 .TP
 .BR \-\-config " " \fIpath\fR " (or " \-c ")"
@@ -71,6 +72,12 @@ Pin worker N to CPU core N mod ncpu. Default true.
 .TP
 .B sqpoll
 Enable io_uring SQPOLL (one busy kernel thread per worker). Default false.
+.TP
+.B health_listen
+Address for an HTTP health endpoint, for example \fB"127.0.0.1:9104"\fR.
+Unset by default (no listener). \fBGET /healthz\fR returns 200 while every
+worker is running and every share path is a directory, 503 otherwise, with a
+JSON body. Bind it to loopback or an admin network.
 .TP
 .B auth
 \fB"both"\fR (default; Kerberos preferred, NTLM fallback), \fB"ntlm"\fR, or

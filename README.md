@@ -92,8 +92,10 @@ Tuning for 100GbE+: [docs/TUNING.md](docs/TUNING.md).
   (MSG_ZEROCOPY) for large buffered sends; older kernels fall back to oneshot
   accept and copying sends.
 - Capability to bind port 445 (`CAP_NET_BIND_SERVICE` or root). TCP 445
-  (direct TCP, 4-byte length framing) is the only port; there is no NetBIOS
-  (139), no RPC or management API, and no SMB Direct (RDMA) transport.
+  (direct TCP, 4-byte length framing) is the only SMB port; there is no NetBIOS
+  (139), no RPC or management API, and no SMB Direct (RDMA) transport. An
+  opt-in HTTP health endpoint (`health_listen`, off by default) can be added
+  for service managers; see below.
 
 Re-run benchmarks with `bench/bench.sh` (root, Linux, cifs-utils).
 
@@ -177,6 +179,7 @@ Unknown keys are rejected. A full example is in
 | `advertise_only` | `[]` | IPs to advertise for multichannel; empty = every non-loopback interface. |
 | `core_pinning` | `true` | Pin worker N to core N mod ncpu. |
 | `sqpoll` | `false` | io_uring SQPOLL (a busy kernel thread per worker). |
+| `health_listen` | unset (off) | Address for an HTTP health endpoint, e.g. `"127.0.0.1:9104"`. `GET /healthz` returns `200` while every worker is running and every share path is a directory, `503` otherwise, with a JSON body (status, version, worker and share counts; no names or paths). Bind it to loopback or an admin network. |
 | `oplocks` | `true` | Grant leases: read-caching and handle-caching (R/RH). Write-caching is never granted. |
 | `auth` | `"both"` | `"ntlm"`, `"kerberos"` or `"both"` (Kerberos preferred). Intersected with the built features. |
 | `[kerberos]` | absent | `enabled` (default true), `keytab` (default `$KRB5_KTNAME` / system keytab), `spn` (default `cifs/<server_name>`), `realm` (currently ignored, #45). Used only in a `kerberos` build. |

@@ -30,8 +30,9 @@ thread-per-connection — one io_uring reactor per worker thread.
   `Containerfile` = `scratch` + static binary, config at
   `/etc/rocketsmbd/rocketsmbd.toml`. Also crates.io, COPR, and the distro
   packaging in `packaging/` (Fedora spec, `debian/`); see docs/UPSTREAM.md.
-- **Ports**: TCP 445 only (`listen`, default `0.0.0.0:445`). No NetBIOS, no
-  management/REST API, no HTTP health endpoint.
+- **Ports**: SMB on TCP 445 only (`listen`, default `0.0.0.0:445`). No NetBIOS, no
+  management/REST API. An opt-in HTTP health endpoint (`health_listen`, off by
+  default; `GET /healthz`, src/health.rs) exists for stormd; the stormcos golden uses `127.0.0.1:9104`.
 - **Not a stormcos component yet** (#46): `stormcentral component list` has no
   `rocketsmbd`, so there's no golden to request yet. rocketsmbd-operator (`smbop`)
   expects a `rocketsmbd` service golden with the binary at `/usr/sbin/rocketsmbd`,
@@ -68,6 +69,7 @@ multichannel. Full detail: docs/ARCHITECTURE.md.
 - `src/ntlm.rs` — NTLMv2; `src/spnego.rs` — SPNEGO/DER; `src/krb5.rs` — GSS acceptor (`kerberos`)
 - `src/crypto.rs` — KDF/signing/AEAD API over `crypto_rustcrypto.rs` or `crypto_openssl.rs`
 - `src/net.rs` — interface enumeration (multichannel advertisement)
+- `src/health.rs` — opt-in HTTP `/healthz` (own std thread)
 - `src/vfs.rs` — path sanitation, file ops, handle slab, directory snapshots
 - `src/wire.rs`, `src/status.rs`, `src/log.rs` — wire primitives, NTSTATUS codes, logging
 
