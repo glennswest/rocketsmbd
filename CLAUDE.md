@@ -195,17 +195,12 @@ Order:
 - [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
 
 ### Open work (priorities in stormcentral)
-- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 done: v1.4.1 published. #42 done on main; #40 closed; its live AD test is #62 (needs-owner). #39 self-review done on main (docs/SECURITY-REVIEW.md, verified 9124aeb), needs-owner for the external review and secure defaults; #50/#51 closed.
+- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 done: v1.4.1 published. #42 done on main; #40 closed; its live AD test is #62 (needs-owner). #39 closed (external review → #63, signing default in 2.0 → #64); #50/#51 closed.
 - #41 P1 — **done (2026-10-06).** Shipped config fixed + guard test on main and `release/1.4`; **v1.4.1 published** on GitHub releases (static musl x86_64/aarch64, .deb, .rpm, src.rpm, SHA256SUMS.txt), built from the tag by `deploy/release-artifacts.sh` on a fresh build VM (`SC_BUILD_VM=1`; dev had no free slot). crates.io/COPR/Debian: only if the owner asks.
 - #42 P1 lease breaks — **done on `main` (2026-10-06, e6eb9ed)**: truncate, overwrite,
   rename (source + replaced target) and delete now break other keys' leases;
   process_frame test, sc-build 61/61. Not re-run against live cifs/Windows mounts.
-- #39 P2 security review — self-review done on `main` (docs/SECURITY-REVIEW.md). **Owner decisions (2026-10-06), in progress:**
-  (1) external review deferred until rocketsmbd is offered publicly → its own issue; keep the 445 caveat;
-  (2) `require_signing = true` by default in the next major (2.0) → issue + startup warning now when unset;
-  (3) guest off by default whenever Kerberos is configured (now);
-  (4) packaged unit runs as a dedicated `rocketsmbd` user (sysusers.d), CAP_DAC_OVERRIDE etc. dropped, documented ownership migration (now).
-  Then close #39.
+- #39 — **closed (2026-10-06).** Self-review (docs/SECURITY-REVIEW.md) + fixes; owner's decisions carried out on `main` (48a3691): guest off by default with Kerberos, `require_signing` unset warns (default true in 2.0 = #64), packaged unit runs as the `rocketsmbd` sysusers user with only CAP_NET_BIND_SERVICE (BREAKING for upgrades: share trees must be accessible to it, README "Service user"). External review before a public offering = #63.
 - #40 — **closed (2026-10-06)** per the owner's decision: share access lists + PAC group SIDs on `main`, re-verified on fccbc97. Live AD-group test is #62 (needs-owner: dc1.ad.g8.lo unreachable, AD keytab + test users by gist).
 - #53 P2 per-client file identity (idmap + fsuid / io_uring personalities)
 - #43 P2 CI feature matrix; #44 P2 `rocketsmbd-test` container (test standard)
