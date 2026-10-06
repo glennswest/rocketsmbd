@@ -189,7 +189,7 @@ Order:
 - [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
 
 ### Open work (priorities in stormcentral)
-- **Where we are (2026-09-27):** #46 is checked and waiting on the owner's health-endpoint decision. Next up: #41 (guard test, 1.4.1), then #42.
+- **Where we are (2026-10-06):** #46 is parked with `wait-owner` (labelled `needs-owner`). It is waiting on the owner's health-probe decision #49 and on the stormcos#149 registration (P3, still open). Next up: #41 (guard test, 1.4.1), then #42.
 - #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load — example fixed (d0b114c); needs guard test + 1.4.1
 - #42 P1 lease breaks only on WRITE (truncate/overwrite/rename leave stale caches)
 - #39 P2 external security review; #40 P2 per-share authz (PAC) + idmap
