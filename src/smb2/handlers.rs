@@ -234,7 +234,9 @@ const MAX_OPENS_PER_SESSION: usize = 16384;
 const MAX_TREES_PER_SESSION: usize = 1024;
 const MAX_NOTIFY_PER_CONN: usize = 1024;
 
-/// Unfinished session setups one connection may hold at once.
+/// Unfinished session setups one connection may hold at once (only NTLM
+/// creates a session before authenticating).
+#[cfg(feature = "ntlm")]
 const MAX_PENDING_SETUPS: usize = 4;
 
 /// How far past the lowest unused MessageId a request may reach. Far above any
