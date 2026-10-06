@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn windows_2003_pac() {
         let li = parse_pac(include_bytes!("../testdata/pac-w2003.bin")).unwrap();
-        let dom = "S-1-5-21-3047108369-3961193616-3706469200";
+        let dom = "S-1-5-21-3048156945-3961193616-3706469200";
         assert_eq!(li.user, "W2003FINAL$");
         assert_eq!(li.domain, "WIN2K3THINK");
         assert_eq!(li.domain_sid, Some(sid(dom)));
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn sid_string_roundtrip() {
-        let s = "S-1-5-21-3047108369-3961193616-3706469200-512";
+        let s = "S-1-5-21-3048156945-3961193616-3706469200-512";
         assert_eq!(sid(s).to_string(), s);
         assert_eq!(sid("s-1-5-32-544").to_string(), "S-1-5-32-544");
         for bad in ["", "S-1", "S-1-5", "S-2-5-21", "X-1-5-21", "S-1-5-x", "S-1-281474976710656-1"] {

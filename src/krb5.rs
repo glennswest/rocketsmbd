@@ -295,7 +295,8 @@ unsafe fn name_pac(name: gss::gss_name_t, client: &str) -> Option<crate::pac::Lo
     if name.is_null() {
         return None;
     }
-    let attrs: [(&str, fn(&[u8]) -> Result<crate::pac::LogonInfo, String>); 2] = [
+    type Parse = fn(&[u8]) -> Result<crate::pac::LogonInfo, String>;
+    let attrs: [(&str, Parse); 2] = [
         ("urn:mspac:", crate::pac::parse_pac),
         ("urn:mspac:logon-info", crate::pac::parse_logon_info),
     ];
