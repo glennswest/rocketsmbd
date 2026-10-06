@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-06
+- **chore(#40):** Closed per the owner's decision; per-share access lists re-verified on fccbc97 (authz, PAC and `process_frame` tests on the default, `kerberos` and kerberos-only builds). The live AD-group test is #62, waiting on dc1.ad.g8.lo and an AD keytab.
 - **chore(#41):** v1.4.1 published on GitHub releases: static musl x86_64/aarch64 binaries, .deb and .rpm for each, the src.rpm and SHA256SUMS.txt, built from the `v1.4.1` tag by `deploy/release-artifacts.sh` on a fresh build VM. Release-build fixes along the way: fetch the tag from the repo URL (#59), build in the tree's own `target/` (#60).
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 - **build(#41):** `deploy/release-artifacts.sh <tag>` builds a tag's release artifacts through `sc-build` (static musl x86_64/aarch64 binaries, .deb, .rpm, src.rpm) from `git archive <tag>`, checks the shipped config, and prints each artifact base64-encoded for decoding on the caller's side. Releases no longer use GitHub Actions (owner's decision); docs/RELEASING.md has the steps. Also on `release/1.4`, where it builds 1.4.1.

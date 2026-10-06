@@ -195,7 +195,7 @@ Order:
 - [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
 
 ### Open work (priorities in stormcentral)
-- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 done: v1.4.1 published. #42 done on main; #40 waits on the owner (live AD test). #39 self-review done on main (docs/SECURITY-REVIEW.md, verified 9124aeb), needs-owner for the external review and secure defaults; #50/#51 closed.
+- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 done: v1.4.1 published. #42 done on main; #40 closed; its live AD test is #62 (needs-owner). #39 self-review done on main (docs/SECURITY-REVIEW.md, verified 9124aeb), needs-owner for the external review and secure defaults; #50/#51 closed.
 - #41 P1 — **done (2026-10-06).** Shipped config fixed + guard test on main and `release/1.4`; **v1.4.1 published** on GitHub releases (static musl x86_64/aarch64, .deb, .rpm, src.rpm, SHA256SUMS.txt), built from the tag by `deploy/release-artifacts.sh` on a fresh build VM (`SC_BUILD_VM=1`; dev had no free slot). crates.io/COPR/Debian: only if the owner asks.
 - #42 P1 lease breaks — **done on `main` (2026-10-06, e6eb9ed)**: truncate, overwrite,
   rename (source + replaced target) and delete now break other keys' leases;
@@ -209,7 +209,7 @@ Order:
   `require_signing`/`allow_guest` (R11/R12), dedicated service user (R15), adding
   spnego/transform to fuzz.yml (needs a push with `workflow` scope). Not re-run
   against live cifs/Windows mounts yet — do that before the next release.
-- #40 P2 per-share authz — done on `main` (share access lists + PAC group SIDs). **Owner decision (2026-10-06): close #40** on the recorded-PAC + process_frame verification, and track the live AD-group test as its own issue (needs dc1.ad.g8.lo up, a `cifs/<host>` keytab by gist link, a test user in a test group). **In progress:** re-verify on HEAD, file that issue, close #40.
+- #40 — **closed (2026-10-06)** per the owner's decision: share access lists + PAC group SIDs on `main`, re-verified on fccbc97. Live AD-group test is #62 (needs-owner: dc1.ad.g8.lo unreachable, AD keytab + test users by gist).
 - #53 P2 per-client file identity (idmap + fsuid / io_uring personalities)
 - #43 P2 CI feature matrix; #44 P2 `rocketsmbd-test` container (test standard)
 - #46 P1 rocketsmbd as a stormcos service golden for smbop. **rocketsmbd side done (2026-10-06):** opt-in `health_listen` / `GET /healthz` (b09a5f5, docs dbf6d08), unit tests plus a live sc-build run (200 healthy, 503 when a share dir goes, 404/405, bad address fails `--check`). Entry values (port 9104, `/healthz`, placeholder config with `allow_guest = false`) posted on stormcos#149. #46 is queued `--after` stormcos#149. Next step once registered: `stormcentral component build rocketsmbd`, then close #46.
