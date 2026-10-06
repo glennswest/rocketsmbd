@@ -209,12 +209,7 @@ Order:
   `require_signing`/`allow_guest` (R11/R12), dedicated service user (R15), adding
   spnego/transform to fuzz.yml (needs a push with `workflow` scope). Not re-run
   against live cifs/Windows mounts yet — do that before the next release.
-- #40 P2 per-share authz — **done on `main` (2026-10-06)**: share access lists +
-  PAC group SIDs (c2e2438 and follow-ups), sc-build green (default + kerberos,
-  clippy). Not run against a live AD DC: dc1.ad.g8.lo (192.168.8.105) was
-  unreachable; tested on recorded Windows PACs + process_frame. Phase 3 (SID→uid,
-  fsuid) is #53. **Waiting on the owner** (needs-owner): close now and track the
-  live AD run separately, or keep #40 open until dc1 is up and an AD keytab exists.
+- #40 P2 per-share authz — done on `main` (share access lists + PAC group SIDs). **Owner decision (2026-10-06): close #40** on the recorded-PAC + process_frame verification, and track the live AD-group test as its own issue (needs dc1.ad.g8.lo up, a `cifs/<host>` keytab by gist link, a test user in a test group). **In progress:** re-verify on HEAD, file that issue, close #40.
 - #53 P2 per-client file identity (idmap + fsuid / io_uring personalities)
 - #43 P2 CI feature matrix; #44 P2 `rocketsmbd-test` container (test standard)
 - #46 P1 rocketsmbd as a stormcos service golden for smbop. **rocketsmbd side done (2026-10-06):** opt-in `health_listen` / `GET /healthz` (b09a5f5, docs dbf6d08), unit tests plus a live sc-build run (200 healthy, 503 when a share dir goes, 404/405, bad address fails `--check`). Entry values (port 9104, `/healthz`, placeholder config with `allow_guest = false`) posted on stormcos#149. #46 is queued `--after` stormcos#149. Next step once registered: `stormcentral component build rocketsmbd`, then close #46.
