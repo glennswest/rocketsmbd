@@ -114,20 +114,30 @@ KDC-side setup (once) is in the `e2e.sh` header and `docs/KERBEROS.md` §10.
 
 ## Fuzzing (`cargo-fuzz`)
 
-Two libFuzzer targets in `fuzz/fuzz_targets/` (run with nightly; also a CI
-workflow `fuzz.yml` — per-push 90s smoke + weekly):
+Four libFuzzer targets in `fuzz/fuzz_targets/` (run with nightly; also a CI
+workflow `fuzz.yml` — per-push 90s smoke + weekly). Each is a one-line wrapper
+around a function in `src/fuzzing.rs`, so `cargo test` compiles the target
+bodies and runs them over a small corpus (`fuzzing::tests::fuzz_targets_smoke`):
 
 - `process_frame` — the SMB2 wire entry point: NetBIOS framing → `parse_hdr`
   → compound dispatch → every command's offset/length parsing (read-only temp
-  share, fresh state per input).
+  share, fresh connection state per input).
 - `ntlm` — the NTLMSSP token/AUTHENTICATE field parser.
+- `spnego` — SPNEGO/DER classification of SESSION_SETUP security blobs.
+- `transform` — the SMB3 TRANSFORM header: raw decrypt for all four ciphers,
+  a seal/open round trip, and the sealed input dispatched through
+  `process_frame` as an encrypted session's request.
 
-First run (2026-06-11, dev host): **`process_frame` ~5.7M execs, `ntlm` ~7.0M
-execs, zero crashes/panics.** Run locally:
+Runs: 2026-06-11 (dev host) `process_frame` ~5.7M execs, `ntlm` ~7.0M, zero
+crashes. 2026-10-06 (#39, build box, 240 s each, nightly-2026-04-03):
+`process_frame` 0.72M execs, `ntlm` 104M, `spnego` 260M, `transform` 5.9M —
+zero crashes or panics. Run them with:
 ```sh
+cargo +nightly install cargo-fuzz
 cargo +nightly fuzz run process_frame -- -max_total_time=60
-cargo +nightly fuzz run ntlm -- -max_total_time=60
+cargo +nightly fuzz run spnego -- -max_total_time=60   # likewise ntlm, transform
 ```
+On the build box that is one `sc-build` (cargo-fuzz is installed per job).
 
 ## Environments
 

@@ -111,8 +111,9 @@ teardown hook) the way a client would: `replayed_message_id_disconnects`,
 sealed, batched bytes kept, foreign session in a sealed frame disconnects) and
 `oversized_compound_disconnects`, plus `fuzzing::tests::fuzz_targets_smoke`.
 They run in `cargo test` for the default, `kerberos` and
-`backend-openssl kerberos` builds. libFuzzer was run on all four targets on
-the build box (see #39 for the run).
+`backend-openssl kerberos` builds. libFuzzer ran all four targets on the build
+box for 240 s each (2026-10-06): `process_frame` 0.72M execs, `ntlm` 104M,
+`spnego` 260M, `transform` 5.9M, no crashes or panics.
 
 Not verified against live clients in this pass: cifs and Windows mounts, with
 and without `seal` and multichannel, should be re-run (bench/ scripts) before
