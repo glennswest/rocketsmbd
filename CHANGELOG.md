@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-10-06
+- **test(#41):** Guard test `config::tests::shipped_example_config_loads` parses `rocketsmbd.toml.example` (the file the packages install as `/etc/rocketsmbd.toml`) through `Config` with `deny_unknown_fields` and runs `validate()` with the share pointed at a directory that exists. A top-level key placed after `[[share]]` now fails `cargo test`.
+
 ### 2026-09-27
 - **docs:** #46: checked the service_golden build for stormcos (static musl, default features, operator config); the HTTP-vs-TCP liveness question is raised on the issue
 - **docs:** Docs refreshed from the code (no code changes since 2026-06-29). README: Kerberos/OpenSSL marked unreleased, Cargo feature table, full config key/default table, container config path, ports (TCP 445 only), corrected READ chain order, `sec=krb5`/`seal`/multichannel mounts. Man page: every config key, encryption supported, current security posture, fixed a font-escape typo. ARCHITECTURE, OPLOCKS, TUNING, KERBEROS, FIPS, TESTING, SECURITY, ROADMAP, CONTRIBUTING and CLAUDE.md updated to match: shared state (session registry, lease table, break mailbox), multishot accept + send_zc, leases R/RH default-on (never W, not on encrypted sessions, broken only by WRITE), single-leg Kerberos, share-level-only authorization, symlinks followed outside the share, CI builds default features only.
