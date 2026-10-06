@@ -183,7 +183,7 @@ Order:
       Multishot recv: not done (recv stays oneshot)
 - [x] 7. Intra-connection request concurrency — shelved after measurement (#12, docs/CONCURRENCY.md)
 - [x] 8. SMB3 encryption — done (phase 4). Zero-copy signed/enc reads: infeasible over TCP (#11)
-- [x] 9. Leases: R (v1.3.0) + RH (v1.4.0), default on. W deferred (#27); breaks on truncate/overwrite missing (#42)
+- [x] 9. Leases: R (v1.3.0) + RH (v1.4.0), default on. W deferred (#27); breaks on WRITE, truncate, overwrite, rename, delete (#42, `main`)
 - [x] 10. Cross-VM benchmark (Proxmox) + Windows Server interop (docs/BENCHMARKS.md, #21)
 - [ ] 11. SMB Direct (RDMA) — designed (docs/SMBDIRECT.md), blocked on hardware (#19)
 

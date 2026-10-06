@@ -60,7 +60,7 @@ kerberos"` → OpenSSL crypto, Kerberos auth, no NTLM/MD4/RC4 in the binary.
 ## Open
 
 - External security review (#39).
-- Lease breaks on truncate/overwrite/rename (#42); write-caching leases (#27,
+- Write-caching leases (#27,
   deferred).
 - Per-client file identity: SID→uid map and I/O under the client's uid (#53).
   (Per-share user/group authorization via the Kerberos PAC landed on `main`,

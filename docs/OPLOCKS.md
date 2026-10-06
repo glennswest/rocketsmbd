@@ -18,16 +18,28 @@ the original design and increment plan.
 - **Why not on encrypted sessions:** a lease-break notification there would
   have to be sealed too, and that path isn't built. Encrypted mounts get no
   caching.
-- **Break:** only a **WRITE** from a different lease key breaks conflicting
-  leases, to none (`LeaseTable::break_conflicts`), delivered cross-worker via
-  the eventfd mailbox as a lease-break notification. The break is
-  fire-and-forget: R and H carry no dirty data, so the write doesn't wait for
-  an ack, and inbound OPLOCK_BREAK acknowledgements aren't processed.
-  **Truncate, overwriting CREATE, rename and delete don't break leases yet
-  (#42).**
+- **Break:** every operation that changes what an R or H holder has cached
+  breaks the leases of the *other* lease keys on that file to none
+  (`break_leases` → `LeaseTable::break_conflicts`), delivered cross-worker via
+  the eventfd mailbox as a lease-break notification (#42):
+  - WRITE;
+  - SET_INFO `FileEndOfFileInformation` (truncate or extend);
+  - CREATE `OVERWRITE` / `OVERWRITE_IF` / `SUPERSEDE` of an existing file;
+  - rename (`FileRenameInformation`): the renamed file, and the file a
+    replacing rename overwrites;
+  - delete: `FileDispositionInformation` set, and the unlink at CLOSE
+    (delete-on-close, including a CREATE with `FILE_DELETE_ON_CLOSE`).
+
+  The acting handle's own lease key is exempt. The break happens after the
+  change is made. It is fire-and-forget: R and H carry no dirty data, so the
+  operation doesn't wait for an ack, and inbound OPLOCK_BREAK acknowledgements
+  aren't processed. `FileAllocationInformation` is a no-op here, so it breaks
+  nothing. A plain open doesn't break H: the server doesn't enforce share
+  modes, so an open never conflicts (MS-SMB2 3.3.4.7's sharing-violation
+  break has nothing to trigger it).
 - **Lifetime:** without H, the lease is released at CLOSE. With H, it survives
-  CLOSE (detached) until a conflicting write breaks it or the connection is torn
-  down.
+  CLOSE (detached) until one of the operations above breaks it or the
+  connection is torn down.
 - **Not implemented:** write-caching (RW/RWH, which needs break-with-ack and
   deferred-op replay; deliberately deferred in #27), directory leases, lease v2
   epoch/parent-key semantics beyond parsing, and durable handles (DH2Q).
@@ -155,8 +167,9 @@ Steps 1–4 and RH are done; W, the ack handler and durable handles are not.
    on CREATE; release on CLOSE. Still grant none (table is observational).
 3. **Per-worker eventfd mailbox (done):** eventfd + POLL_ADD per worker; shared
    `Sender` table; a `wake(worker)` helper. Unit-test the wakeup.
-4. **Grant R + break-on-write (done as a lease grant, v1.3.0; break on
-   conflicting CREATE is still open, #42):** grant `READ_CACHING` when no
+4. **Grant R + break-on-write (done as a lease grant, v1.3.0; breaks on
+   truncate, overwrite, rename and delete added on `main`, #42; no break on
+   open, since share modes aren't enforced):** grant `READ_CACHING` when no
    conflicting holder; on WRITE / conflicting CREATE from another client, send
    a lease break (R→None) via the mailbox; track ack. Most-tested path first
    because R is shared (no exclusivity bugs).
