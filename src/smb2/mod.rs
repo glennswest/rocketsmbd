@@ -1877,11 +1877,11 @@ mod tests {
 
         // Two ECHO frames processed into the same tx buffer must yield two
         // complete, independently-framed responses.
-        let mut echo = req_hdr(CMD_ECHO, 7, 0, 0);
-        echo.p16(4);
-        echo.p16(0);
         let mut tx = Vec::new();
         for _ in 0..2 {
+            let mut echo = req_hdr(CMD_ECHO, 7, 0, 0); // fresh MessageId each
+            echo.p16(4);
+            echo.p16(0);
             match process_frame(&srv, &mut pc, &echo, &mut tx) {
                 FrameAction::Respond => {}
                 _ => panic!("echo must respond"),
