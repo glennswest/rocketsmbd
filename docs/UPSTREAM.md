@@ -192,7 +192,7 @@ Until official inclusion, users can install today from:
 
 ## Status
 
-- GitHub releases: **live** (v1.4.0, x86_64 + aarch64 `.deb`/`.rpm`/binary; SRPM attached).
+- GitHub releases: **live** (v1.4.1, x86_64 + aarch64 `.deb`/`.rpm`/binary; SRPM and SHA256SUMS.txt attached), built with `deploy/release-artifacts.sh` via sc-build (docs/RELEASING.md), not GitHub Actions.
 - crates.io: **published** (<https://crates.io/crates/rocketsmbd>, v1.4.0).
 - Fedora COPR: **live** (<https://copr.fedorainfracloud.org/coprs/glennswest/rocketsmbd/>).
   Official review: the Package Review bug is filed

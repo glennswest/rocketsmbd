@@ -24,7 +24,8 @@ thread-per-connection — one io_uring reactor per worker thread.
 - **Cargo features**: `ntlm` (default), `backend-rustcrypto` (default),
   `backend-openssl` (dynamic, FIPS), `kerberos` (dynamic, system GSS). CI and
   releases build the defaults only (#43).
-- **How it ships**: `.github/workflows/release.yml` on a tag builds static musl
+- **How it ships**: not GitHub Actions (owner, 2026-10-06): `sc-build 'deploy/release-artifacts.sh vX.Y.Z'`
+  (docs/RELEASING.md) builds from the tag static musl
   x86_64 + aarch64 binaries, `.deb` and `.rpm` (config at `/etc/rocketsmbd.toml`,
   systemd unit `packaging/rocketsmbd.service`, man page `docs/rocketsmbd.8`);
   `Containerfile` = `scratch` + static binary, config at
@@ -194,8 +195,8 @@ Order:
 - [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
 
 ### Open work (priorities in stormcentral)
-- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 is waiting on the owner (Actions disabled, so there are no 1.4.1 artifacts). #42 done on main; #40 waits on the owner (live AD test). #39 self-review done on main (docs/SECURITY-REVIEW.md, verified 9124aeb), needs-owner for the external review and secure defaults; #50/#51 closed.
-- #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load. Fixed on main (d0b114c) and on `release/1.4`; guard test on both. `v1.4.1` is tagged (fdac8ef). **Owner decision (2026-10-06): no GitHub Actions** — ship 1.4.1 through our pipeline: `deploy/release-artifacts.sh` on `release/1.4` builds the tagged source with sc-build (static musl x86_64 + aarch64, .deb, .rpm, src.rpm) and prints them base64 between `@@ARTIFACT` markers; decode locally (tmp/), `gh release create v1.4.1` + upload. crates.io/COPR/Debian only if the owner asks later. **In progress.**
+- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 done: v1.4.1 published. #42 done on main; #40 waits on the owner (live AD test). #39 self-review done on main (docs/SECURITY-REVIEW.md, verified 9124aeb), needs-owner for the external review and secure defaults; #50/#51 closed.
+- #41 P1 — **done (2026-10-06).** Shipped config fixed + guard test on main and `release/1.4`; **v1.4.1 published** on GitHub releases (static musl x86_64/aarch64, .deb, .rpm, src.rpm, SHA256SUMS.txt), built from the tag by `deploy/release-artifacts.sh` on a fresh build VM (`SC_BUILD_VM=1`; dev had no free slot). crates.io/COPR/Debian: only if the owner asks.
 - #42 P1 lease breaks — **done on `main` (2026-10-06, e6eb9ed)**: truncate, overwrite,
   rename (source + replaced target) and delete now break other keys' leases;
   process_frame test, sc-build 61/61. Not re-run against live cifs/Windows mounts.
