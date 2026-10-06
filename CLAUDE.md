@@ -194,14 +194,11 @@ Order:
 - [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
 
 ### Open work (priorities in stormcentral)
-- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 is waiting on the owner (Actions disabled, so there are no 1.4.1 artifacts). Next up: #42.
+- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 is waiting on the owner (Actions disabled, so there are no 1.4.1 artifacts). #42 done on main; #40 waits on the owner (live AD test).
 - #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load. Fixed on main (d0b114c) and on `release/1.4`; guard test on both (it fails on the old layout). `v1.4.1` is tagged (fdac8ef), sc-build verified. **Waiting on the owner:** GitHub Actions is disabled on the repo, so release.yml produced no artifacts; crates.io, COPR and the distro uploads need the owner's tokens.
-- #42 P1 lease breaks only on WRITE — **in progress (2026-10-06)**. Plan: a
-  `break_leases(srv, (share_idx, ino), except_key)` helper called from CREATE
-  overwrite/supersede of an existing file, SET_INFO EndOfFile, rename (source and
-  a replaced target) and delete (disposition set + unlink at CLOSE); the actor's
-  own lease key is exempt. process_frame test: lease held on conn A, conn B
-  truncates/overwrites/renames/deletes → A's mailbox gets the break.
+- #42 P1 lease breaks — **done on `main` (2026-10-06, e6eb9ed)**: truncate, overwrite,
+  rename (source + replaced target) and delete now break other keys' leases;
+  process_frame test, sc-build 61/61. Not re-run against live cifs/Windows mounts.
 - #39 P2 external security review
 - #40 P2 per-share authz — **done on `main` (2026-10-06)**: share access lists +
   PAC group SIDs (c2e2438 and follow-ups), sc-build green (default + kerberos,
