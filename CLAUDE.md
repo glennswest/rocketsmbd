@@ -199,11 +199,15 @@ Order:
 - #42 P1 lease breaks — **done on `main` (2026-10-06, e6eb9ed)**: truncate, overwrite,
   rename (source + replaced target) and delete now break other keys' leases;
   process_frame test, sc-build 61/61. Not re-run against live cifs/Windows mounts.
-- #39 P2 external security review — **in progress (2026-10-06):** self-review pass
-  across the issue's scope → findings report docs/SECURITY-REVIEW.md; fix the fuzz
-  build (#50/#51) and add `spnego` + `transform` fuzz targets, built by `cargo test`
-  so they can't drift; SAFETY comments on every `unsafe`; fix material findings;
-  SECURITY.md updated. External eyes + dropping the 445 caveat = owner's call.
+- #39 P2 security review — **self-review done on `main` (2026-10-06)**: findings
+  report docs/SECURITY-REVIEW.md (R1–R27, U1–U3); fixed all Critical/High and most
+  Medium/Low (a1686f8, 25792f0, b5c2ff8), regression tests in smb2::tests, fuzz
+  targets spnego + transform (bodies in src/fuzzing.rs, smoke-run by cargo test).
+  Follow-ups #55 (conn caps/timeouts), #56 (openat2), #57 (lease table), #58
+  (interop). **Waiting on the owner:** external reviewer, defaults for
+  `require_signing`/`allow_guest` (R11/R12), dedicated service user (R15), adding
+  spnego/transform to fuzz.yml (needs a push with `workflow` scope). Not re-run
+  against live cifs/Windows mounts yet — do that before the next release.
 - #40 P2 per-share authz — **done on `main` (2026-10-06)**: share access lists +
   PAC group SIDs (c2e2438 and follow-ups), sc-build green (default + kerberos,
   clippy). Not run against a live AD DC: dc1.ad.g8.lo (192.168.8.105) was

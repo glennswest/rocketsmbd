@@ -50,15 +50,19 @@ Allow unauthenticated guest sessions. Defaults true only when no users exist.
 Reject unsigned requests on authenticated sessions.
 .TP
 .B multichannel
-Advertise SMB3 multichannel and accept session binding.
+Advertise SMB3 multichannel and accept session binding (SMB 3.x, to an
+established non-guest session only).
 .TP
 .B advertise_only
 List of IPs to advertise for multichannel (e.g. a storage NIC). Empty = all
 non-loopback interfaces.
 .TP
 .B encrypt
-Require SMB3 encryption on all post-auth traffic. Default false; encryption a
-client asks for (e.g. cifs \fBseal\fR) is honored either way.
+Require SMB3 encryption on all post-auth traffic. A session that can't be
+encrypted (SMB 2.x/3.0.x, SMB 3.1.1 without a cipher, or guest) is refused,
+and a plaintext request on an encrypted session gets ACCESS_DENIED. Default
+false; encryption a client asks for (e.g. cifs \fBseal\fR) is honored either
+way.
 .TP
 .B prefer_aes256
 Prefer AES-256 ciphers (GCM, then CCM) when offered. Default false.
@@ -125,8 +129,8 @@ Mount from a client:
 mount -t cifs //server/data /mnt -o username=alice,password=secret,vers=3.1.1
 .fi
 .SH SECURITY
-No external security review has been done yet; do not expose port 445 to the
-public internet. Authorization is per share (the access lists above); file I/O
+A self-review was done in October 2026 (docs/SECURITY-REVIEW.md), but no
+external security review yet; do not expose port 445 to the public internet. Authorization is per share (the access lists above); file I/O
 runs as the server's Unix user, so on-disk permissions don't distinguish
 clients. For untrusted
 networks, use Kerberos or NTLMv2 users with \fBrequire_signing\fR and

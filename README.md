@@ -177,9 +177,9 @@ Unknown keys are rejected. A full example is in
 | `log_level` | `1` | `0` = warn, `1` = info, `2` = debug. |
 | `allow_guest` | true if there are no `[[user]]` entries, else false | Allow unauthenticated guest sessions. |
 | `require_signing` | `false` | Reject unsigned requests on authenticated sessions. |
-| `encrypt` | `false` | Require SMB3 encryption for all post-auth traffic. When false, encryption a client asks for (e.g. cifs `seal`) is still honored. |
+| `encrypt` | `false` | Require SMB3 encryption for all post-auth traffic. A session that can't be encrypted (SMB 2.x/3.0.x, SMB 3.1.1 without a cipher, or guest) is refused. When false, encryption a client asks for (e.g. cifs `seal`) is still honored; either way, an encrypting session takes no plaintext requests. |
 | `prefer_aes256` | `false` | Pick AES-256 (GCM, then CCM) when offered, instead of the client's order. |
-| `multichannel` | `false` | Advertise SMB3 multichannel and accept session binding. |
+| `multichannel` | `false` | Advertise SMB3 multichannel and accept session binding (SMB 3.x, to an established non-guest session only). |
 | `advertise_only` | `[]` | IPs to advertise for multichannel; empty = every non-loopback interface. |
 | `core_pinning` | `true` | Pin worker N to core N mod ncpu. |
 | `sqpoll` | `false` | io_uring SQPOLL (a busy kernel thread per worker). |
