@@ -11,7 +11,7 @@ connection-slot churn, memory scaling, and mount/teardown storms.
 # 1. rocketsmbd listening on :445 with share "data" (path /srv/stress) and
 #    user glenn/testpw123, e.g.:
 #      listen="0.0.0.0:445"; oplocks=true
-#      [[user]] name="glenn" password="testpw123"
+#      [[user]] name="glenn" password="testpw123" # not a secret: test fixture
 #      [[share]] name="data" path="/srv/stress"
 sudo rocketsmbd --config /etc/rocketsmbd.toml &
 
