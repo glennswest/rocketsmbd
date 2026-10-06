@@ -287,8 +287,8 @@ unsafe fn display_name(name: gss::gss_name_t) -> String {
 }
 
 /// Read the PAC off an accepted client name and decode its LOGON_INFO. Tries
-/// the whole PAC (`urn:mspac:`) then the LOGON_INFO buffer alone
-/// (`urn:mspac:logon-info`). Only an *authenticated* attribute is used: the
+/// the LOGON_INFO buffer (`urn:mspac:logon-info`) then the whole PAC
+/// (`urn:mspac:`); a PAC without LOGON_INFO (MIT KDC) is "no groups". Only an *authenticated* attribute is used: the
 /// GSS library sets that once it has verified the PAC's server signature with
 /// our service key, so a client can't forge group membership.
 unsafe fn name_pac(name: gss::gss_name_t, client: &str) -> Option<crate::pac::LogonInfo> {
@@ -297,8 +297,8 @@ unsafe fn name_pac(name: gss::gss_name_t, client: &str) -> Option<crate::pac::Lo
     }
     type Parse = fn(&[u8]) -> Result<crate::pac::LogonInfo, String>;
     let attrs: [(&str, Parse); 2] = [
-        ("urn:mspac:", crate::pac::parse_pac),
         ("urn:mspac:logon-info", crate::pac::parse_logon_info),
+        ("urn:mspac:", crate::pac::parse_pac),
     ];
     for (attr, parse) in attrs {
         let mut minor: gss::OM_uint32 = 0;
@@ -327,6 +327,10 @@ unsafe fn name_pac(name: gss::gss_name_t, client: &str) -> Option<crate::pac::Lo
         }
         match parse(&v) {
             Ok(li) => return Some(li),
+            Err(e) if e == crate::pac::NO_LOGON_INFO => {
+                crate::logd!("kerberos: {client}: PAC has no LOGON_INFO (non-AD KDC)");
+                return None;
+            }
             Err(e) => {
                 crate::logw!("kerberos: {client}: PAC ({attr}) unreadable: {e}");
                 return None;

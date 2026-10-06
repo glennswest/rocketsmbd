@@ -16,6 +16,11 @@
 
 use std::fmt;
 
+/// `parse_pac` error for a PAC that has no LOGON_INFO buffer — what an MIT
+/// KDC issues (it has no AD account data). Not a fault; callers treat it as
+/// "no groups".
+pub const NO_LOGON_INFO: &str = "PAC: no LOGON_INFO buffer";
+
 /// PAC buffer type of the `KERB_VALIDATION_INFO`.
 const PAC_LOGON_INFO: u32 = 1;
 
@@ -114,7 +119,7 @@ pub fn parse_pac(pac: &[u8]) -> Result<LogonInfo, String> {
             return parse_logon_info(buf);
         }
     }
-    Err("PAC: no LOGON_INFO buffer".into())
+    Err(NO_LOGON_INFO.into())
 }
 
 /// Decode a LOGON_INFO buffer (what `urn:mspac:logon-info` returns): the NDR
