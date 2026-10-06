@@ -501,7 +501,7 @@ fn read_plan_hdr(plan: &ZcReadPlan) -> ReqHdr {
 /// or an encoding that exceeds the client's buffer — degrades to
 /// STATUS_NOTIFY_ENUM_DIR ("re-enumerate") for success completions.
 pub fn build_notify_final(
-    pc: &ProtoConn,
+    pc: &mut ProtoConn,
     meta: &AsyncMeta,
     st: u32,
     events: &[(u32, String)],
@@ -541,6 +541,17 @@ pub fn build_notify_final(
         let start = begin_resp_async(&mut tx, meta, final_st, 0, CMD_CHANGE_NOTIFY);
         err_body(&mut tx);
         finalize_async(pc, meta, &mut tx, start);
+    }
+    // On an encrypting channel the completion goes out sealed, like every
+    // other response there; it used to go out in cleartext (#39 R13).
+    if let Some(ch) = pc.channels.get_mut(&meta.session_id) {
+        if ch.encrypt {
+            if let Some(enc) = ch.enc.as_mut() {
+                let mut sealed = Vec::with_capacity(tx.len() + 56);
+                wrap_transform(&tx[4..], enc, meta.session_id, &mut sealed);
+                return sealed;
+            }
+        }
     }
     tx
 }

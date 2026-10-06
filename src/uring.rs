@@ -864,7 +864,7 @@ fn service_notify(ring: &mut IoUring, w: &mut Worker, idx: usize) {
                 }
             }
             let resp =
-                smb2::build_notify_final(&c.proto, &watch.pend.meta, d.status, &[], watch.pend.out_len);
+                smb2::build_notify_final(&mut c.proto, &watch.pend.meta, d.status, &[], watch.pend.out_len);
             c.deferred.push_back(resp);
         }
     }
@@ -873,7 +873,7 @@ fn service_notify(ring: &mut IoUring, w: &mut Worker, idx: usize) {
 /// Build + queue a final notify response and clear the active entry.
 fn complete_notify(c: &mut Conn, pend: &crate::smb2::NotifyPend, st: u32, events: &[(u32, String)]) {
     logd!("notify complete aid={} st={:#x} events={}", pend.async_id, st, events.len());
-    let resp = smb2::build_notify_final(&c.proto, &pend.meta, st, events, pend.out_len);
+    let resp = smb2::build_notify_final(&mut c.proto, &pend.meta, st, events, pend.out_len);
     c.deferred.push_back(resp);
     c.proto.notify_active.retain(|&(_, a)| a != pend.async_id);
 }

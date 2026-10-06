@@ -228,6 +228,12 @@ pub fn dispatch(
     None
 }
 
+/// Resource caps (#39 R14): open handles and tree connects per session,
+/// pended CHANGE_NOTIFYs per connection. Far above what real clients use.
+const MAX_OPENS_PER_SESSION: usize = 16384;
+const MAX_TREES_PER_SESSION: usize = 1024;
+const MAX_NOTIFY_PER_CONN: usize = 1024;
+
 /// Unfinished session setups one connection may hold at once.
 const MAX_PENDING_SETUPS: usize = 4;
 
@@ -1199,6 +1205,10 @@ fn tree_connect(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chai
             crate::authz::Access::ReadWrite => false,
         }
     };
+    if sess.trees.len() >= MAX_TREES_PER_SESSION {
+        err_resp(tx, h, status::INSUFFICIENT_RESOURCES, chain);
+        return;
+    }
     sess.next_tree_id += 1;
     let tree_id = sess.next_tree_id;
     sess.trees.insert(tree_id, crate::smb2::Tree { share_idx, ipc, read_only });
@@ -1345,6 +1355,11 @@ fn create(
         }
     };
 
+    // Every open is a server fd: bound what one session can hold (#39 R14).
+    if sess.handles.len() >= MAX_OPENS_PER_SESSION {
+        err_resp(tx, h, status::INSUFFICIENT_RESOURCES, chain);
+        return;
+    }
     let wants_write = req.desired & WRITE_BITS != 0;
     let creates = matches!(
         req.disposition,
@@ -2578,6 +2593,10 @@ fn change_notify(pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, body: 
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
+    if pc.notify_active.len() >= MAX_NOTIFY_PER_CONN {
+        err_resp(tx, h, status::INSUFFICIENT_RESOURCES, chain);
+        return;
+    }
     let want_sign = pc
         .channels
         .get(&chain.session_id)
