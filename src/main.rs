@@ -39,6 +39,9 @@ fn main() {
         Err(e) => die(&e),
     };
     log::set_level(cfg.log_level);
+    for w in cfg.warnings() {
+        eprintln!("rocketsmbd: warning: {w}");
+    }
     if check_only {
         println!("config ok: {} share(s)", cfg.shares.len());
         return;

@@ -526,7 +526,7 @@ fn negotiate_body(
     tx: &mut Vec<u8>,
 ) {
     let mut secmode = SECURITY_MODE_SIGNING_ENABLED;
-    if srv.cfg.require_signing {
+    if srv.cfg.signing_required() {
         secmode |= SECURITY_MODE_SIGNING_REQUIRED;
     }
     // SPNEGO NegTokenInit2 hint advertises the NTLM mechtype. Without the
@@ -702,7 +702,7 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
     let spnego = ntlm::is_spnego(blob);
     let binding = ss_flags & SESSION_FLAG_BINDING != 0;
     let signing_required =
-        srv.cfg.require_signing || client_secmode as u16 & SECURITY_MODE_SIGNING_REQUIRED != 0;
+        srv.cfg.signing_required() || client_secmode as u16 & SECURITY_MODE_SIGNING_REQUIRED != 0;
 
     match ntlm::classify(blob) {
         ntlm::Token::Negotiate => {
@@ -1023,7 +1023,7 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
     let incoming = crate::spnego::classify(blob);
     let wrapped = incoming.spnego;
     let signing_required =
-        srv.cfg.require_signing || client_secmode as u16 & SECURITY_MODE_SIGNING_REQUIRED != 0;
+        srv.cfg.signing_required() || client_secmode as u16 & SECURITY_MODE_SIGNING_REQUIRED != 0;
     let dialect = pc.dialect;
     let cipher = pc.cipher;
 
@@ -2693,7 +2693,7 @@ fn ioctl(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chai
             // They MUST match what NEGOTIATE advertised, or the client aborts
             // with "security settings mismatch".
             let mut secmode = SECURITY_MODE_SIGNING_ENABLED;
-            if srv.cfg.require_signing {
+            if srv.cfg.signing_required() {
                 secmode |= SECURITY_MODE_SIGNING_REQUIRED;
             }
             let mut o: Vec<u8> = Vec::with_capacity(24);

@@ -17,13 +17,16 @@ pub struct Config {
     /// 0 = warn, 1 = info, 2 = debug.
     #[serde(default = "default_log_level")]
     pub log_level: u8,
-    /// Allow unauthenticated guest sessions. Defaults to true when no
-    /// [[user]] entries exist (compat), false otherwise.
+    /// Allow unauthenticated guest sessions. Unset: true only when no
+    /// [[user]] entries exist and Kerberos isn't configured (see
+    /// `guest_allowed`).
     #[serde(default)]
     pub allow_guest: Option<bool>,
-    /// Require SMB2 signing from authenticated sessions.
+    /// Require SMB2 signing from authenticated sessions. Unset means false
+    /// for now (signing only when the client asks); the default becomes true
+    /// in 2.0 (#39), and an unset key logs a warning until then.
     #[serde(default)]
-    pub require_signing: bool,
+    pub require_signing: Option<bool>,
     /// Advertise SMB3 multichannel and accept session binding so a single
     /// client can stripe one share across multiple connections (cores).
     #[serde(default)]
@@ -275,8 +278,37 @@ impl Config {
         std::collections::HashMap::new()
     }
 
+    /// Guest sessions are allowed when `allow_guest` says so; unset, only on
+    /// a server with no `[[user]]` entries and no Kerberos. A Kerberos/AD
+    /// server never falls open to guest by omission (#39 R12).
     pub fn guest_allowed(&self) -> bool {
-        self.allow_guest.unwrap_or(self.users.is_empty())
+        self.allow_guest.unwrap_or(self.users.is_empty() && !self.kerberos_configured())
+    }
+
+    /// Kerberos is configured: an enabled `[kerberos]` table, or
+    /// `auth = "kerberos"`.
+    pub fn kerberos_configured(&self) -> bool {
+        self.kerberos.as_ref().is_some_and(|k| k.enabled) || self.auth == AuthMode::Kerberos
+    }
+
+    /// Whether authenticated sessions must sign (`require_signing`, false
+    /// when unset until 2.0).
+    pub fn signing_required(&self) -> bool {
+        self.require_signing.unwrap_or(false)
+    }
+
+    /// Settings worth a warning at startup and `--check`.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut w = Vec::new();
+        if self.require_signing.is_none() {
+            w.push(
+                "require_signing is not set: signing is off unless the client asks for it, which \
+                 leaves requests open to tampering and NTLM to relay. It will default to true in \
+                 2.0; set it explicitly (true is recommended)."
+                    .into(),
+            );
+        }
+        w
     }
 
     pub fn listen_addr(&self) -> Result<SocketAddr, String> {
@@ -333,5 +365,34 @@ mod tests {
             s.path = std::env::temp_dir();
         }
         cfg.validate().unwrap_or_else(|e| panic!("rocketsmbd.toml.example fails validation: {e}"));
+    }
+
+    fn parse(extra: &str) -> Config {
+        toml::from_str(&format!("{extra}\n[[share]]\nname = \"s\"\npath = \"/tmp\"\n")).unwrap()
+    }
+
+    /// Guest by omission only on a server with no users and no Kerberos
+    /// (#39 R12); an explicit `allow_guest` always wins.
+    #[test]
+    fn guest_default_off_with_kerberos() {
+        assert!(parse("").guest_allowed(), "no users, no Kerberos: guest (compat)");
+        assert!(!parse("[kerberos]\nkeytab = \"/etc/krb5.keytab\"").guest_allowed());
+        assert!(!parse("auth = \"kerberos\"").guest_allowed());
+        assert!(parse("[kerberos]\nenabled = false").guest_allowed(), "disabled table");
+        assert!(parse("allow_guest = true\n[kerberos]\nkeytab = \"/k\"").guest_allowed());
+        assert!(!parse("[[user]]\nname = \"u\"\npassword = \"p\"").guest_allowed());
+    }
+
+    /// `require_signing` unset is false for now, and warns (#39: true in 2.0).
+    #[test]
+    fn require_signing_unset_warns() {
+        let c = parse("");
+        assert!(!c.signing_required());
+        assert_eq!(c.warnings().len(), 1);
+        for (v, want) in [("true", true), ("false", false)] {
+            let c = parse(&format!("require_signing = {v}"));
+            assert_eq!(c.signing_required(), want);
+            assert!(c.warnings().is_empty(), "explicit setting: no warning");
+        }
     }
 }

@@ -24,9 +24,13 @@ multichannel = false
 # broken on a conflicting write; write-caching is never granted.
 oplocks = true
 
-# Security. With no [[user]] entries, guest access is allowed by default.
-# Add users to require authentication; set allow_guest explicitly to override.
-require_signing = false  # true = reject unsigned requests on auth'd sessions
+# Security. Guest access is allowed by default only with no [[user]] entries
+# and no Kerberos ([kerberos] table or auth = "kerberos"); set allow_guest
+# explicitly to override.
+# require_signing: true = reject unsigned requests on authenticated sessions.
+# Recommended on anything but a trusted LAN; it becomes the default in 2.0, and
+# leaving it unset logs a warning until then.
+require_signing = false
 encrypt = false          # true = require SMB3 encryption (AES-128/256-GCM/CCM)
 prefer_aes256 = false    # true = pick AES-256 when the client offers it
 # allow_guest = false
