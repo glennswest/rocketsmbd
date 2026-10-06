@@ -210,3 +210,25 @@ pub fn urandom(buf: &mut [u8]) {
     let mut f = std::fs::File::open("/dev/urandom").expect("open /dev/urandom");
     f.read_exact(buf).expect("read /dev/urandom");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped example is installed as `/etc/rocketsmbd.toml` by the
+    /// .deb/.rpm/Fedora spec, so it must load as-is (#41: top-level keys placed
+    /// after `[[share]]` became unknown share keys and the file was rejected).
+    #[test]
+    fn shipped_example_config_loads() {
+        let raw = include_str!("../rocketsmbd.toml.example");
+        let mut cfg: Config = toml::from_str(raw)
+            .unwrap_or_else(|e| panic!("rocketsmbd.toml.example does not parse: {e}"));
+        assert!(!cfg.shares.is_empty(), "example must define a [[share]]");
+        // The example's share path (/srv/data) needn't exist on the test host;
+        // point it at a directory that does so the rest of validate() runs.
+        for s in &mut cfg.shares {
+            s.path = std::env::temp_dir();
+        }
+        cfg.validate().unwrap_or_else(|e| panic!("rocketsmbd.toml.example fails validation: {e}"));
+    }
+}
