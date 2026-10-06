@@ -850,6 +850,7 @@ mod tests {
             advertise_only: vec![],
             core_pinning: false,
             sqpoll: false,
+            health_listen: None,
             prefer_aes256: false,
             oplocks: false,
             auth: crate::config::AuthMode::Both,

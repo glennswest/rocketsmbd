@@ -46,6 +46,11 @@ pub struct Config {
     /// busy kernel thread per worker, so it is opt-in. Default off.
     #[serde(default)]
     pub sqpoll: bool,
+    /// Opt-in HTTP health endpoint (`GET /healthz`), e.g. `"127.0.0.1:9104"`.
+    /// Unset (default) = no listener: the server stays TCP 445 only. See
+    /// `health.rs` for what it reports.
+    #[serde(default)]
+    pub health_listen: Option<String>,
     /// Prefer AES-256 ciphers (GCM then CCM) when the client offers them,
     /// instead of honoring the client's preference order (which usually picks
     /// AES-128-GCM for speed). Default off.
@@ -166,6 +171,10 @@ impl Config {
 
     fn validate(&self) -> Result<(), String> {
         self.listen_addr()?;
+        if let Some(h) = &self.health_listen {
+            h.parse::<SocketAddr>()
+                .map_err(|e| format!("invalid health_listen address {h:?}: {e}"))?;
+        }
         if self.shares.is_empty() {
             return Err("config must define at least one [[share]]".into());
         }

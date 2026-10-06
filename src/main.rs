@@ -7,7 +7,9 @@ extern crate rocketsmbd;
 use rocketsmbd::config::Config;
 use rocketsmbd::{config, log, vfs};
 #[cfg(target_os = "linux")]
-use rocketsmbd::{config::Srv, lease, net, session, smb2, uring};
+use rocketsmbd::{config::Srv, health, lease, net, session, smb2, uring};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicUsize;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 
@@ -115,19 +117,33 @@ fn run(cfg: Config) {
         max_read / 1024
     );
 
+    let workers_live = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
     for wid in 0..workers {
         let srv = Arc::clone(&srv);
+        let guard = health::WorkerGuard::new(&workers_live);
         handles.push(
             std::thread::Builder::new()
                 .name(format!("worker-{wid}"))
                 .spawn(move || {
+                    let _guard = guard;
                     if let Err(e) = uring::run_worker(wid, srv) {
                         logw!("worker {wid} exited: {e}");
                     }
                 })
                 .expect("spawn worker"),
         );
+    }
+    if let Some(addr) = &srv.cfg.health_listen {
+        let state = health::State {
+            workers_total: workers,
+            workers_live,
+            share_paths: srv.cfg.shares.iter().map(|s| s.path.clone()).collect(),
+        };
+        if let Err(e) = health::spawn(addr, state) {
+            die(&e);
+        }
+        logi!("health endpoint on http://{addr}/healthz");
     }
     for h in handles {
         let _ = h.join();
