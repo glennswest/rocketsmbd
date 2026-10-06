@@ -3,12 +3,5 @@
 //! (offset/length) decoding, which run on attacker-controlled bytes during
 //! SESSION_SETUP.
 use libfuzzer_sys::fuzz_target;
-use rocketsmbd::ntlm;
 
-fuzz_target!(|data: &[u8]| {
-    let _ = ntlm::find_token(data);
-    let _ = ntlm::classify(data);
-    if let Some(a) = ntlm::parse_authenticate(data) {
-        let _ = a.is_anonymous();
-    }
-});
+fuzz_target!(|data: &[u8]| rocketsmbd::fuzzing::fuzz_ntlm(data));

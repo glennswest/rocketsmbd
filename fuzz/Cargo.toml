@@ -26,3 +26,17 @@ path = "fuzz_targets/ntlm.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "spnego"
+path = "fuzz_targets/spnego.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transform"
+path = "fuzz_targets/transform.rs"
+test = false
+doc = false
+bench = false

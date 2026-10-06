@@ -7,6 +7,7 @@
 pub mod authz;
 pub mod config;
 pub mod crypto;
+pub mod fuzzing;
 pub mod lease;
 #[macro_use]
 pub mod log;

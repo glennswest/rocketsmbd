@@ -837,46 +837,9 @@ fn process_plain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ShareCfg};
+    use crate::config::ShareCfg;
+    use crate::fuzzing::test_srv;
     use crate::wire::utf16le;
-
-    fn test_srv(dir: &std::path::Path) -> Srv {
-        let cfg = Config {
-            listen: "127.0.0.1:445".into(),
-            workers: 1,
-            server_name: "TESTSRV".into(),
-            log_level: 0,
-            allow_guest: None,
-            require_signing: false,
-            multichannel: false,
-            encrypt: false,
-            advertise_only: vec![],
-            core_pinning: false,
-            sqpoll: false,
-            health_listen: None,
-            prefer_aes256: false,
-            oplocks: false,
-            auth: crate::config::AuthMode::Both,
-            kerberos: None,
-            shares: vec![ShareCfg { name: "t".into(), path: dir.into(), ..Default::default() }],
-            users: vec![],
-            groups: vec![],
-        };
-        let users = cfg.user_db();
-        let allow_guest = cfg.guest_allowed();
-        Srv {
-            cfg,
-            guid: [9; 16],
-            max_read: 1 << 20,
-            start_ft: 0,
-            users,
-            allow_guest,
-            interfaces: vec![],
-            sessions: crate::session::Registry::default(),
-            mailboxes: vec![],
-            leases: crate::lease::LeaseTable::default(),
-        }
-    }
 
     fn req_hdr(cmd: u16, msg_id: u64, tree: u32, sess: u64) -> Vec<u8> {
         let mut v: Vec<u8> = Vec::with_capacity(64);
