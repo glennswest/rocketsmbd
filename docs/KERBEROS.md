@@ -100,9 +100,30 @@ per SESSION_SETUP:
   `CONTINUE_NEEDED`, the handler logs it and fails with `STATUS_LOGON_FAILURE`;
   the partial context isn't persisted across SESSION_SETUP legs (#38).
   cifs.ko and Windows send a complete AP-REQ in one leg.
-- The authenticated client name (`gss_display_name`) is extracted and
-  **logged only**. No authorization uses it: every authenticated user can use
-  every share (#40).
+- The authenticated client name (`gss_display_name`) becomes the session
+  user; share access lists match it (`alice@REALM`, or bare `alice` when
+  `[kerberos].realm` is set).
+
+## 5a. PAC and AD groups (#40)
+
+- After the context completes, `name_pac` reads the PAC off the client name
+  with `gss_get_name_attribute` (RFC 6680): `urn:mspac:logon-info`, falling
+  back to the whole PAC (`urn:mspac:`). It's used only when the attribute is
+  **authenticated**, which the GSS library sets once it has checked the PAC's
+  server signature with the service key, so a client can't add groups.
+- `src/pac.rs` decodes the LOGON_INFO (`KERB_VALIDATION_INFO`, NDR) into the
+  account name, NetBIOS domain, user SID and every group SID (primary group,
+  `GroupIds`, `ExtraSids`, resource groups). It's plain Rust, tested on every
+  build against two recorded Windows PACs (`testdata/`).
+- The PAC has no group names. Share lists name groups by SID
+  (`@S-1-5-21-…`), by well-known RID (`@Domain Admins`) or through a
+  `[[group]]` table; there's no LDAP lookup.
+- An MIT KDC issues a PAC without LOGON_INFO: the session has no groups, and
+  that's logged at debug level only. The session log line lists
+  `DOMAIN\user`, the user SID and the group SIDs when a PAC is present.
+- Not yet run against a live AD DC: the lab DC (dc1.ad.g8.lo) was
+  unreachable when this landed (2026-10-06). The parser is checked against the
+  recorded PACs and the TREE_CONNECT path through `process_frame`.
 
 ## 6. Session-key derivation (#34)
 

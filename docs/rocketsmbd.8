@@ -91,7 +91,19 @@ directory), and optional \fBread_only\fR; at least one is required and
 \fBIPC$\fR is reserved. Users are \fB[[user]]\fR tables with \fBname\fR and
 either \fBpassword\fR or a 32-hex-char \fBnt_hash\fR. An optional
 \fB[kerberos]\fR table sets \fBenabled\fR, \fBkeytab\fR, \fBspn\fR (default
-\fIcifs/<server_name>\fR), and \fBrealm\fR (currently ignored).
+\fIcifs/<server_name>\fR), and \fBrealm\fR (qualifies bare user names in
+share lists).
+.PP
+A share may restrict access with \fBvalid_users\fR, \fBinvalid_users\fR and
+\fBread_only_users\fR, checked at tree connect: \fBinvalid_users\fR denies,
+a non-empty \fBvalid_users\fR denies everyone it doesn't match, and
+\fBread_only_users\fR makes the share read-only. Entries are a local user
+(\fIalice\fR, which also matches \fIalice@<realm>\fR), a Kerberos principal
+(\fIalice@REALM\fR), a PAC user (\fIDOMAIN\ealice\fR), or a group:
+\fI@S-1-5-21-...\fR, a well-known AD group such as \fI@Domain Admins\fR, or
+\fI@name\fR for a \fB[[group]]\fR table (\fBname\fR, \fBsid\fR and/or
+\fBmembers\fR). AD group membership comes from the verified Kerberos PAC;
+there is no LDAP lookup.
 .SH EXAMPLE
 .nf
 listen = "0.0.0.0:445"
@@ -114,8 +126,9 @@ mount -t cifs //server/data /mnt -o username=alice,password=secret,vers=3.1.1
 .fi
 .SH SECURITY
 No external security review has been done yet; do not expose port 445 to the
-public internet. Authorization is share-level only: any authenticated user may
-use every share, and file I/O runs as the server's Unix user. For untrusted
+public internet. Authorization is per share (the access lists above); file I/O
+runs as the server's Unix user, so on-disk permissions don't distinguish
+clients. For untrusted
 networks, use Kerberos or NTLMv2 users with \fBrequire_signing\fR and
 \fBencrypt\fR. See SECURITY.md.
 .SH FILES

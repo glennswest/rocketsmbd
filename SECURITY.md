@@ -33,12 +33,15 @@ still hasn't been done (#39). Know the following before deploying:
     default; compile out with `--no-default-features`).
   - **Guest/anonymous** when enabled. No account lockout yet.
   - Kerberos accepts single-leg AP-REQ exchanges only (#38).
-- **Authorization is share-level only** — `read_only` per share applies to
-  everyone. Any authenticated user (or guest, if allowed) can use every share,
-  and all file I/O runs as the server process's Unix user, so on-disk
-  permissions don't distinguish clients. Per-share user/group lists and a
-  SID→uid map are tracked in #40. Run the server as a dedicated unprivileged
-  user that owns only the share trees.
+- **Authorization is per share** — `valid_users` / `invalid_users` /
+  `read_only_users` decide at TREE_CONNECT who may use a share and who gets it
+  read-only, by user, Kerberos principal, or AD group SID from the PAC (#40).
+  Only a PAC the GSS library has verified with the service key is used; an
+  unverified one is ignored. Without lists, any authenticated user (or guest,
+  if allowed) can use the share. All file I/O runs as the server process's
+  Unix user, so on-disk permissions don't distinguish clients (per-client
+  file identity is #53). Run the server as a dedicated unprivileged user that
+  owns only the share trees.
 - **Crypto backend** — pure-Rust (default) or **system OpenSSL**
   (`--features backend-openssl`) for FIPS deployments, where OpenSSL is the
   validated module. A FIPS+AD build is

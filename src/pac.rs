@@ -386,6 +386,19 @@ mod tests {
         assert!(parse_pac(&[0u8; 8]).is_err());
     }
 
+    /// A PAC with no LOGON_INFO (what an MIT KDC issues) reports the
+    /// distinguishable NO_LOGON_INFO error.
+    #[test]
+    fn pac_without_logon_info() {
+        let mut pac = Vec::new();
+        pac.extend_from_slice(&1u32.to_le_bytes()); // cBuffers
+        pac.extend_from_slice(&0u32.to_le_bytes()); // Version
+        pac.extend_from_slice(&10u32.to_le_bytes()); // CLIENT_INFO
+        pac.extend_from_slice(&0u32.to_le_bytes());
+        pac.extend_from_slice(&24u64.to_le_bytes());
+        assert_eq!(parse_pac(&pac), Err(NO_LOGON_INFO.to_string()));
+    }
+
     #[test]
     fn sid_string_roundtrip() {
         let s = "S-1-5-21-3048156945-3961193616-3706469200-512";

@@ -124,8 +124,11 @@ about NetBIOS framing and the `ZcRead` plan escape hatch.
   `src/krb5.rs`, `kerberos` feature) runs one `gss_accept_sec_context` over
   the AP-REQ; multi-leg GSS exchanges are rejected (#38). Either way, the
   session key feeds the SP800-108 KDF for signing and encryption keys.
-- Authorization is share-level only: `read_only` per share, no per-user share
-  lists, and I/O runs as the server's Unix user (#40).
+- Authorization (`src/authz.rs`) runs at TREE_CONNECT: the share's
+  `valid_users` / `invalid_users` / `read_only_users` against the session's
+  user, Kerberos flag and PAC (`src/pac.rs`, group SIDs). The result is stored
+  on the `Tree` (`read_only`), which CREATE, WRITE and SET_INFO check instead
+  of the share flag. I/O still runs as the server's Unix user (#53).
 - Signing: HMAC-SHA256 (2.x) / AES-CMAC (3.x) verify-and-sign; authenticated
   sessions always sign responses. `require_signing` rejects unsigned requests.
 - Encryption: TRANSFORM_HEADER with AES-128/256-GCM/CCM (`prefer_aes256`);

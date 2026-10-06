@@ -28,10 +28,14 @@ NTLMv2-only. Kerberos is also off in the default build (`--features kerberos`,
 see [docs/KERBEROS.md](docs/KERBEROS.md)), as is the OpenSSL backend
 (`--features backend-openssl`, see [docs/FIPS.md](docs/FIPS.md)).
 
-**Authorization is share-level only.** Once authenticated, any user can use
-every share (`read_only` applies to everyone), and all file I/O runs as the
-server's own Unix user. Per-share user/group lists and per-user identity are
-tracked in [#40](https://github.com/glennswest/rocketsmbd/issues/40).
+**Authorization is per share, not per file.** A share can list who may
+connect (`valid_users` / `invalid_users`) and who gets it read-only
+(`read_only_users`), by user or by AD group (group SIDs come from the
+Kerberos PAC; see [Share access lists](#share-access-lists)). Without lists,
+any authenticated user can use the share. All file I/O still runs as the
+server's own Unix user, so on-disk permissions don't tell clients apart;
+per-client file identity is
+[#53](https://github.com/glennswest/rocketsmbd/issues/53).
 
 **No SMB1.** Every SMB1 NEGOTIATE gets the SMB2 wildcard (0x02FF) reply, and
 the dialects the client offers are never checked. A client that speaks
@@ -182,9 +186,10 @@ Unknown keys are rejected. A full example is in
 | `health_listen` | unset (off) | Address for an HTTP health endpoint, e.g. `"127.0.0.1:9104"`. `GET /healthz` returns `200` while every worker is running and every share path is a directory, `503` otherwise, with a JSON body (status, version, worker and share counts; no names or paths). Bind it to loopback or an admin network. |
 | `oplocks` | `true` | Grant leases: read-caching and handle-caching (R/RH). Write-caching is never granted. |
 | `auth` | `"both"` | `"ntlm"`, `"kerberos"` or `"both"` (Kerberos preferred). Intersected with the built features. |
-| `[kerberos]` | absent | `enabled` (default true), `keytab` (default `$KRB5_KTNAME` / system keytab), `spn` (default `cifs/<server_name>`), `realm` (currently ignored, #45). Used only in a `kerberos` build. |
-| `[[share]]` | at least one required | `name`, `path` (must be an existing directory), `read_only` (default false). `IPC$` is reserved. |
+| `[kerberos]` | absent | `enabled` (default true), `keytab` (default `$KRB5_KTNAME` / system keytab), `spn` (default `cifs/<server_name>`), `realm` (qualifies bare names in share lists; the acceptor still takes the realm from `krb5.conf`, #45). Used only in a `kerberos` build. |
+| `[[share]]` | at least one required | `name`, `path` (must be an existing directory), `read_only` (default false), and the access lists `valid_users`, `invalid_users`, `read_only_users` (default empty; see below). `IPC$` is reserved. |
 | `[[user]]` | none | `name` plus exactly one of `password` or `nt_hash` (32 hex chars). NTLM users only; Kerberos principals come from the KDC. |
+| `[[group]]` | none | `name` plus `sid` (an AD group SID, matched against the PAC) and/or `members` (user entries). Named in share lists as `@name`. |
 
 ```toml
 listen = "0.0.0.0:445"
@@ -203,6 +208,42 @@ password = "secret"        # or: nt_hash = "<32 hex chars>"
 
 Run: `rocketsmbd --config /etc/rocketsmbd.toml` (packages install a systemd
 unit, `rocketsmbd.service`).
+
+### Share access lists
+
+Checked at TREE_CONNECT. A match in `invalid_users` refuses the share
+(`STATUS_ACCESS_DENIED`). A non-empty `valid_users` refuses everyone it
+doesn't match. A user matched by `read_only_users` (or any user, on a
+`read_only` share) gets a read-only tree. Guests match no entry. Names
+compare case-insensitively.
+
+| Entry | Matches |
+|---|---|
+| `alice` | the local `[[user]]` alice (NTLM), or the Kerberos principal `alice@<[kerberos].realm>` (only when `realm` is set) |
+| `alice@AD.EXAMPLE.COM` | that Kerberos principal |
+| `AD\alice` | the Kerberos user whose PAC says domain `AD`, account `alice` |
+| `@S-1-5-21-…-1105` | a session whose PAC carries that SID |
+| `@Domain Admins`, `@AD\Domain Users` | a well-known AD group (by RID) in the user's own domain; with `AD\`, only in that domain |
+| `@staff` | the `[[group]]` named `staff`: its `sid` in the PAC, or the user in its `members` |
+
+Group membership comes from the PAC in the user's Kerberos ticket, after the
+GSS library has checked its signature. The PAC carries SIDs, not group names,
+and there is no LDAP lookup, so name an AD group by SID, by well-known name, or
+through `[[group]]`. A KDC without AD (MIT) issues no group data, so `@` entries
+match only `[[group]]` members there. Unknown groups and malformed entries fail
+`--check`.
+
+```toml
+[[group]]
+name = "share-readers"
+sid = "S-1-5-21-1004336348-1177238915-682003330-1105"
+
+[[share]]
+name = "finance"
+path = "/srv/finance"
+valid_users = ["@Domain Admins", "@share-readers", "bob"]
+read_only_users = ["@share-readers"]
+```
 
 ## Mounting
 

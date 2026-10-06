@@ -62,8 +62,9 @@ kerberos"` → OpenSSL crypto, Kerberos auth, no NTLM/MD4/RC4 in the binary.
 - External security review (#39).
 - Lease breaks on truncate/overwrite/rename (#42); write-caching leases (#27,
   deferred).
-- Per-share user/group authorization via the Kerberos PAC, and a SID→uid
-  map (#40).
+- Per-client file identity: SID→uid map and I/O under the client's uid (#53).
+  (Per-share user/group authorization via the Kerberos PAC landed on `main`,
+  #40.)
 - Multi-leg Kerberos context persistence (#38); honor `[kerberos].realm` (#45).
 - CI feature matrix (#43); `rocketsmbd-test` container (#44); shipped-config
   guard test + 1.4.1 (#41).

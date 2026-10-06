@@ -39,12 +39,25 @@ auth = "both"
 # [kerberos]
 # keytab = "/etc/rocketsmbd.keytab"   # default: $KRB5_KTNAME / system keytab
 # spn = "cifs/fileserver.example.com" # default: cifs/<server_name>
-# realm = "EXAMPLE.COM"               # currently ignored (#45)
+# realm = "EXAMPLE.COM"               # qualifies bare names in share lists
 
 [[share]]
 name = "data"
 path = "/srv/data"
 read_only = false
+# Access lists (empty = any authenticated user). Entries: alice (local user,
+# or alice@<[kerberos].realm>), alice@REALM, DOMAIN\alice, @S-1-5-21-…,
+# @Domain Admins (well-known AD group), @name (a [[group]] below).
+# valid_users = ["@Domain Users", "bob"]
+# invalid_users = ["mallory"]
+# read_only_users = ["@readers"]
+
+# Named groups for share lists: an AD group SID (matched against the
+# Kerberos PAC) and/or explicit members.
+# [[group]]
+# name = "readers"
+# sid = "S-1-5-21-1004336348-1177238915-682003330-1105"
+# members = ["bob"]
 
 # Users (NTLMv2). Provide either a plaintext password or a precomputed
 # NT hash (MD4 of the UTF-16LE password) as 32 hex characters.

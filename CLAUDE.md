@@ -66,7 +66,8 @@ multichannel. Full detail: docs/ARCHITECTURE.md.
 - `src/smb2/handlers.rs` — command handlers (negotiate, session_setup dispatcher, tree, create, read/write, dir, info, lock, notify, ioctl, leases)
 - `src/session.rs` — shared session registry (multichannel) + per-session handle table
 - `src/lease.rs` — lease table + per-worker break mailbox
-- `src/ntlm.rs` — NTLMv2; `src/spnego.rs` — SPNEGO/DER; `src/krb5.rs` — GSS acceptor (`kerberos`)
+- `src/ntlm.rs` — NTLMv2; `src/spnego.rs` — SPNEGO/DER; `src/krb5.rs` — GSS acceptor + PAC read (`kerberos`)
+- `src/authz.rs` — share access lists (TREE_CONNECT); `src/pac.rs` — PAC LOGON_INFO → SIDs
 - `src/crypto.rs` — KDF/signing/AEAD API over `crypto_rustcrypto.rs` or `crypto_openssl.rs`
 - `src/net.rs` — interface enumeration (multichannel advertisement)
 - `src/health.rs` — opt-in HTTP `/healthz` (own std thread)
@@ -77,9 +78,10 @@ multichannel. Full detail: docs/ARCHITECTURE.md.
 
 NTLMv2 (+ Kerberos on `main`, unreleased), SMB2/3 signing, SMB 3.1.1 preauth
 integrity, SMB3 encryption (AES-128/256-GCM/CCM). Guest allowed only when no
-`[[user]]` exists (or `allow_guest = true`). **Authorization is share-level
-only** (`read_only`; any authenticated user can use every share; I/O runs as the
-server's Unix user — #40). Symlinks inside a share are followed even outside it.
+`[[user]]` exists (or `allow_guest = true`). **Authorization is per share**
+(`read_only`, plus on `main` `valid_users`/`invalid_users`/`read_only_users`
+with AD groups from the verified PAC, #40, `src/authz.rs` + `src/pac.rs`); I/O
+runs as the server's Unix user (per-client identity is #53). Symlinks inside a share are followed even outside it.
 No external security review yet (#39) — don't expose 445 to the public internet.
 See SECURITY.md.
 
@@ -196,14 +198,12 @@ Order:
 - #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load. Fixed on main (d0b114c) and on `release/1.4`; guard test on both (it fails on the old layout). `v1.4.1` is tagged (fdac8ef), sc-build verified. **Waiting on the owner:** GitHub Actions is disabled on the repo, so release.yml produced no artifacts; crates.io, COPR and the distro uploads need the owner's tokens.
 - #42 P1 lease breaks only on WRITE (truncate/overwrite/rename leave stale caches)
 - #39 P2 external security review
-- #40 P2 per-share authz — **in progress (2026-10-06)**. Plan: (1) `valid_users` /
-  `invalid_users` / `read_only_users` on `[[share]]`, enforced at TREE_CONNECT
-  (per-tree read_only replaces `share.read_only` checks); (2) PAC LOGON_INFO from
-  the GSS name (`urn:mspac:logon-info`), NDR-parsed to user + group SIDs; `@group`
-  entries match a SID literal, a well-known domain RID name (Domain Admins …) or a
-  `[[group]] name/sid` table (no LDAP); (3) SID→uid idmap + per-op fsuid split to
-  a follow-up issue. dc1.ad.g8.lo (192.168.8.105) is unreachable 2026-10-06, so
-  the PAC parser is tested against a recorded Windows PAC, not the live lab.
+- #40 P2 per-share authz — **done on `main` (2026-10-06)**: share access lists +
+  PAC group SIDs (c2e2438 and follow-ups), sc-build green (default + kerberos,
+  clippy). Not run against a live AD DC: dc1.ad.g8.lo (192.168.8.105) was
+  unreachable; tested on recorded Windows PACs + process_frame. Phase 3 (SID→uid,
+  fsuid) is #53.
+- #53 P2 per-client file identity (idmap + fsuid / io_uring personalities)
 - #43 P2 CI feature matrix; #44 P2 `rocketsmbd-test` container (test standard)
 - #46 P1 rocketsmbd as a stormcos service golden for smbop. **rocketsmbd side done (2026-10-06):** opt-in `health_listen` / `GET /healthz` (b09a5f5, docs dbf6d08), unit tests plus a live sc-build run (200 healthy, 503 when a share dir goes, 404/405, bad address fails `--check`). Entry values (port 9104, `/healthz`, placeholder config with `allow_guest = false`) posted on stormcos#149. #46 is queued `--after` stormcos#149. Next step once registered: `stormcentral component build rocketsmbd`, then close #46.
 - #47 P3 SMB1-only clients get the SMB2 wildcard and hang ~20 s instead of a refusal
