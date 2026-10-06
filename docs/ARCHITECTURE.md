@@ -32,7 +32,11 @@ share three things through `Arc<Srv>`:
 - the read-only config and share table;
 - the **session registry** (`src/session.rs`, `Mutex`). Sessions and their open
   handle tables live here so SMB3 multichannel channels on other workers can
-  bind to the same session;
+  bind to the same session. A session ends at LOGOFF of its last channel or
+  when its last connection closes (`handlers::teardown_conn`, called from the
+  reactor's `finalize_close`), which also closes its opens: lease release,
+  delete-on-close, and the fd close that drops its byte-range locks. Session
+  ids are random;
 - the **lease table** (`src/lease.rs`, `Mutex`) keyed by `(share_idx, ino)`, plus
   a per-worker **break mailbox**: an MPSC queue plus an eventfd polled in each
   ring, so a WRITE on worker B can deliver a lease-break to a connection on
