@@ -45,6 +45,18 @@ extern "C" {
         minor_status: *mut gss::OM_uint32,
         buffer_set: *mut GssBufferSetT,
     ) -> gss::OM_uint32;
+    // RFC 6680 naming extensions (MIT `gssapi_ext.h`): read the `urn:mspac:`
+    // attributes the krb5 mech exposes from the ticket's PAC (#40).
+    fn gss_get_name_attribute(
+        minor_status: *mut gss::OM_uint32,
+        name: gss::gss_name_t,
+        attr: *mut gss::gss_buffer_desc,
+        authenticated: *mut i32,
+        complete: *mut i32,
+        value: *mut gss::gss_buffer_desc,
+        display_value: *mut gss::gss_buffer_desc,
+        more: *mut i32,
+    ) -> gss::OM_uint32;
 }
 
 /// `GSS_C_INQ_SSPI_SESSION_KEY` — the inquire OID whose first buffer is the
@@ -69,6 +81,10 @@ pub struct Established {
     /// SMB session key (Kerberos sub-session key). Fed to the existing
     /// SP800-108 KDF for signing/encryption keys, exactly like the NTLM key.
     pub session_key: Vec<u8>,
+    /// The ticket's PAC LOGON_INFO (user + group SIDs) when the KDC is AD and
+    /// the GSS library verified the PAC signature; `None` otherwise (an MIT
+    /// KDC issues no LOGON_INFO). Feeds per-share `@group` checks (#40).
+    pub pac: Option<crate::pac::LogonInfo>,
     /// Final output token (AP-REP) to return, if any.
     pub out: Vec<u8>,
 }
@@ -164,9 +180,10 @@ impl AcceptCtx<'_> {
 
             if major == gss::GSS_S_COMPLETE {
                 let client = display_name(src_name);
+                let pac = name_pac(src_name, &client);
                 release_name(src_name);
                 match self.session_key() {
-                    Ok(session_key) => Step::Done(Established { client, session_key, out }),
+                    Ok(session_key) => Step::Done(Established { client, session_key, pac, out }),
                     Err(e) => Step::Failed(format!("session-key inquire failed: {e}")),
                 }
             } else if major & gss::GSS_S_CONTINUE_NEEDED != 0 {
@@ -267,6 +284,55 @@ unsafe fn display_name(name: gss::gss_name_t) -> String {
     .into_owned();
     gss::gss_release_buffer(&mut minor, &mut out);
     s
+}
+
+/// Read the PAC off an accepted client name and decode its LOGON_INFO. Tries
+/// the whole PAC (`urn:mspac:`) then the LOGON_INFO buffer alone
+/// (`urn:mspac:logon-info`). Only an *authenticated* attribute is used: the
+/// GSS library sets that once it has verified the PAC's server signature with
+/// our service key, so a client can't forge group membership.
+unsafe fn name_pac(name: gss::gss_name_t, client: &str) -> Option<crate::pac::LogonInfo> {
+    if name.is_null() {
+        return None;
+    }
+    let attrs: [(&str, fn(&[u8]) -> Result<crate::pac::LogonInfo, String>); 2] = [
+        ("urn:mspac:", crate::pac::parse_pac),
+        ("urn:mspac:logon-info", crate::pac::parse_logon_info),
+    ];
+    for (attr, parse) in attrs {
+        let mut minor: gss::OM_uint32 = 0;
+        let mut a = buf_from(attr.as_bytes());
+        let (mut authenticated, mut complete, mut more) = (0i32, 0i32, -1i32);
+        let mut value = empty_buf();
+        let mut display = empty_buf();
+        let major = gss_get_name_attribute(
+            &mut minor,
+            name,
+            &mut a,
+            &mut authenticated,
+            &mut complete,
+            &mut value,
+            &mut display,
+            &mut more,
+        );
+        let v = take_buf(&mut value);
+        take_buf(&mut display);
+        if major != gss::GSS_S_COMPLETE {
+            continue;
+        }
+        if authenticated == 0 {
+            crate::logw!("kerberos: {client}: PAC present but not verified; ignoring it");
+            return None;
+        }
+        match parse(&v) {
+            Ok(li) => return Some(li),
+            Err(e) => {
+                crate::logw!("kerberos: {client}: PAC ({attr}) unreadable: {e}");
+                return None;
+            }
+        }
+    }
+    None
 }
 
 unsafe fn buf_from(b: &[u8]) -> gss::gss_buffer_desc {

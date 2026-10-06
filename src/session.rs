@@ -28,6 +28,10 @@ pub struct SessionInner {
     pub guest: bool,
     pub signing_required: bool,
     pub user: String,
+    /// `user` is a Kerberos principal (vs. a local NTLM user).
+    pub kerberos: bool,
+    /// Verified PAC of a Kerberos (AD) session: user + group SIDs (#40).
+    pub pac: Option<crate::pac::LogonInfo>,
     pub trees: HashMap<u32, Tree>,
     pub next_tree_id: u32,
     pub handles: HandleTable,
@@ -43,6 +47,8 @@ impl SessionInner {
             guest: false,
             signing_required: false,
             user: String::new(),
+            kerberos: false,
+            pac: None,
             trees: HashMap::new(),
             next_tree_id: 0,
             handles: HandleTable::default(),

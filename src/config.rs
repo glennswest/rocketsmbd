@@ -78,6 +78,9 @@ pub struct Config {
     pub shares: Vec<ShareCfg>,
     #[serde(rename = "user", default)]
     pub users: Vec<UserCfg>,
+    /// Named groups for `@name` entries in share user lists (#40).
+    #[serde(rename = "group", default)]
+    pub groups: Vec<GroupCfg>,
 }
 
 /// Authentication mechanism selector.
@@ -116,8 +119,9 @@ pub struct KerberosCfg {
     /// Service principal, e.g. `cifs/fileserver.example.com`. Defaults to
     /// `cifs/<server_name>` when unset.
     pub spn: Option<String>,
-    /// Kerberos realm. Currently parsed but not used (#45); the realm comes
-    /// from the system `krb5.conf`.
+    /// Kerberos realm. Qualifies bare names in share user lists (`alice`
+    /// matches `alice@<realm>`, #40). The acceptor itself still takes the
+    /// realm from the system `krb5.conf` (#45).
     pub realm: Option<String>,
 }
 
@@ -131,13 +135,36 @@ pub struct UserCfg {
     pub nt_hash: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShareCfg {
     pub name: String,
     pub path: PathBuf,
     #[serde(default)]
     pub read_only: bool,
+    /// Who may connect (empty = everyone allowed by authentication). Users
+    /// and `@groups`; see `authz.rs` for the entry forms.
+    #[serde(default)]
+    pub valid_users: Vec<String>,
+    /// Who may never connect (wins over `valid_users`).
+    #[serde(default)]
+    pub invalid_users: Vec<String>,
+    /// Who gets the share read-only.
+    #[serde(default)]
+    pub read_only_users: Vec<String>,
+}
+
+/// A named group for share user lists (`[[group]]`, #40): an AD group by
+/// SID (matched against the Kerberos PAC) and/or a list of members.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupCfg {
+    pub name: String,
+    /// Group SID, e.g. `S-1-5-21-…-1105`.
+    pub sid: Option<String>,
+    /// Member users (`alice`, `alice@REALM`, `DOM\alice`; no groups).
+    #[serde(default)]
+    pub members: Vec<String>,
 }
 
 fn default_listen() -> String {
@@ -213,6 +240,7 @@ impl Config {
                 }
             }
         }
+        crate::authz::validate(self)?;
         Ok(())
     }
 

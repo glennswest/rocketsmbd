@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+pub mod authz;
 pub mod config;
 pub mod crypto;
 pub mod lease;
@@ -13,6 +14,7 @@ pub mod health;
 #[cfg(feature = "kerberos")]
 pub mod krb5;
 pub mod net;
+pub mod pac;
 #[cfg(feature = "ntlm")]
 pub mod ntlm;
 pub mod session;

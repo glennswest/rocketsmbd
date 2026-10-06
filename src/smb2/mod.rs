@@ -132,6 +132,9 @@ pub fn parse_hdr(b: &[u8]) -> Option<ReqHdr> {
 pub struct Tree {
     pub share_idx: u32,
     pub ipc: bool,
+    /// Read-only for this session: the share is `read_only` or the user is
+    /// in its `read_only_users` (#40).
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -855,8 +858,9 @@ mod tests {
             oplocks: false,
             auth: crate::config::AuthMode::Both,
             kerberos: None,
-            shares: vec![ShareCfg { name: "t".into(), path: dir.into(), read_only: false }],
+            shares: vec![ShareCfg { name: "t".into(), path: dir.into(), ..Default::default() }],
             users: vec![],
+            groups: vec![],
         };
         let users = cfg.user_db();
         let allow_guest = cfg.guest_allowed();
@@ -1010,6 +1014,73 @@ mod tests {
             0
         };
         (r.status, fid)
+    }
+
+    #[cfg(feature = "ntlm")]
+    fn tree_connect_to(srv: &Srv, pc: &mut ProtoConn, sess: u64, share: &str) -> Resp {
+        let path = utf16le(&format!("\\\\srv\\{share}"));
+        let mut f = req_hdr(CMD_TREE_CONNECT, 4, 0, sess);
+        f.p16(9);
+        f.p16(0);
+        f.p16(72);
+        f.p16(path.len() as u16);
+        f.pbytes(&path);
+        roundtrip(srv, pc, f)
+    }
+
+    /// Per-share authorization end to end through process_frame (#40): a
+    /// guest is refused a `valid_users` share; an AD session (identity + the
+    /// recorded Windows 2008 PAC: ACME\w2k8u in Domain Users) is admitted by
+    /// group, gets a read-only tree via `read_only_users` (no create, write
+    /// MaximalAccess dropped), and is refused a Domain Admins share.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn share_authz_tree_connect() {
+        let dir = std::env::temp_dir().join(format!("rsmbd-authz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut srv = test_srv(&dir);
+        let list = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        srv.cfg.shares.push(ShareCfg {
+            name: "users".into(),
+            path: dir.clone(),
+            valid_users: list(&["@Domain Users"]),
+            read_only_users: list(&["ACME\\w2k8u"]),
+            ..Default::default()
+        });
+        srv.cfg.shares.push(ShareCfg {
+            name: "admins".into(),
+            path: dir.clone(),
+            valid_users: list(&["@ACME\\Domain Admins"]),
+            ..Default::default()
+        });
+        crate::authz::validate(&srv.cfg).unwrap();
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let (sess, _) = establish(&srv, &mut pc); // guest
+
+        let r = tree_connect_to(&srv, &mut pc, sess, "users");
+        assert_eq!(r.status, status::ACCESS_DENIED, "guest must not pass valid_users");
+
+        // Turn the session into a Kerberos/AD one carrying a real PAC.
+        let pac = crate::pac::parse_pac(include_bytes!("../../testdata/pac-w2008-s4u.bin")).unwrap();
+        {
+            let sref = srv.sessions.get(sess).unwrap();
+            let mut s = sref.lock().unwrap();
+            s.guest = false;
+            s.kerberos = true;
+            s.user = "w2k8u@ACME.COM".into();
+            s.pac = Some(pac);
+        }
+        let r = tree_connect_to(&srv, &mut pc, sess, "users");
+        assert_eq!(r.status, status::SUCCESS);
+        let maximal = u32::from_le_bytes(r.body[12..16].try_into().unwrap());
+        assert_eq!(maximal, 0x0012_00A9, "read-only tree advertises read access");
+        let (st, _) = create_file(&srv, &mut pc, sess, r.tree_id, "new.txt", 2 /*FILE_CREATE*/, 0, 0x0012_019F);
+        assert_eq!(st, status::ACCESS_DENIED, "read_only_users tree must refuse create");
+        assert!(!dir.join("new.txt").exists());
+
+        let r = tree_connect_to(&srv, &mut pc, sess, "admins");
+        assert_eq!(r.status, status::ACCESS_DENIED, "not in Domain Admins");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(feature = "ntlm")]

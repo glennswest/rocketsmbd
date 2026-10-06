@@ -21,7 +21,7 @@ fn make_srv() -> Srv {
         multichannel: true,
         encrypt: false,
         advertise_only: vec![],
-        shares: vec![ShareCfg { name: "f".into(), path: dir, read_only: true }],
+        shares: vec![ShareCfg { name: "f".into(), path: dir, read_only: true, ..Default::default() }],
         users: vec![UserCfg { name: "u".into(), password: Some("p".into()), nt_hash: None }],
     };
     let users = cfg.user_db();

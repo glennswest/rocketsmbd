@@ -50,6 +50,8 @@ const SESSION_FLAG_IS_GUEST: u16 = 0x1;
 #[cfg(any(feature = "ntlm", feature = "kerberos"))]
 const SESSION_FLAG_ENCRYPT_DATA: u16 = 0x4;
 const MAXIMAL_ACCESS_ALL: u32 = 0x001F_01FF;
+/// FILE_GENERIC_READ | FILE_GENERIC_EXECUTE: a read-only tree's MaximalAccess.
+const MAXIMAL_ACCESS_READ: u32 = 0x0012_00A9;
 /// Max credits a connection may hold (window accounting).
 const CREDIT_WINDOW: i64 = 512;
 
@@ -160,7 +162,7 @@ pub fn dispatch(
             let allow_oplock = !pc.channels.get(&h.session_id).map(|c| c.encrypt).unwrap_or(false);
             match h.command {
                 CMD_CREATE => {
-                    create(srv, &mut sess, h, msg, chain, tx, share, tree.share_idx, cid, allow_oplock)
+                    create(srv, &mut sess, h, msg, chain, tx, share, tree, cid, allow_oplock)
                 }
                 CMD_CLOSE => close(srv, pc, &mut sess, h, body, chain, tx),
                 CMD_FLUSH => flush(&mut sess, h, body, chain, tx),
@@ -171,10 +173,10 @@ pub fn dispatch(
                     drop(sess);
                     return read(pc, &sref, h, body, chain, tx);
                 }
-                CMD_WRITE => write(srv, &mut sess, h, msg, chain, tx, share, tree.share_idx),
+                CMD_WRITE => write(srv, &mut sess, h, msg, chain, tx, tree),
                 CMD_QUERY_DIRECTORY => query_directory(&mut sess, h, msg, chain, tx),
                 CMD_QUERY_INFO => query_info(srv, &mut sess, h, body, chain, tx),
-                CMD_SET_INFO => set_info(&mut sess, h, msg, chain, tx, share),
+                CMD_SET_INFO => set_info(&mut sess, h, msg, chain, tx, share, tree.read_only),
                 CMD_IOCTL => {
                     drop(sess);
                     ioctl(srv, pc, h, msg, chain, tx);
@@ -909,6 +911,8 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
         s.guest = false;
         s.signing_required = signing_required;
         s.user = est.client.clone();
+        s.kerberos = true;
+        s.pac = est.pac.clone();
         s.channels = 1;
     }
     let mut ch = crate::smb2::ChannelState {
@@ -929,6 +933,16 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
     }
     pc.channels.insert(sid, ch);
 
+    if let Some(p) = &est.pac {
+        crate::logi!(
+            "session {:x}: PAC {}\\{} sid {} groups [{}]",
+            sid,
+            p.domain,
+            p.user,
+            p.user_sid.as_ref().map(|s| s.to_string()).unwrap_or_default(),
+            p.groups.iter().map(|g| g.to_string()).collect::<Vec<_>>().join(", ")
+        );
+    }
     crate::logi!(
         "session {:x}: kerberos principal {:?} authenticated (signing {}, encryption {})",
         sid,
@@ -979,9 +993,35 @@ fn tree_connect(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chai
             }
         }
     };
+    // Per-share authorization (#40): valid/invalid/read_only_users.
+    let read_only = if ipc {
+        false
+    } else {
+        let share = &srv.cfg.shares[share_idx as usize];
+        let who = crate::authz::Who {
+            guest: sess.guest,
+            user: &sess.user,
+            kerberos: sess.kerberos,
+            pac: sess.pac.as_ref(),
+        };
+        match crate::authz::check(&srv.cfg, share, &who) {
+            crate::authz::Access::Denied => {
+                crate::logi!(
+                    "session {:x}: tree connect to {:?} denied for {}",
+                    chain.session_id,
+                    share.name,
+                    if sess.guest { "guest".to_string() } else { format!("{:?}", sess.user) }
+                );
+                err_resp(tx, h, status::ACCESS_DENIED, chain);
+                return;
+            }
+            crate::authz::Access::ReadOnly => true,
+            crate::authz::Access::ReadWrite => false,
+        }
+    };
     sess.next_tree_id += 1;
     let tree_id = sess.next_tree_id;
-    sess.trees.insert(tree_id, crate::smb2::Tree { share_idx, ipc });
+    sess.trees.insert(tree_id, crate::smb2::Tree { share_idx, ipc, read_only });
     chain.tree_id = tree_id;
 
     begin_resp(tx, h, status::SUCCESS, chain.related, tree_id, chain.session_id);
@@ -990,7 +1030,13 @@ fn tree_connect(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chai
     tx.p8(0);
     tx.p32(0); // ShareFlags
     tx.p32(0); // Capabilities
-    tx.p32(if ipc { 0x001F_00A9 } else { MAXIMAL_ACCESS_ALL });
+    tx.p32(if ipc {
+        0x001F_00A9
+    } else if read_only {
+        MAXIMAL_ACCESS_READ
+    } else {
+        MAXIMAL_ACCESS_ALL
+    });
 }
 
 // ------------------------------------------------------------------- CREATE
@@ -1102,10 +1148,11 @@ fn create(
     chain: &mut Chain,
     tx: &mut Vec<u8>,
     share: &ShareCfg,
-    share_idx: u32,
+    tree: crate::smb2::Tree,
     cid: (usize, usize, u16),
     allow_oplock: bool,
 ) {
+    let share_idx = tree.share_idx;
     let Some(req) = parse_create(msg) else {
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
@@ -1124,7 +1171,7 @@ fn create(
         FILE_SUPERSEDE | FILE_CREATE | FILE_OVERWRITE | FILE_OVERWRITE_IF
     );
     let delete_on_close = req.options & FILE_DELETE_ON_CLOSE != 0;
-    if share.read_only && (wants_write || creates || delete_on_close) {
+    if tree.read_only && (wants_write || creates || delete_on_close) {
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
     }
@@ -1186,7 +1233,7 @@ fn create(
             _ => 0,
         };
         let try_rw =
-            wants_write || (req.desired & MAXIMUM_ALLOWED != 0 && !share.read_only) || creates;
+            wants_write || (req.desired & MAXIMUM_ALLOWED != 0 && !tree.read_only) || creates;
         flags |= if try_rw { libc::O_RDWR } else { libc::O_RDONLY };
         match vfs::open_raw(&path, flags, 0o644) {
             Ok(fd) => {
@@ -1541,9 +1588,9 @@ fn write(
     msg: &[u8],
     chain: &mut Chain,
     tx: &mut Vec<u8>,
-    share: &ShareCfg,
-    share_idx: u32,
+    tree: crate::smb2::Tree,
 ) {
+    let share_idx = tree.share_idx;
     let parsed = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);
@@ -1561,7 +1608,7 @@ fn write(
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    if share.read_only {
+    if tree.read_only {
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
     }
@@ -1997,7 +2044,15 @@ fn fs_info(srv: &Srv, of: &vfs::OpenFile, class: u8, b: &mut Vec<u8>) -> u32 {
 
 // ----------------------------------------------------------------- SET_INFO
 
-fn set_info(sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>, share: &ShareCfg) {
+fn set_info(
+    sess: &mut SessionInner,
+    h: &ReqHdr,
+    msg: &[u8],
+    chain: &mut Chain,
+    tx: &mut Vec<u8>,
+    share: &ShareCfg,
+    read_only: bool,
+) {
     let parsed = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);
@@ -2021,7 +2076,7 @@ fn set_info(sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chain: &mut Chain, 
         err_resp(tx, h, status::NOT_SUPPORTED, chain);
         return;
     }
-    if share.read_only {
+    if read_only {
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
     }
