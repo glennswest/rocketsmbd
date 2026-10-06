@@ -6,10 +6,10 @@
 
 pub mod config;
 pub mod crypto;
-pub mod health;
 pub mod lease;
 #[macro_use]
 pub mod log;
+pub mod health;
 #[cfg(feature = "kerberos")]
 pub mod krb5;
 pub mod net;
