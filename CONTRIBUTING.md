@@ -20,9 +20,9 @@ performance work, packaging, docs — are all welcome.
   cargo clippy --target x86_64-unknown-linux-musl -- -D warnings
   cargo check --target aarch64-unknown-linux-musl
   ```
-- CI runs build + test + clippy on every PR, for the default features only
-  (#43). If you touch `kerberos`, `backend-openssl` or `ntlm`-gated code, also
-  run the feature matrix in docs/TESTING.md.
+- Builds and tests run on the build box via `sc-build`, not GitHub Actions.
+  If you touch `kerberos`, `backend-openssl` or `ntlm`-gated code, run the
+  whole feature matrix: `sc-build deploy/feature-matrix.sh` (docs/TESTING.md).
 
 ## Building
 

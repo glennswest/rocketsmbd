@@ -26,19 +26,27 @@ Run: `cargo test` (anywhere); `cargo clippy --target x86_64-unknown-linux-musl
 
 NTLM (and its MD4/MD5/RC4 primitives) is gated behind a default-on `ntlm`
 feature (#30); Kerberos (`kerberos`) and the OpenSSL backend
-(`backend-openssl`) are off by default. These configs should all stay green:
+(`backend-openssl`) are off by default. All of these must stay green, and
+`deploy/feature-matrix.sh` checks them in one run (#43):
 
 ```sh
-cargo test                                              # default: ntlm + rustcrypto
-cargo test --no-default-features                        # no NTLM (NTLM-only tests skipped)
-cargo test --features kerberos                          # needs krb5 devel headers
-cargo test --no-default-features --features "backend-openssl kerberos"   # FIPS profile
-cargo clippy --no-default-features --target x86_64-unknown-linux-musl -- -D warnings
+sc-build deploy/feature-matrix.sh
 ```
 
-**CI (`.github/workflows/ci.yml`) runs only the default config**: `cargo test`,
-clippy on x86_64-musl and a check on aarch64-musl. The other configs were last
-verified by hand on dev.g8.lo (2026-06-29); adding them to CI is #43.
+| Row | Flags |
+|---|---|
+| default | (ntlm + rustcrypto) |
+| no-default-features | `--no-default-features` (no NTLM; NTLM-only tests skipped) |
+| kerberos | `--features kerberos` (needs krb5 devel headers) |
+| kerberos-only | `--no-default-features --features kerberos` |
+| openssl | `--features backend-openssl` (OpenSSL wins over the default backend) |
+| fips | `--no-default-features --features backend-openssl,kerberos` |
+
+Each row runs `cargo clippy -- -D warnings` and `cargo test`. The default row
+also runs clippy for x86_64-musl and a cross-check for aarch64-musl, and the
+fuzz crate is checked. The script prints a summary and exits non-zero if any
+step failed. `.github/workflows/ci.yml` (default features only) is dormant,
+because nothing builds on GitHub; the script replaces it.
 
 `--no-default-features` drops `md4`/`md-5` from the dependency tree entirely and
 makes SESSION_SETUP reject every NTLMSSP token with `STATUS_NOT_SUPPORTED`. Add

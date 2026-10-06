@@ -16,6 +16,15 @@ mod backend;
 #[path = "crypto_rustcrypto.rs"]
 mod backend;
 
+/// The crypto backend compiled in. `backend-openssl` wins whenever it is
+/// enabled, even alongside the default `backend-rustcrypto` (features are
+/// additive, and docs/FIPS.md documents `--features backend-openssl` alone),
+/// so `backend-rustcrypto` only names the default.
+#[cfg(feature = "backend-openssl")]
+pub const BACKEND: &str = "openssl";
+#[cfg(not(feature = "backend-openssl"))]
+pub const BACKEND: &str = "rustcrypto";
+
 // ------------------------------------------------ NTLM-only legacy primitives
 // MD4 (NT hash), HMAC-MD5 (NTLMv2), and RC4 (NTLMSSP key exchange) are used
 // only by the NTLM auth path and are the primitives a FIPS/OpenSSL backend
@@ -181,6 +190,13 @@ pub fn aead_open(
 
 #[cfg(test)]
 mod tests {
+    /// Backend precedence (#43): OpenSSL whenever its feature is on.
+    #[test]
+    fn backend_selection() {
+        let want = if cfg!(feature = "backend-openssl") { "openssl" } else { "rustcrypto" };
+        assert_eq!(BACKEND, want);
+    }
+
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {

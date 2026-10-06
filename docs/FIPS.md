@@ -48,9 +48,12 @@ static `scratch` container; package it on a glibc base with the system OpenSSL.
 - **Feature selection:** the code picks OpenSSL whenever `backend-openssl` is
   enabled (`cfg(not(feature = "backend-openssl"))` selects RustCrypto), so
   `--features backend-openssl` alone is enough and `backend-rustcrypto` is just
-  a default marker. Nothing rejects enabling both.
-- As of v1.4.0 the OpenSSL backend is unreleased (on `main`), and CI doesn't
-  build it (#43).
+  a default marker. Enabling both is allowed on purpose (features are
+  additive), and `crypto::BACKEND` names the backend that was compiled in. The
+  `crypto::tests::backend_selection` test pins the precedence, and
+  `deploy/feature-matrix.sh` runs it in every feature set (#43).
+- As of v1.4.1 the OpenSSL backend is unreleased (on `main`). Its builds are
+  checked by `deploy/feature-matrix.sh` (#43).
 
 ## Summary: the clean FIPS posture
 
