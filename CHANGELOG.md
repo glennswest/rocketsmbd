@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v1.4.1] — 2026-10-06
+
+### Fixed
+- **fix(#41):** The example config installed as `/etc/rocketsmbd.toml` by the .deb, .rpm and Fedora spec put `oplocks` and `prefer_aes256` after `[[share]]`. TOML made them share keys, and the server rejected the file (`unknown field`), so `rocketsmbd --check` and `systemctl start rocketsmbd` failed on a fresh 1.3.0/1.4.0 package install. All top-level keys now come before the tables, and the comments match 1.4 (handle-caching leases, AES-256/CCM).
+
+### Added
+- **test(#41):** `config::tests::shipped_example_config_loads` parses the shipped example through `Config` and runs `validate()`, so a misplaced key fails `cargo test`.
+
 ## [v1.4.0] — 2026-06-15
 
 ### 2026-06-15

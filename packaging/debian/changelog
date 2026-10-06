@@ -1,3 +1,10 @@
+rocketsmbd (1.4.1-1) unstable; urgency=medium
+
+  * Shipped /etc/rocketsmbd.toml now loads: oplocks and prefer_aes256 were
+    placed after [[share]] and rejected as unknown share keys.
+
+ -- Glenn West <glennswest@neuralcloudcomputing.com>  Tue, 06 Oct 2026 00:00:00 +0000
+
 rocketsmbd (1.4.0-1) unstable; urgency=medium
 
   * Handle-caching (RH) leases (persist past close; validated cifs + Windows).

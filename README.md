@@ -35,9 +35,9 @@ with io_uring ≥ 5.15) are attached to each [release](https://github.com/glenns
 
 ```sh
 # Fedora / RHEL (x86_64 or aarch64)
-sudo dnf install ./rocketsmbd-1.4.0-1.x86_64.rpm
+sudo dnf install ./rocketsmbd-1.4.1-1.x86_64.rpm
 # Debian / Ubuntu
-sudo dpkg -i ./rocketsmbd_1.4.0-1_amd64.deb
+sudo dpkg -i ./rocketsmbd_1.4.1-1_amd64.deb
 # then edit /etc/rocketsmbd.toml and:
 sudo systemctl enable --now rocketsmbd
 ```
