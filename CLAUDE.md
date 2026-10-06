@@ -192,12 +192,12 @@ Order:
 - [x] Pluggable crypto backend / OpenSSL for FIPS (#29), optional NTLM (#30)
 
 ### Open work (priorities in stormcentral)
-- **Where we are (2026-10-06):** #46 is in progress (the health listener; owner decided #49). #41 is waiting on the owner (Actions disabled, so there are no 1.4.1 artifacts). Next up: #42.
+- **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 is waiting on the owner (Actions disabled, so there are no 1.4.1 artifacts). Next up: #42.
 - #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load. Fixed on main (d0b114c) and on `release/1.4`; guard test on both (it fails on the old layout). `v1.4.1` is tagged (fdac8ef), sc-build verified. **Waiting on the owner:** GitHub Actions is disabled on the repo, so release.yml produced no artifacts; crates.io, COPR and the distro uploads need the owner's tokens.
 - #42 P1 lease breaks only on WRITE (truncate/overwrite/rename leave stale caches)
 - #39 P2 external security review; #40 P2 per-share authz (PAC) + idmap
 - #43 P2 CI feature matrix; #44 P2 `rocketsmbd-test` container (test standard)
-- #46 P1 rocketsmbd as a stormcos service golden for smbop. **In progress (2026-10-06):** owner accepted the opt-in HTTP health listener (#49). Plan: `health_listen` config key (off by default), `src/health.rs` — one plain std thread (not the uring reactors) serving `GET /healthz`: 200 while all workers are alive and every share path is a dir, 503 otherwise; 404/405 for anything else; bounded request size + timeouts. The golden config sets `health_listen = "127.0.0.1:9104"` (registry `port = 9104`, `health = "/healthz"`). Then post the entry values on stormcos#149 and request the golden once it's registered. The service_golden build was verified on 2026-09-27.
+- #46 P1 rocketsmbd as a stormcos service golden for smbop. **rocketsmbd side done (2026-10-06):** opt-in `health_listen` / `GET /healthz` (b09a5f5, docs dbf6d08), unit tests plus a live sc-build run (200 healthy, 503 when a share dir goes, 404/405, bad address fails `--check`). Entry values (port 9104, `/healthz`, placeholder config with `allow_guest = false`) posted on stormcos#149. #46 is queued `--after` stormcos#149. Next step once registered: `stormcentral component build rocketsmbd`, then close #46.
 - #47 P3 SMB1-only clients get the SMB2 wildcard and hang ~20 s instead of a refusal
 - #38, #45, #27, #22, #23, #19, #14 P3
 
