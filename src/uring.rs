@@ -44,6 +44,8 @@ const RX_INITIAL: usize = 68 * 1024;
 /// Minimum spare tail room before re-arming a recv.
 const RX_MIN_ROOM: usize = 16 * 1024;
 const MAX_FRAME: usize = smb2::MAX_TRANSACT as usize + 0x11000;
+/// Largest frame accepted before any session on the connection is established.
+const PREAUTH_MAX_FRAME: usize = 128 * 1024;
 /// Flush accumulated responses once the batch reaches this size.
 const TX_FLUSH: usize = 1 << 20;
 /// Shrink an oversized tx buffer back to this after a send completes.
@@ -645,7 +647,10 @@ fn close_conn_ring(ring: &mut IoUring, w: &mut Worker, idx: usize) {
 /// Actually drop the connection and recycle its slot. Only call when no ops
 /// reference its buffers.
 fn finalize_close(w: &mut Worker, idx: usize) {
-    if w.conns[idx].take().is_some() {
+    if let Some(mut c) = w.conns[idx].take() {
+        // Release the sessions, opens and locks this connection held.
+        smb2::handlers::teardown_conn(&w.srv, &mut c.proto);
+        drop(c);
         // Release any oplocks this connection held but never cleanly CLOSEd,
         // so a dropped connection doesn't leak grants in the lease table.
         w.srv.leases.release_conn(w.wid, idx, w.gens[idx]);
@@ -666,12 +671,21 @@ fn frame_total(c: &Conn) -> Result<Option<usize>, ()> {
     if avail < 4 {
         return Ok(None);
     }
-    let b = &c.rx[c.rx_off..];
+    let b = &c.rx[c.rx_off..c.rx_len];
     if b[0] != 0 {
         return Err(()); // only NetBIOS session messages on direct TCP 445
     }
     let flen = ((b[1] as usize) << 16) | ((b[2] as usize) << 8) | b[3] as usize;
-    if flen > MAX_FRAME {
+    // Until a session is established, frames stay small: otherwise four bytes
+    // declaring a 4 MiB frame pin a 4 MiB buffer per unauthenticated
+    // connection (#39 R7). NEGOTIATE and SESSION_SETUP (incl. a Kerberos
+    // AP-REQ with a large PAC) fit easily.
+    let cap = if c.proto.channels.values().any(|ch| ch.established) {
+        MAX_FRAME
+    } else {
+        PREAUTH_MAX_FRAME
+    };
+    if flen > cap {
         return Err(());
     }
     Ok(Some(4 + flen))

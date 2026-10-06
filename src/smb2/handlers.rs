@@ -17,6 +17,9 @@ const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
 const GENERIC_ALL: u32 = 0x1000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const WRITE_BITS: u32 = FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL;
+/// Access a read-only tree refuses at CREATE: writing data, plus DELETE,
+/// FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES, WRITE_DAC and WRITE_OWNER.
+const READ_ONLY_DENIED: u32 = WRITE_BITS | 0x0001_0000 | 0x10 | 0x100 | 0x0004_0000 | 0x0008_0000;
 
 // CreateDisposition
 const FILE_SUPERSEDE: u32 = 0;
@@ -65,6 +68,16 @@ pub fn dispatch(
 ) -> Option<ZcReadPlan> {
     let body = &msg[64..];
 
+    // Each MessageId (CreditCharge of them, from MessageId up) is used once
+    // per connection: a replayed signed or sealed request — whose signature
+    // or AEAD tag still verifies — is a protocol violation, and MS-SMB2
+    // disconnects (#39 R9). CANCEL reuses the id of the request it cancels.
+    if h.command != CMD_CANCEL && !consume_msg_ids(pc, h.msg_id, h.credit_charge) {
+        crate::logw!("message id {} reused or out of window: disconnecting", h.msg_id);
+        pc.close = true;
+        return None;
+    }
+
     // Resolve effective session/tree for related compound operations.
     if h.flags & FLAG_RELATED != 0 {
         chain.related = true;
@@ -89,13 +102,30 @@ pub fn dispatch(
     h.credits = grant;
     let h = &h;
 
+    // A sealed compound may only carry its own session's requests: the
+    // transform's key authenticated that session, not any other (#39 R18).
+    if let Some(tsid) = chain.transform_sid {
+        if chain.session_id != tsid {
+            crate::logw!("sealed frame for session {tsid:x} carries session {:x}: disconnecting", chain.session_id);
+            pc.close = true;
+            return None;
+        }
+    }
+
     // Verify signatures on signed requests; reject unsigned requests on
-    // signing-required channels. Signing state is connection-local. Skipped
-    // entirely for encrypted sessions — an SMB3-encrypted message is not
-    // separately signed; the AEAD tag provides integrity (and it already
-    // verified during decryption).
+    // signing-required channels. Signing state is connection-local. A request
+    // that arrived sealed is not separately signed: its AEAD tag (verified
+    // during decryption) is the integrity check. A channel that is encrypting
+    // — `encrypt = true`, or since the client's first sealed request — takes
+    // nothing in plaintext but NEGOTIATE/SESSION_SETUP (MS-SMB2 3.3.5.2.9);
+    // before, it skipped signature checks on plaintext too (#39 R1).
     if let Some(ch) = pc.channels.get(&chain.session_id) {
-        if !ch.encrypt {
+        let sealed = chain.transform_sid.is_some();
+        if ch.encrypt && !sealed && !matches!(h.command, CMD_NEGOTIATE | CMD_SESSION_SETUP) {
+            err_resp(tx, h, status::ACCESS_DENIED, chain);
+            return None;
+        }
+        if !sealed {
             if let Some(sc) = &ch.sign {
                 if h.flags & FLAG_SIGNED != 0 {
                     if !verify_signature(msg, sc) {
@@ -143,6 +173,14 @@ pub fn dispatch(
             };
             if h.command == CMD_TREE_DISCONNECT {
                 sess.trees.remove(&chain.tree_id);
+                // The tree's opens close with it.
+                let ids = sess.handles.ids_in_tree(chain.tree_id);
+                for fid in ids {
+                    if let Some(of) = sess.handles.remove(fid, chain.tree_id) {
+                        finish_close(srv, &of);
+                    }
+                    notify_cleanup(pc, fid);
+                }
                 simple_resp(tx, h, chain);
                 return None;
             }
@@ -190,13 +228,54 @@ pub fn dispatch(
     None
 }
 
+/// Unfinished session setups one connection may hold at once.
+const MAX_PENDING_SETUPS: usize = 4;
+
+/// How far past the lowest unused MessageId a request may reach. Far above any
+/// real client's spread (at most CREDIT_WINDOW credits outstanding, ≤ 64 per
+/// request); bounds what a client can make the server remember.
+const MSG_WINDOW: u64 = 1 << 16;
+/// If this many ids sit above a gap the client never filled, give up on the
+/// gap: everything below the lowest remembered id counts as used.
+const MSG_SEEN_MAX: usize = 4096;
+
+/// Record MessageIds `id .. id + max(charge, 1)` as used. False if any was
+/// already used, is below the window, or lies beyond it.
+pub fn consume_msg_ids(pc: &mut ProtoConn, id: u64, charge: u16) -> bool {
+    let n = charge.max(1) as u64;
+    let Some(end) = id.checked_add(n) else {
+        return false;
+    };
+    if id < pc.msg_low || end > pc.msg_low.saturating_add(MSG_WINDOW) {
+        return false;
+    }
+    if pc.msg_seen.range(id..end).next().is_some() {
+        return false;
+    }
+    pc.msg_seen.extend(id..end);
+    loop {
+        while pc.msg_seen.remove(&pc.msg_low) {
+            pc.msg_low += 1;
+        }
+        if pc.msg_seen.len() <= MSG_SEEN_MAX {
+            break;
+        }
+        pc.msg_low = *pc.msg_seen.iter().next().unwrap();
+    }
+    true
+}
+
 /// LOGOFF: drop this connection's channel; tear down the shared session when
 /// its last channel goes away.
 fn logoff(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, chain: &Chain, tx: &mut Vec<u8>) {
-    if pc.channels.remove(&chain.session_id).is_none() {
+    // Only an established channel can log off: a pending one (a binding still
+    // mid-handshake) proves nothing, and would let anyone tear down another
+    // client's session by its id (#39 R10).
+    if !pc.channels.get(&chain.session_id).is_some_and(|c| c.established) {
         err_resp(tx, h, status::USER_SESSION_DELETED, chain);
         return;
     }
+    pc.channels.remove(&chain.session_id);
     if let Some(sref) = srv.sessions.get(chain.session_id) {
         let drop_session = {
             let mut s = sref.lock().unwrap();
@@ -204,10 +283,53 @@ fn logoff(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, chain: &Chain, tx: &mut Vec
             s.channels == 0
         };
         if drop_session {
-            srv.sessions.remove(chain.session_id);
+            end_session(srv, chain.session_id);
         }
     }
     simple_resp(tx, h, chain);
+}
+
+/// Remove a session from the registry and close its opens (lease release,
+/// delete-on-close; dropping each handle closes its fd and OFD locks).
+pub fn end_session(srv: &Srv, sid: u64) {
+    if let Some(sref) = srv.sessions.remove(sid) {
+        let opens = {
+            let mut s = sref.lock().unwrap();
+            s.trees.clear();
+            s.handles.take_all()
+        };
+        for of in opens {
+            finish_close(srv, &of);
+        }
+    }
+}
+
+/// A connection is gone: release what it held in the shared registry. Each
+/// established channel drops its session's channel count, and the session
+/// ends with its last channel (as if logged off). A session this connection
+/// created but never finished authenticating ends too. Before, only LOGOFF
+/// removed sessions, so dropped connections leaked sessions, open fds and
+/// byte-range locks until restart (#39 R5).
+pub fn teardown_conn(srv: &Srv, pc: &mut ProtoConn) {
+    for (sid, ch) in pc.channels.drain() {
+        let Some(sref) = srv.sessions.get(sid) else {
+            continue;
+        };
+        let end = {
+            let mut s = sref.lock().unwrap();
+            if ch.established {
+                s.channels = s.channels.saturating_sub(1);
+                s.channels == 0
+            } else {
+                // A pending channel: either this connection's own unfinished
+                // setup (ends), or a binding to someone's live session (stays).
+                !s.established
+            }
+        };
+        if end {
+            end_session(srv, sid);
+        }
+    }
 }
 
 /// CANCEL: no response of its own; a matching pended operation completes
@@ -255,7 +377,10 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
             return None;
         }
         let count = r.u16()? as usize;
-        r.skip(2 + 2 + 4 + 16)?; // secmode, reserved, caps, guid
+        let secmode = r.u16()?;
+        r.skip(2)?; // reserved
+        let caps = r.u32()?;
+        let guid: [u8; 16] = r.take(16)?.try_into().ok()?;
         let ctx_off = r.u32()? as usize;
         let ctx_count = r.u16()? as usize;
         r.skip(2)?;
@@ -263,9 +388,16 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
         for _ in 0..count.min(16) {
             dialects.push(r.u16()?);
         }
-        Some((dialects, ctx_off, ctx_count))
+        Some((dialects, ctx_off, ctx_count, crate::smb2::ClientNeg { secmode, caps, guid }))
     })();
-    let Some((dialects, ctx_off, ctx_count)) = parsed else {
+    // One NEGOTIATE per connection: a second would reset dialect, cipher and
+    // the preauth hash under live sessions. MS-SMB2 disconnects (#39 R17).
+    if pc.negotiated {
+        crate::logw!("second NEGOTIATE on a connection: disconnecting");
+        pc.close = true;
+        return;
+    }
+    let Some((dialects, ctx_off, ctx_count, client_neg)) = parsed else {
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
@@ -354,6 +486,8 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
 
     pc.dialect = chosen;
     pc.cipher = cipher;
+    pc.negotiated = true;
+    pc.client_neg = Some(client_neg);
     if cipher != 0 {
         crate::logd!("negotiated dialect {chosen:#x} cipher {cipher:#x}");
     }
@@ -414,6 +548,7 @@ fn negotiate_body(
     if dialect >= 0x0210 && srv.cfg.oplocks {
         caps |= CAP_LEASING;
     }
+    pc.server_caps = caps;
     tx.p32(caps);
     tx.p32(MAX_TRANSACT);
     tx.p32(pc.max_read);
@@ -568,13 +703,36 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
             // Interim: assign/locate the session id, stash a challenge in this
             // connection's channel state, respond with the NTLM CHALLENGE.
             let sid = if binding {
-                // Bind to an existing session — it must already exist.
-                if h.session_id == 0 || srv.sessions.get(h.session_id).is_none() {
+                // Bind to an existing session: only with multichannel on, on
+                // SMB 3.x, and to an established non-guest session — a guest
+                // session has no key to prove, so anyone could join it (#39 R10).
+                if !srv.cfg.multichannel || pc.dialect < 0x0300 {
+                    err_resp(tx, h, status::REQUEST_NOT_ACCEPTED, chain);
+                    return;
+                }
+                let bindable = srv.sessions.get(h.session_id).is_some_and(|s| {
+                    let s = s.lock().unwrap();
+                    s.established && !s.guest
+                });
+                if h.session_id == 0 || !bindable {
                     err_resp(tx, h, status::USER_SESSION_DELETED, chain);
+                    return;
+                }
+                if pc.channels.get(&h.session_id).is_some_and(|c| c.established) {
+                    // Already bound here: a binding leg can't reset it.
+                    err_resp(tx, h, status::REQUEST_NOT_ACCEPTED, chain);
                     return;
                 }
                 h.session_id
             } else {
+                // Each NTLM NEGOTIATE creates a registry entry before any
+                // credential is checked; bound how many one connection can
+                // hold half-open (#39 R5).
+                let pending = pc.channels.values().filter(|c| !c.established).count();
+                if pending >= MAX_PENDING_SETUPS {
+                    err_resp(tx, h, status::INSUFFICIENT_RESOURCES, chain);
+                    return;
+                }
                 let (id, _sref) = srv.sessions.create();
                 id
             };
@@ -629,12 +787,8 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
                 // Channel binding: prove the same identity, then derive this
                 // channel's signing key from the session's original key.
                 let mut s = sref.lock().unwrap();
-                let ok = if !s.established {
+                let ok = if !s.established || s.guest {
                     false
-                } else if s.guest {
-                    // Guest sessions carry no key; binding is signing-free
-                    // regardless of what the client presents.
-                    true
                 } else {
                     match &auth {
                         Some(a) if !a.is_anonymous() => {
@@ -658,6 +812,13 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
                         auth.as_ref().map(|a| a.user.clone()).unwrap_or_default(),
                         auth.as_ref().map(|a| a.is_anonymous()).unwrap_or(true),
                     );
+                    drop(s);
+                    pc.channels.remove(&sid);
+                    err_resp(tx, h, status::ACCESS_DENIED, chain);
+                    return;
+                }
+                if srv.cfg.encrypt && !(cipher != 0 && dialect == 0x0311) {
+                    crate::logw!("session {:x}: channel bind denied — encryption is required but no cipher was negotiated", sid);
                     drop(s);
                     pc.channels.remove(&sid);
                     err_resp(tx, h, status::ACCESS_DENIED, chain);
@@ -707,6 +868,19 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
                 },
                 _ if srv.allow_guest => Verdict::Guest,
                 _ => Verdict::Reject,
+            };
+            // `encrypt = true` means every session is sealed. Without an
+            // SMB 3.1.1 cipher (2.x/3.0.x, or no encryption context) this one
+            // can't be: refuse it rather than run it in cleartext (#39 R8).
+            let verdict = match verdict {
+                Verdict::User(..) if srv.cfg.encrypt && !(cipher != 0 && dialect == 0x0311) => {
+                    crate::logw!("session {:x}: denied — encryption is required but no cipher was negotiated", sid);
+                    pc.channels.remove(&sid);
+                    srv.sessions.remove(sid);
+                    err_resp(tx, h, status::ACCESS_DENIED, chain);
+                    return;
+                }
+                v => v,
             };
             match verdict {
                 Verdict::User(key, user) => {
@@ -888,6 +1062,13 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
             return;
         }
     };
+
+    // `encrypt = true` and no 3.1.1 cipher: the session can't be sealed (#39 R8).
+    if srv.cfg.encrypt && !(pc.cipher != 0 && pc.dialect == 0x0311) {
+        crate::logw!("kerberos: session for {} denied — encryption is required but no cipher was negotiated", est.client);
+        err_resp(tx, h, status::ACCESS_DENIED, chain);
+        return;
+    }
 
     // SMB session key: first 16 bytes of the Kerberos sub-session key.
     let mut key = [0u8; 16];
@@ -1170,7 +1351,7 @@ fn create(
         FILE_SUPERSEDE | FILE_CREATE | FILE_OVERWRITE | FILE_OVERWRITE_IF
     );
     let delete_on_close = req.options & FILE_DELETE_ON_CLOSE != 0;
-    if tree.read_only && (wants_write || creates || delete_on_close) {
+    if tree.read_only && (req.desired & READ_ONLY_DENIED != 0 || creates || delete_on_close) {
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
     }
@@ -1178,6 +1359,17 @@ fn create(
     let existing = vfs::stat_meta(&path).ok();
     let exists = existing.is_some();
     let existing_dir = existing.map(|m| m.is_dir).unwrap_or(false);
+    // FILE_OPEN_IF creates a missing file (or directory): not on a read-only
+    // tree (#39 R4).
+    if tree.read_only && !exists && req.disposition == FILE_OPEN_IF {
+        err_resp(tx, h, status::ACCESS_DENIED, chain);
+        return;
+    }
+    // The share root itself is never deleted (#39 R21).
+    if delete_on_close && rel.is_empty() {
+        err_resp(tx, h, status::ACCESS_DENIED, chain);
+        return;
+    }
 
     if exists && req.disposition == FILE_CREATE {
         err_resp(tx, h, status::OBJECT_NAME_COLLISION, chain);
@@ -1307,6 +1499,7 @@ fn create(
         rel,
         leaf,
         share_idx,
+        tree_id: chain.tree_id,
         is_dir,
         writable,
         delete_on_close,
@@ -1411,51 +1604,16 @@ fn close(srv: &Srv, pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, bod
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = sess.handles.remove(fid) else {
+    let Some(of) = sess.handles.remove(fid, chain.tree_id) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
-    // Release the lease this handle held — unless handle-caching was granted.
-    // With H caching the lease (and the client's cache) persists past CLOSE; it
-    // is broken on a later conflicting access or released on connection
-    // teardown (release_conn). Without H, drop it now.
-    if let (Some(ino), Some(lk)) = (of.oplock_ino, of.lease_key) {
-        if of.lease_granted & LEASE_HANDLE_CACHING == 0 {
-            srv.leases.release((of.share_idx, ino), lk);
-        }
-    }
-    // Complete any CHANGE_NOTIFY pended on this handle.
-    let mut i = 0;
-    while i < pc.notify_active.len() {
-        if pc.notify_active[i].0 == fid {
-            let (_, async_id) = pc.notify_active.remove(i);
-            pc.notify_done
-                .push(crate::smb2::NotifyDone { async_id, status: status::NOTIFY_CLEANUP });
-        } else {
-            i += 1;
-        }
-    }
+    notify_cleanup(pc, fid);
 
     let post_attrib = flags & 0x1 != 0;
     let meta = if post_attrib { vfs::fstat_meta(of.fd).ok() } else { None };
 
-    let mut st = status::SUCCESS;
-    if of.delete_on_close {
-        // The file goes away: break other holders' leases on it (#42).
-        if !of.is_dir {
-            if let Ok(m) = vfs::fstat_meta(of.fd) {
-                break_leases(srv, (of.share_idx, m.ino), of.lease_key);
-            }
-        }
-        let res = if of.is_dir {
-            std::fs::remove_dir(&of.path)
-        } else {
-            std::fs::remove_file(&of.path)
-        };
-        if let Err(e) = res {
-            st = status::from_errno(e.raw_os_error().unwrap_or(libc::EIO));
-        }
-    }
+    let st = finish_close(srv, &of);
     if st != status::SUCCESS {
         err_resp(tx, h, st, chain);
         return;
@@ -1478,6 +1636,47 @@ fn close(srv: &Srv, pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, bod
     }
 }
 
+/// Complete any CHANGE_NOTIFY pended on handle `fid` (NOTIFY_CLEANUP).
+fn notify_cleanup(pc: &mut ProtoConn, fid: u64) {
+    let mut i = 0;
+    while i < pc.notify_active.len() {
+        if pc.notify_active[i].0 == fid {
+            let (_, async_id) = pc.notify_active.remove(i);
+            pc.notify_done
+                .push(crate::smb2::NotifyDone { async_id, status: status::NOTIFY_CLEANUP });
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// The CLOSE side effects of a handle leaving the table, whether by CLOSE,
+/// TREE_DISCONNECT, LOGOFF or the connection dropping: release its lease
+/// (unless handle-caching keeps it alive past CLOSE — then it is broken later
+/// or released by `release_conn`), and carry out delete-on-close. Dropping
+/// `of` afterwards closes the fd (and with it any OFD byte-range locks).
+pub fn finish_close(srv: &Srv, of: &OpenFile) -> u32 {
+    if let (Some(ino), Some(lk)) = (of.oplock_ino, of.lease_key) {
+        if of.lease_granted & LEASE_HANDLE_CACHING == 0 {
+            srv.leases.release((of.share_idx, ino), lk);
+        }
+    }
+    if !of.delete_on_close {
+        return status::SUCCESS;
+    }
+    // The file goes away: break other holders' leases on it (#42).
+    if !of.is_dir {
+        if let Ok(m) = vfs::fstat_meta(of.fd) {
+            break_leases(srv, (of.share_idx, m.ino), of.lease_key);
+        }
+    }
+    let res = if of.is_dir { std::fs::remove_dir(&of.path) } else { std::fs::remove_file(&of.path) };
+    match res {
+        Ok(()) => status::SUCCESS,
+        Err(e) => status::from_errno(e.raw_os_error().unwrap_or(libc::EIO)),
+    }
+}
+
 fn flush(sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let mut r = Rdr::new(body);
@@ -1491,7 +1690,7 @@ fn flush(sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = sess.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid, chain.tree_id) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -1548,7 +1747,7 @@ fn read(
     // mid-read (the dup keeps it alive; the reactor/handler closes it).
     let dup = {
         let mut sess = sref.lock().unwrap();
-        let Some(of) = sess.handles.get(fid) else {
+        let Some(of) = sess.handles.get(fid, chain.tree_id) else {
             err_resp(tx, h, status::FILE_CLOSED, chain);
             return None;
         };
@@ -1648,7 +1847,7 @@ fn write(
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
     }
-    let Some(of) = sess.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid, chain.tree_id) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -1710,7 +1909,7 @@ fn query_directory(sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chain: &mut 
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = sess.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid, chain.tree_id) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -1860,7 +2059,7 @@ fn query_info(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = sess.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid, chain.tree_id) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -2117,7 +2316,7 @@ fn set_info(
         return;
     }
     let share_root = share.path.clone();
-    let Some(of) = sess.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid, chain.tree_id) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -2211,6 +2410,9 @@ fn set_disposition(of: &mut vfs::OpenFile, data: &[u8]) -> u32 {
     let Some(&flag) = data.first() else {
         return status::INVALID_PARAMETER;
     };
+    if flag != 0 && of.rel.is_empty() {
+        return status::ACCESS_DENIED; // never the share root (#39 R21)
+    }
     if flag != 0 && of.is_dir {
         // Windows semantics: refuse marking a non-empty directory.
         match std::fs::read_dir(&of.path) {
@@ -2244,6 +2446,10 @@ fn set_rename(of: &mut vfs::OpenFile, data: &[u8], share_root: &Path) -> (u32, O
         Ok(v) => v,
         Err(st) => return (st, None),
     };
+    // Neither the share root nor anything onto it (#39 R21).
+    if of.rel.is_empty() || new_rel.is_empty() {
+        return (status::ACCESS_DENIED, None);
+    }
     if !replace && new_path.exists() {
         return (status::OBJECT_NAME_COLLISION, None);
     }
@@ -2252,8 +2458,16 @@ fn set_rename(of: &mut vfs::OpenFile, data: &[u8], share_root: &Path) -> (u32, O
         .filter(|m| !m.is_dir)
         .map(|m| m.ino)
         .filter(|&ino| vfs::fstat_meta(of.fd).map(|m| m.ino != ino).unwrap_or(true));
-    if let Err(e) = std::fs::rename(&of.path, &new_path) {
-        return (status::from_errno(e.raw_os_error().unwrap_or(libc::EIO)), None);
+    let res = if replace {
+        std::fs::rename(&of.path, &new_path).map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
+    } else {
+        // RENAME_NOREPLACE closes the window between the exists() check above
+        // and the rename, where a file created meanwhile would be replaced.
+        vfs::rename_noreplace(&of.path, &new_path)
+    };
+    if let Err(e) = res {
+        let st = if e == libc::EEXIST { status::OBJECT_NAME_COLLISION } else { status::from_errno(e) };
+        return (st, None);
     }
     of.leaf = new_rel.rsplit('\\').next().unwrap_or("").to_string();
     of.path = new_path;
@@ -2293,7 +2507,7 @@ fn lock(sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx:
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    let Some(of) = sess.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid, chain.tree_id) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -2369,7 +2583,7 @@ fn change_notify(pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, body: 
         .get(&chain.session_id)
         .map(|c| c.sign.is_some() && (c.signing_required || h.flags & crate::smb2::FLAG_SIGNED != 0))
         .unwrap_or(false);
-    let Some(of) = sess.handles.get(fid) else {
+    let Some(of) = sess.handles.get(fid, chain.tree_id) else {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     };
@@ -2425,15 +2639,46 @@ fn ioctl(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chai
     };
     let out: Vec<u8> = match ctl {
         FSCTL_VALIDATE_NEGOTIATE_INFO => {
+            // The client repeats what it sent in NEGOTIATE; anything changed
+            // means an on-path attacker rewrote the (unsigned) NEGOTIATE, e.g.
+            // to strip SMB 3.1.1 and with it encryption. MS-SMB2 3.3.5.15.12:
+            // terminate the connection (#39 R8).
+            let input = (|| {
+                let mut r = Rdr::new(msg.get(64 + 24..)?);
+                let in_off = r.u32()? as usize;
+                let in_len = r.u32()? as usize;
+                let mut r = Rdr::new(msg.get(in_off..in_off.checked_add(in_len)?)?);
+                let caps = r.u32()?;
+                let guid: [u8; 16] = r.take(16)?.try_into().ok()?;
+                let secmode = r.u16()?;
+                let n = r.u16()? as usize;
+                let mut dialects = Vec::with_capacity(n.min(16));
+                for _ in 0..n.min(16) {
+                    dialects.push(r.u16()?);
+                }
+                Some((crate::smb2::ClientNeg { secmode, caps, guid }, dialects))
+            })();
+            let valid = match (&input, &pc.client_neg) {
+                (Some((cn, dialects)), Some(orig)) => {
+                    cn == orig
+                        && SUPPORTED_DIALECTS.iter().find(|d| dialects.contains(d)) == Some(&pc.dialect)
+                }
+                _ => false,
+            };
+            if !valid {
+                crate::logw!("VALIDATE_NEGOTIATE_INFO mismatch (NEGOTIATE tampered?): disconnecting");
+                pc.close = true;
+                return;
+            }
             // Echo our negotiated parameters so the client can verify them.
-            // The security mode MUST match what we advertised in NEGOTIATE
-            // or the client aborts with "security settings mismatch".
+            // They MUST match what NEGOTIATE advertised, or the client aborts
+            // with "security settings mismatch".
             let mut secmode = SECURITY_MODE_SIGNING_ENABLED;
             if srv.cfg.require_signing {
                 secmode |= SECURITY_MODE_SIGNING_REQUIRED;
             }
             let mut o: Vec<u8> = Vec::with_capacity(24);
-            o.p32(CAP_LARGE_MTU);
+            o.p32(pc.server_caps);
             o.pbytes(&srv.guid);
             o.p16(secmode);
             o.p16(pc.dialect);

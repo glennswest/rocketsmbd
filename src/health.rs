@@ -79,7 +79,16 @@ fn handle(mut s: TcpStream, state: &State) {
     let _ = s.set_write_timeout(Some(IO_TIMEOUT));
     let mut buf = [0u8; MAX_REQUEST];
     let mut n = 0;
+    // IO_TIMEOUT bounds the whole request, not each read: a client trickling
+    // a byte at a time can't hold this single-threaded endpoint (#39 R23).
+    let deadline = std::time::Instant::now() + IO_TIMEOUT;
     while n < buf.len() && !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+        let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return;
+        };
+        if left.is_zero() || s.set_read_timeout(Some(left)).is_err() {
+            return;
+        }
         match s.read(&mut buf[n..]) {
             Ok(0) | Err(_) => break,
             Ok(k) => n += k,

@@ -11,7 +11,6 @@
 //! signature verify/sign hot path needs no registry lock.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::smb2::Tree;
@@ -60,29 +59,37 @@ impl SessionInner {
 pub type SessionRef = Arc<Mutex<SessionInner>>;
 
 /// Global session table shared by all workers via `Srv`.
+#[derive(Default)]
 pub struct Registry {
     sessions: Mutex<HashMap<u64, SessionRef>>,
-    next_id: AtomicU64,
-}
-
-impl Default for Registry {
-    fn default() -> Self {
-        Self {
-            sessions: Mutex::new(HashMap::new()),
-            // Start high and odd so ids look like real SMB session handles
-            // and never collide with 0 / all-ones sentinels.
-            next_id: AtomicU64::new(0x1000_0000_0001),
-        }
-    }
 }
 
 impl Registry {
     /// Allocate a fresh session and insert an empty (un-established) entry.
+    /// Ids are random, so one client can't guess another's session id to
+    /// target it (#39 R10); never 0 or all-ones (protocol sentinels).
     pub fn create(&self) -> (u64, SessionRef) {
-        let id = self.next_id.fetch_add(2, Ordering::Relaxed);
         let sref = Arc::new(Mutex::new(SessionInner::new()));
-        self.sessions.lock().unwrap().insert(id, Arc::clone(&sref));
+        let mut map = self.sessions.lock().unwrap();
+        let id = loop {
+            let mut b = [0u8; 8];
+            crate::config::urandom(&mut b);
+            let id = u64::from_le_bytes(b);
+            if id != 0 && id != u64::MAX && !map.contains_key(&id) {
+                break id;
+            }
+        };
+        map.insert(id, Arc::clone(&sref));
         (id, sref)
+    }
+
+    /// Number of sessions (established or mid-setup).
+    pub fn len(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn get(&self, id: u64) -> Option<SessionRef> {

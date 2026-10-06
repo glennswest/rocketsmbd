@@ -86,6 +86,30 @@ pub fn stat_meta(p: &Path) -> Result<Meta, i32> {
         .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
 }
 
+/// `rename` that fails with `EEXIST` instead of replacing an existing target
+/// (renameat2 `RENAME_NOREPLACE`, via the raw syscall so static musl builds
+/// don't depend on the libc wrapper).
+pub fn rename_noreplace(from: &Path, to: &Path) -> Result<(), i32> {
+    let (a, b) = (cpath(from)?, cpath(to)?);
+    // SAFETY: a and b are NUL-terminated CStrings alive for the call; the
+    // kernel copies both paths. Integer arguments match renameat2(2).
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if r < 0 {
+        Err(errno())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn fstat_meta(fd: RawFd) -> Result<Meta, i32> {
     if fd < 0 {
         return Err(libc::EBADF);
@@ -126,14 +150,45 @@ pub fn cpath(p: &Path) -> Result<CString, i32> {
     CString::new(p.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)
 }
 
+/// Open a path for a client. Only regular files and directories: the open is
+/// non-blocking so a FIFO or device node in a share (or behind a symlink)
+/// can't stall the worker thread in `open`, and anything else is refused
+/// with `ENXIO` (#39 R22). The returned fd is blocking again.
 pub fn open_raw(p: &Path, flags: i32, mode: u32) -> Result<RawFd, i32> {
     let c = cpath(p)?;
     // SAFETY: c is a NUL-terminated CString alive for the call; open copies the path.
-    let fd = unsafe { libc::open(c.as_ptr(), flags | libc::O_CLOEXEC, mode) };
+    let fd = unsafe { libc::open(c.as_ptr(), flags | libc::O_CLOEXEC | libc::O_NONBLOCK, mode) };
     if fd < 0 {
-        Err(errno())
-    } else {
-        Ok(fd)
+        return Err(errno());
+    }
+    let kind_ok = (|| {
+        // SAFETY: libc::stat is POD (zeroed is valid); fstat writes only within
+        // the live, exclusively borrowed `st`; fd is open.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut st) } < 0 {
+            return Err(errno());
+        }
+        match st.st_mode & libc::S_IFMT {
+            libc::S_IFREG | libc::S_IFDIR => Ok(()),
+            _ => Err(libc::ENXIO),
+        }
+    })();
+    // SAFETY: integer-only fcntls on the fd just opened (clear O_NONBLOCK).
+    let ok = kind_ok.and_then(|_| unsafe {
+        let fl = libc::fcntl(fd, libc::F_GETFL);
+        if fl < 0 || libc::fcntl(fd, libc::F_SETFL, fl & !libc::O_NONBLOCK) < 0 {
+            Err(errno())
+        } else {
+            Ok(())
+        }
+    });
+    match ok {
+        Ok(()) => Ok(fd),
+        Err(e) => {
+            // SAFETY: fd was opened above and is owned only here.
+            unsafe { libc::close(fd) };
+            Err(e)
+        }
     }
 }
 
@@ -199,6 +254,12 @@ pub enum LockKind {
 pub fn range_lock(fd: RawFd, off: u64, len: u64, kind: LockKind) -> Result<(), i32> {
     let start = off.min(i64::MAX as u64) as i64;
     let l_len = len.min((i64::MAX as u64) - start as u64) as i64;
+    // POSIX reads l_len = 0 as "to end of file and beyond", which would make a
+    // zero-length SMB lock block every later lock on the file (#39 R20). A
+    // zero-length range covers no bytes: nothing to lock.
+    if l_len == 0 {
+        return Ok(());
+    }
     // SAFETY: libc::flock is a POD C struct; all-zero is valid (and l_pid must be 0 for OFD
     // locks).
     let mut fl: libc::flock = unsafe { std::mem::zeroed() };
@@ -281,6 +342,10 @@ pub struct OpenFile {
     pub rel: String,
     pub leaf: String,
     pub share_idx: u32,
+    /// The tree this handle was opened on. Requests must name the same tree
+    /// (MS-SMB2 Open.TreeConnect): a handle from a read-only tree can't be
+    /// renamed/deleted through a writable one (#39 R3).
+    pub tree_id: u32,
     pub is_dir: bool,
     pub writable: bool,
     pub delete_on_close: bool,
@@ -372,17 +437,52 @@ impl HandleTable {
         }
     }
 
-    pub fn get(&mut self, id: u64) -> Option<&mut OpenFile> {
+    /// The open handle `id`, if it is live and was opened on `tree_id`.
+    pub fn get(&mut self, id: u64, tree_id: u32) -> Option<&mut OpenFile> {
         let idx = self.slot(id)?;
-        self.slots[idx].as_mut()
+        self.slots[idx].as_mut().filter(|of| of.tree_id == tree_id)
     }
 
-    pub fn remove(&mut self, id: u64) -> Option<OpenFile> {
+    /// Remove and return handle `id`, if it is live and was opened on `tree_id`.
+    pub fn remove(&mut self, id: u64, tree_id: u32) -> Option<OpenFile> {
         let idx = self.slot(id)?;
+        if self.slots[idx].as_ref().is_some_and(|of| of.tree_id != tree_id) {
+            return None;
+        }
         let of = self.slots[idx].take();
         self.gens[idx] = self.gens[idx].wrapping_add(1).max(1);
         self.free.push(idx);
         of
+    }
+
+    /// Number of open handles.
+    pub fn len(&self) -> usize {
+        self.slots.len() - self.free.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The ids of every handle opened on `tree_id` (TREE_DISCONNECT).
+    pub fn ids_in_tree(&self, tree_id: u32) -> Vec<u64> {
+        (0..self.slots.len())
+            .filter(|&i| self.slots[i].as_ref().is_some_and(|of| of.tree_id == tree_id))
+            .map(|i| ((self.gens[i] as u64) << HT_IDX_BITS) | i as u64)
+            .collect()
+    }
+
+    /// Remove every handle (session teardown).
+    pub fn take_all(&mut self) -> Vec<OpenFile> {
+        let mut v = Vec::new();
+        for i in 0..self.slots.len() {
+            if let Some(of) = self.slots[i].take() {
+                self.gens[i] = self.gens[i].wrapping_add(1).max(1);
+                self.free.push(i);
+                v.push(of);
+            }
+        }
+        v
     }
 }
 
@@ -412,6 +512,7 @@ mod tests {
             rel: String::new(),
             leaf: String::new(),
             share_idx: 0,
+            tree_id: 1,
             is_dir: true,
             writable: false,
             delete_on_close: false,
@@ -421,9 +522,11 @@ mod tests {
             lease_granted: 0,
         };
         let id = t.insert(of);
-        assert!(t.get(id).is_some());
-        t.remove(id).unwrap();
-        assert!(t.get(id).is_none()); // stale id must miss
+        assert!(t.get(id, 1).is_some());
+        assert!(t.get(id, 2).is_none()); // another tree must miss
+        assert!(t.remove(id, 2).is_none());
+        t.remove(id, 1).unwrap();
+        assert!(t.get(id, 1).is_none()); // stale id must miss
     }
 
     #[test]

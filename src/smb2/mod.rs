@@ -229,6 +229,15 @@ pub struct AsyncMeta {
     pub want_sign: bool,
 }
 
+/// The client's NEGOTIATE parameters that FSCTL_VALIDATE_NEGOTIATE_INFO
+/// repeats (its dialect list is re-checked by selecting from it again).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientNeg {
+    pub secmode: u16,
+    pub caps: u32,
+    pub guid: [u8; 16],
+}
+
 /// Per-connection protocol state. Sessions and their handles live in the
 /// shared `Srv::sessions` registry (so channels on other cores share them);
 /// `channels` holds this connection's per-session signing/preauth state.
@@ -255,6 +264,19 @@ pub struct ProtoConn {
     pub wid: usize,
     pub conn_idx: usize,
     pub conn_gen: u16,
+    /// Set by a handler on a protocol violation that MS-SMB2 answers with a
+    /// disconnect; `process_frame` then returns `FrameAction::Close`.
+    pub close: bool,
+    /// SMB2 NEGOTIATE has completed on this connection (a second is refused).
+    pub negotiated: bool,
+    /// What the client sent in NEGOTIATE, checked by VALIDATE_NEGOTIATE_INFO.
+    pub client_neg: Option<ClientNeg>,
+    /// Capabilities the NEGOTIATE response advertised.
+    pub server_caps: u32,
+    /// MessageId replay window: every id below `msg_low` is used, and
+    /// `msg_seen` holds the used ids at or above it.
+    pub msg_low: u64,
+    pub msg_seen: std::collections::BTreeSet<u64>,
     /// Kerberos GSS acceptor, lazily acquired on the first Kerberos
     /// SESSION_SETUP (holds the service credential; per-connection so the
     /// non-`Send` GSS handle never crosses worker threads).
@@ -278,6 +300,12 @@ impl ProtoConn {
             wid,
             conn_idx,
             conn_gen,
+            close: false,
+            negotiated: false,
+            client_neg: None,
+            server_caps: 0,
+            msg_low: 0,
+            msg_seen: std::collections::BTreeSet::new(),
             #[cfg(feature = "kerberos")]
             krb_acceptor: None,
         }
@@ -303,6 +331,13 @@ pub struct ZcReadPlan {
     pub linked: bool,
 }
 
+/// Most members one compound frame may carry.
+const MAX_COMPOUND: usize = 128;
+/// Once a compound's buffered responses pass this, the connection is dropped.
+/// The cap is checked before each member and one member adds at most
+/// MaxTransact (4 MiB), so a frame stays under the 16 MiB NBT limit.
+const COMPOUND_RESP_CAP: usize = 8 << 20;
+
 pub enum FrameAction {
     Respond,
     ZcRead(ZcReadPlan),
@@ -319,6 +354,9 @@ pub struct Chain {
     pub tree_id: u32,
     pub last_fid: Option<u64>,
     pub single: bool,
+    /// The transform header's SessionId when this compound arrived sealed;
+    /// `None` for a plaintext frame.
+    pub transform_sid: Option<u64>,
 }
 
 /// Write a response header. Returns the offset of the header start in `tx`.
@@ -610,10 +648,10 @@ pub fn decrypt_transform(frame: &[u8], enc: &EncCtx) -> Option<Vec<u8>> {
 }
 
 /// Wrap a plaintext SMB2 message/compound in a transform header, encrypting
-/// with the s2c key. Writes NBT prefix + transform header + ciphertext to tx
-/// (which is cleared first).
+/// with the s2c key. Appends NBT prefix + transform header + ciphertext to tx
+/// (earlier responses batched in tx are kept).
 pub fn wrap_transform(plain: &[u8], enc: &mut EncCtx, session_id: u64, tx: &mut Vec<u8>) {
-    tx.clear();
+    let base = tx.len();
     tx.zeros(4); // NBT placeholder
     let hdr = tx.len();
     tx.pbytes(&TRANSFORM_PROTO);
@@ -637,8 +675,8 @@ pub fn wrap_transform(plain: &[u8], enc: &mut EncCtx, session_id: u64, tx: &mut 
     let (head, tail) = tx.split_at_mut(ct_off);
     let tag = crypto::aead_seal(enc.cipher, &enc.s2c[..klen], &nonce, &head[aad_start..ct_off], tail);
     tx[sig_off..sig_off + 16].copy_from_slice(&tag);
-    let total = (tx.len() - 4) as u32;
-    finish_nbt_with(tx, total);
+    let total = (tx.len() - base - 4) as u32;
+    finish_nbt_with(&mut tx[base..], total);
 }
 
 /// Process one NetBIOS-framed message (without the 4-byte NBT prefix).
@@ -664,43 +702,61 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
             return FrameAction::Close; // auth/decrypt failure → disconnect
         };
         // This session is actively encrypting — make reads take the buffered
-        // path (responses are wrapped, so they can't be spliced).
+        // path (responses are wrapped, so they can't be spliced), and from now
+        // on refuse its requests unless they arrive sealed.
         if let Some(c) = pc.channels.get_mut(&sid) {
             c.encrypt = true;
         }
-        // Process the decrypted message(s); encrypted sessions never splice
-        // (read() forces the buffered path), so this won't be a ZcRead.
+        // Process the decrypted message(s). Every inner request must name the
+        // transform's session (dispatch enforces it), so read() sees an
+        // encrypting channel and never returns a zero-copy plan.
         let mut inner = Vec::new();
-        let _ = process_plain(srv, pc, &plain, &mut inner, true);
+        match process_plain(srv, pc, &plain, &mut inner, Some(sid)) {
+            FrameAction::Close => return FrameAction::Close,
+            FrameAction::ZcRead(plan) => {
+                // Unreachable by the above; never leak the plan's dup'd fd.
+                // SAFETY: the plan owns this dup and it was never submitted.
+                unsafe { libc::close(plan.fd) };
+            }
+            FrameAction::Respond => {}
+        }
         if inner.len() <= 4 {
-            tx.clear();
             return FrameAction::Respond; // no response (e.g. CANCEL)
         }
-        // Re-encrypt the plaintext response (strip its NBT prefix first).
-        let mut enc2 = pc.channels.get(&sid).and_then(|c| c.enc.clone()).unwrap();
+        // Re-encrypt the plaintext response (strip its NBT prefix first) with
+        // the keys the request arrived under: the request may have removed
+        // the channel (LOGOFF) — its response is still sealed (#39 R2).
+        let mut enc2 = pc.channels.get(&sid).and_then(|c| c.enc.clone()).unwrap_or(enc);
         wrap_transform(&inner[4..], &mut enc2, sid, tx);
         if let Some(c) = pc.channels.get_mut(&sid) {
-            c.enc = Some(enc2); // persist the bumped nonce counter
+            if c.enc.as_ref().is_some_and(|e| e.s2c == enc2.s2c) {
+                c.enc = Some(enc2); // persist the bumped nonce counter
+            }
         }
         return FrameAction::Respond;
     }
-    process_plain(srv, pc, frame, tx, false)
+    process_plain(srv, pc, frame, tx, None)
 }
 
-/// `encrypted` is true when these messages arrived inside a transform (so the
-/// response will be wrapped, not signed).
+/// `transform_sid` is the transform header's SessionId when these messages
+/// arrived inside a transform (so the response will be wrapped, not signed).
 fn process_plain(
     srv: &Srv,
     pc: &mut ProtoConn,
     frame: &[u8],
     tx: &mut Vec<u8>,
-    encrypted: bool,
+    transform_sid: Option<u64>,
 ) -> FrameAction {
+    let encrypted = transform_sid.is_some();
     let base = tx.len();
     tx.zeros(4); // NBT placeholder
 
     // Legacy SMB1 negotiate → wildcard SMB2 response (dialect 0x02FF).
     if frame.len() >= 4 && frame[0] == 0xFF && &frame[1..4] == b"SMB" {
+        if pc.negotiated || transform_sid.is_some() {
+            tx.truncate(base);
+            return FrameAction::Close; // SMB1 after SMB2 NEGOTIATE: violation
+        }
         handlers::negotiate_resp_smb1_wildcard(srv, pc, tx);
         let total = (tx.len() - base - 4) as u32;
         finish_nbt_with(&mut tx[base..], total);
@@ -713,6 +769,7 @@ fn process_plain(
         tree_id: 0,
         last_fid: None,
         single: true,
+        transform_sid,
     };
     let mut plan: Option<ZcReadPlan> = None;
     let mut prev_start: Option<usize> = None;
@@ -726,8 +783,19 @@ fn process_plain(
         sess_id: u64,
     }
     let mut recs: Vec<RespRec> = Vec::new();
+    let mut members = 0usize;
 
     while let Some(h) = parse_hdr(&frame[off..]) {
+        // Bound one frame's work: a compound of thousands of members, or one
+        // whose responses add up past COMPOUND_RESP_CAP (chained 1 MiB READs),
+        // would otherwise grow tx without limit and overflow the 24-bit NBT
+        // length (#39 R6). No real client compounds anywhere near this.
+        members += 1;
+        if members > MAX_COMPOUND || tx.len() - base > COMPOUND_RESP_CAP {
+            crate::logw!("compound too large ({members} members, {} bytes): disconnecting", tx.len() - base);
+            pc.close = true;
+            break;
+        }
         let msg_end = if h.next > 0 {
             (off + h.next as usize).min(frame.len())
         } else {
@@ -767,6 +835,17 @@ fn process_plain(
         if off + HDR_LEN > frame.len() {
             break;
         }
+    }
+
+    if pc.close {
+        // A protocol violation (replayed MessageId, second NEGOTIATE, an
+        // oversized compound): MS-SMB2 disconnects.
+        tx.truncate(base);
+        if let Some(p) = plan {
+            // SAFETY: the plan owns this dup and it was never submitted.
+            unsafe { libc::close(p.fd) };
+        }
+        return FrameAction::Close;
     }
 
     if let Some(p) = plan {

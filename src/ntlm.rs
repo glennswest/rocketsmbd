@@ -155,7 +155,8 @@ pub fn verify_ntlmv2(
     buf.extend_from_slice(server_challenge);
     buf.extend_from_slice(temp);
     let expect = crypto::hmac_md5(&v2_hash, &buf);
-    if expect != proof {
+    // Constant-time compare (#39 R19).
+    if expect.len() != proof.len() || expect.iter().zip(proof).fold(0u8, |a, (x, y)| a | (x ^ y)) != 0 {
         return None;
     }
 
