@@ -195,7 +195,15 @@ Order:
 - **Where we are (2026-10-06):** #46 waits on the stormcos#149 registration (our side is done). #41 is waiting on the owner (Actions disabled, so there are no 1.4.1 artifacts). Next up: #42.
 - #41 P1 shipped `/etc/rocketsmbd.toml` rejected on load. Fixed on main (d0b114c) and on `release/1.4`; guard test on both (it fails on the old layout). `v1.4.1` is tagged (fdac8ef), sc-build verified. **Waiting on the owner:** GitHub Actions is disabled on the repo, so release.yml produced no artifacts; crates.io, COPR and the distro uploads need the owner's tokens.
 - #42 P1 lease breaks only on WRITE (truncate/overwrite/rename leave stale caches)
-- #39 P2 external security review; #40 P2 per-share authz (PAC) + idmap
+- #39 P2 external security review
+- #40 P2 per-share authz — **in progress (2026-10-06)**. Plan: (1) `valid_users` /
+  `invalid_users` / `read_only_users` on `[[share]]`, enforced at TREE_CONNECT
+  (per-tree read_only replaces `share.read_only` checks); (2) PAC LOGON_INFO from
+  the GSS name (`urn:mspac:logon-info`), NDR-parsed to user + group SIDs; `@group`
+  entries match a SID literal, a well-known domain RID name (Domain Admins …) or a
+  `[[group]] name/sid` table (no LDAP); (3) SID→uid idmap + per-op fsuid split to
+  a follow-up issue. dc1.ad.g8.lo (192.168.8.105) is unreachable 2026-10-06, so
+  the PAC parser is tested against a recorded Windows PAC, not the live lab.
 - #43 P2 CI feature matrix; #44 P2 `rocketsmbd-test` container (test standard)
 - #46 P1 rocketsmbd as a stormcos service golden for smbop. **rocketsmbd side done (2026-10-06):** opt-in `health_listen` / `GET /healthz` (b09a5f5, docs dbf6d08), unit tests plus a live sc-build run (200 healthy, 503 when a share dir goes, 404/405, bad address fails `--check`). Entry values (port 9104, `/healthz`, placeholder config with `allow_guest = false`) posted on stormcos#149. #46 is queued `--after` stormcos#149. Next step once registered: `stormcentral component build rocketsmbd`, then close #46.
 - #47 P3 SMB1-only clients get the SMB2 wildcard and hang ~20 s instead of a refusal
