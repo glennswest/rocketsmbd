@@ -27,8 +27,10 @@ rm -rf "$work"
 mkdir -p "$work/src" "$out"
 
 # The tag's exact source (sc-build's checkout may be shallow and tag-less).
+# sc-build's checkout has no `origin` remote: fetch from the repo URL.
+repo=${RELEASE_REPO:-https://github.com/glennswest/rocketsmbd.git}
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null ||
-    git fetch -q --depth=1 origin "refs/tags/$tag:refs/tags/$tag"
+    git fetch -q --depth=1 "$repo" "refs/tags/$tag:refs/tags/$tag"
 echo "==> building $tag ($(git rev-parse "$tag^{commit}"))"
 git archive "$tag" | tar -x -C "$work/src"
 cd "$work/src"
