@@ -1,19 +1,33 @@
 #!/usr/bin/make -f
-export CARGO_HOME = $(CURDIR)/debian/.cargo
+# Debian builds offline. Until the crate route is settled (#23, docs/UPSTREAM.md),
+# the crates come from the orig-vendor component tarball
+# (rocketsmbd_<v>.orig-vendor.tar.xz, unpacked at vendor/) through a cargo
+# source replacement kept in debian/cargo-home, so upstream's .cargo/ is untouched.
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+export CARGO_TARGET_DIR = $(CURDIR)/target
+# Keep debug info (upstream's release profile strips) so dh_strip makes -dbgsym.
+export CARGO_PROFILE_RELEASE_DEBUG = 2
+export CARGO_PROFILE_RELEASE_STRIP = false
 
 %:
 	dh $@
 
+override_dh_auto_configure:
+	mkdir -p $(CARGO_HOME)
+	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "$(CURDIR)/vendor"\n' \
+	    > $(CARGO_HOME)/config.toml
+
 override_dh_auto_build:
-	cargo build --release --offline || cargo build --release
+	cargo build --release --offline --locked
 
 override_dh_auto_test:
-	cargo test --release --offline || cargo test --release || true
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cargo test --release --offline --locked
+endif
 
 override_dh_auto_install:
-	install -Dpm0755 target/release/rocketsmbd debian/rocketsmbd/usr/bin/rocketsmbd
 	install -Dpm0644 rocketsmbd.toml.example debian/rocketsmbd/etc/rocketsmbd.toml
 
 override_dh_auto_clean:
-	cargo clean || true
+	rm -rf target $(CARGO_HOME)

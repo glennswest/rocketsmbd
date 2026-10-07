@@ -1,2 +1,1 @@
 target/release/rocketsmbd usr/bin
-rocketsmbd.toml.example etc/rocketsmbd.toml
