@@ -347,6 +347,9 @@ const COMPOUND_RESP_CAP: usize = 8 << 20;
 pub enum FrameAction {
     Respond,
     ZcRead(ZcReadPlan),
+    /// Send what was appended to `tx`, then close the connection (an SMB1-only
+    /// client's "no common dialect" reply, #47).
+    RespondClose,
     /// Tear down the connection. Used when an encrypted (TRANSFORM) frame
     /// cannot be decrypted — per MS-SMB2 the server disconnects rather than
     /// leaving the client waiting for a response it will never get.
@@ -729,7 +732,7 @@ pub fn process_frame(srv: &Srv, pc: &mut ProtoConn, frame: &[u8], tx: &mut Vec<u
         // encrypting channel and never returns a zero-copy plan.
         let mut inner = Vec::new();
         match process_plain(srv, pc, &plain, &mut inner, Some(sid)) {
-            FrameAction::Close => return FrameAction::Close,
+            FrameAction::Close | FrameAction::RespondClose => return FrameAction::Close,
             FrameAction::ZcRead(plan) => {
                 // Unreachable by the above; never leak the plan's dup'd fd.
                 // SAFETY: the plan owns this dup and it was never submitted.
@@ -768,11 +771,30 @@ fn process_plain(
     let base = tx.len();
     tx.zeros(4); // NBT placeholder
 
-    // Legacy SMB1 negotiate → wildcard SMB2 response (dialect 0x02FF).
+    // SMB1 NEGOTIATE: a client offering SMB2 ("SMB 2.002"/"SMB 2.???") gets
+    // the SMB2 wildcard reply (dialect 0x02FF) and re-negotiates in SMB2. A
+    // client offering only SMB1 dialects gets an SMB1 "no common dialect"
+    // reply and the connection closes (#47; it used to get the wildcard,
+    // which it can't parse, and hang until its own timeout).
     if frame.len() >= 4 && frame[0] == 0xFF && &frame[1..4] == b"SMB" {
         if pc.negotiated || transform_sid.is_some() {
             tx.truncate(base);
             return FrameAction::Close; // SMB1 after SMB2 NEGOTIATE: violation
+        }
+        let Some(dialects) = handlers::smb1_negotiate_dialects(frame) else {
+            tx.truncate(base);
+            crate::logw!("dropping connection: SMB1 message that isn't a NEGOTIATE (rocketsmbd speaks SMB2/3 only)");
+            return FrameAction::Close;
+        };
+        if !handlers::smb1_offers_smb2(&dialects) {
+            crate::logw!(
+                "refusing an SMB1-only client (offered {:?}): rocketsmbd speaks SMB2/3 only; for SMB1 clients such as old BMCs see minismbd",
+                dialects
+            );
+            handlers::smb1_negotiate_refuse(frame, tx);
+            let total = (tx.len() - base - 4) as u32;
+            finish_nbt_with(&mut tx[base..], total);
+            return FrameAction::RespondClose;
         }
         handlers::negotiate_resp_smb1_wildcard(srv, pc, tx);
         let total = (tx.len() - base - 4) as u32;
@@ -989,7 +1011,7 @@ mod tests {
         match process_frame(srv, pc, &frame, &mut tx) {
             FrameAction::Respond => {}
             FrameAction::ZcRead(_) => panic!("unexpected zc plan"),
-            FrameAction::Close => panic!("unexpected close"),
+            FrameAction::Close | FrameAction::RespondClose => panic!("unexpected close"),
         }
         assert!(tx.len() > 68, "no response produced");
         let nbt = ((tx[1] as usize) << 16) | ((tx[2] as usize) << 8) | tx[3] as usize;
@@ -1480,7 +1502,7 @@ mod tests {
                 assert_eq!(nbt, 80 + 11);
             }
             FrameAction::Respond => panic!("expected zero-copy plan for 64K read"),
-            FrameAction::Close => panic!("unexpected close"),
+            FrameAction::Close | FrameAction::RespondClose => panic!("unexpected close"),
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2211,6 +2233,77 @@ mod tests {
             frame.extend_from_slice(&e);
         }
         assert!(send(&srv, &mut pc, &frame).0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An SMB1 NEGOTIATE offering `dialects`, MID 0x1234.
+    fn smb1_negotiate(dialects: &[&str]) -> Vec<u8> {
+        let mut f = vec![0xFF, b'S', b'M', b'B', 0x72];
+        f.zeros(4); // status
+        f.p8(0x18); // flags
+        f.p16(0xC853); // flags2
+        f.zeros(12); // PIDHigh, security features, reserved
+        f.p16(0); // TID
+        f.p16(0xFEFF); // PIDLow
+        f.p16(0); // UID
+        f.p16(0x1234); // MID
+        f.p8(0); // WordCount
+        let mut bytes = Vec::new();
+        for d in dialects {
+            bytes.push(2);
+            bytes.extend_from_slice(d.as_bytes());
+            bytes.push(0);
+        }
+        f.p16(bytes.len() as u16);
+        f.pbytes(&bytes);
+        f
+    }
+
+    /// #47: an SMB1-only client (a Supermicro X9 BMC offers just "NT LM
+    /// 0.12") gets an SMB1 "no common dialect" reply and the connection
+    /// closes after it; one offering SMB2 still gets the SMB2 wildcard; a
+    /// non-NEGOTIATE SMB1 message is dropped.
+    #[test]
+    fn smb1_negotiate_handling() {
+        let dir = tmp_share("smb1");
+        let srv = test_srv(&dir);
+
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let mut tx = Vec::new();
+        let act = process_frame(&srv, &mut pc, &smb1_negotiate(&["NT LM 0.12"]), &mut tx);
+        assert!(matches!(act, FrameAction::RespondClose), "SMB1-only: reply then close");
+        let r = &tx[4..];
+        assert_eq!(&r[..5], &[0xFF, b'S', b'M', b'B', 0x72], "an SMB1 NEGOTIATE reply");
+        assert_eq!(r[9] & 0x80, 0x80, "reply flag");
+        assert_eq!(u16::from_le_bytes([r[30], r[31]]), 0x1234, "MID echoed");
+        assert_eq!(r[32], 1, "WordCount");
+        assert_eq!(u16::from_le_bytes([r[33], r[34]]), 0xFFFF, "DialectIndex: no common dialect");
+        assert_eq!(u16::from_le_bytes([r[35], r[36]]), 0, "ByteCount");
+        let nbt = ((tx[1] as usize) << 16) | ((tx[2] as usize) << 8) | tx[3] as usize;
+        assert_eq!(nbt, r.len());
+        assert!(!pc.negotiated);
+
+        for offer in [&["NT LM 0.12", "SMB 2.002"][..], &["NT LM 0.12", "SMB 2.002", "SMB 2.???"][..]] {
+            let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+            let mut tx = Vec::new();
+            let act = process_frame(&srv, &mut pc, &smb1_negotiate(offer), &mut tx);
+            assert!(matches!(act, FrameAction::Respond), "{offer:?}: SMB2 upgrade");
+            assert_eq!(&tx[4..8], &[0xFE, b'S', b'M', b'B'], "{offer:?}: an SMB2 reply");
+            assert_eq!(u16::from_le_bytes([tx[4 + 68], tx[4 + 69]]), 0x02FF, "{offer:?}: wildcard dialect");
+        }
+
+        let mut echo = smb1_negotiate(&[]);
+        echo[4] = 0x2B; // SMB_COM_ECHO
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let mut tx = Vec::new();
+        assert!(matches!(process_frame(&srv, &mut pc, &echo, &mut tx), FrameAction::Close));
+        assert!(tx.is_empty());
+
+        // Parser edge cases: truncated or malformed lists are not dialects.
+        assert!(handlers::smb1_negotiate_dialects(&smb1_negotiate(&["NT LM 0.12"])[..36]).is_none());
+        let mut bad = smb1_negotiate(&["NT LM 0.12"]);
+        bad[35] = 0x01; // BufferFormat must be 0x02
+        assert!(handlers::smb1_negotiate_dialects(&bad).is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

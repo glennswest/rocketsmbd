@@ -15,7 +15,7 @@ summary. Exit codes: 0 all passed, 1 a test failed, 2 could not run.
 
 | suite | tests |
 |---|---|
-| short | `server-start`, `guest-write-read-dir` (3.0.2 guest, 4 MiB through the zero-copy READ path, sha512-checked, directory listing), `ntlmv2-signed-311` (every request signed, every reply verified), `sealed-aes128gcm` (sealed round trip; plaintext on a sealed session refused), `lease-break-on-write` (A holds an R/H lease, B writes, A gets the break), `healthz` |
+| short | `server-start`, `guest-write-read-dir` (3.0.2 guest, 4 MiB through the zero-copy READ path, sha512-checked, directory listing), `ntlmv2-signed-311` (every request signed, every reply verified), `sealed-aes128gcm` (sealed round trip; plaintext on a sealed session refused), `lease-break-on-write` (A holds an R/H lease, B writes, A gets the break), `healthz`, `smb1-only-refused` (an SMB1-only NEGOTIATE gets DialectIndex 0xFFFF and the connection closes), `smb1-upgrade-to-smb2` |
 | medium | short + `wrong-password-refused`, `read-only-share` (reads served; writes, FILE_CREATE and FILE_OPEN_IF refused), `sealed-all-ciphers` (AES-128/256-GCM/CCM), `large-file-64mib`, `parallel-clients` (16 at once, signed and guest), `replay-disconnects` (a replayed request closes the connection), `healthz-503-when-share-gone` |
 | long | short + medium + `waves-no-leak`: waves of 8–32 clients that connect, round-trip 1 MiB and drop without LOGOFF, until `STORM_TIMEOUT` minus a minute. Fails if the server's fds or RSS grow, or if the late waves' median time rises well above the early waves' median (a single slow wave is reported, not failed: on a busy disk, writeback throttling stalls a worker's synchronous writes) |
 

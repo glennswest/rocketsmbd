@@ -175,6 +175,9 @@ struct Conn {
     send_is_zc: bool,
     /// The last send_zc failed for lack of pinnable memory: copy the retry.
     copy_next: bool,
+    /// Close once tx has been sent (FrameAction::RespondClose); read nothing
+    /// more meanwhile.
+    close_after_send: bool,
     /// Set once teardown has begun: stop submitting new ops and drop the
     /// connection when `inflight` drains to zero.
     closing: bool,
@@ -614,6 +617,7 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         notif_pending: 0,
         send_is_zc: false,
         copy_next: false,
+        close_after_send: false,
         closing: false,
         inotify_cancelled: false,
     });
@@ -707,7 +711,7 @@ fn frame_total(c: &Conn) -> Result<Option<usize>, ()> {
 /// or reallocates the buffer while a recv is in flight.
 fn maybe_arm_recv(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     let c = conn_mut(w, idx);
-    if c.recv_inflight || c.closing {
+    if c.recv_inflight || c.closing || c.close_after_send {
         return;
     }
     // Compact consumed bytes to the front.
@@ -808,6 +812,18 @@ fn drive(ring: &mut IoUring, w: &mut Worker, idx: usize) {
                 // Undecryptable encrypted frame (e.g. guest + seal): disconnect
                 // rather than leave the client hanging (#26).
                 close_conn_ring(ring, w, idx);
+                return;
+            }
+            FrameAction::RespondClose => {
+                // Send the reply (an SMB1 "no common dialect", #47), read
+                // nothing more, and close once it has gone out.
+                let c = conn_mut(w, idx);
+                c.close_after_send = true;
+                if c.tx.is_empty() {
+                    close_conn_ring(ring, w, idx);
+                } else {
+                    start_send(ring, w, idx);
+                }
                 return;
             }
             FrameAction::ZcRead(plan) => {
@@ -1087,6 +1103,10 @@ fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
 /// drive the next response (or a read queued behind this send).
 fn finish_send(ring: &mut IoUring, w: &mut Worker, idx: usize) {
     let c = conn_mut(w, idx);
+    if c.close_after_send {
+        close_conn_ring(ring, w, idx);
+        return;
+    }
     c.tx.clear();
     c.tx_off = 0;
     if c.tx.capacity() > TX_KEEP {

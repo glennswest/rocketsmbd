@@ -503,6 +503,58 @@ fn negotiate(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &Chai
     negotiate_body(srv, pc, chosen, cipher, start, tx);
 }
 
+/// SMB1 command code of NEGOTIATE (SMB_COM_NEGOTIATE).
+const SMB1_COM_NEGOTIATE: u8 = 0x72;
+
+/// The dialect strings of an SMB1 NEGOTIATE request (`frame` starts at the
+/// 0xFF 'SMB' header): `None` if it isn't one, or is malformed. Each entry is
+/// a 0x02 BufferFormat byte and a NUL-terminated ASCII name.
+pub fn smb1_negotiate_dialects(frame: &[u8]) -> Option<Vec<String>> {
+    if frame.len() < 35 || frame[..4] != [0xFF, b'S', b'M', b'B'] || frame[4] != SMB1_COM_NEGOTIATE {
+        return None;
+    }
+    let wc = frame[32] as usize;
+    let bc_off = 33 + 2 * wc;
+    let bc = u16::from_le_bytes(frame.get(bc_off..bc_off + 2)?.try_into().ok()?) as usize;
+    let mut bytes = frame.get(bc_off + 2..)?;
+    bytes = &bytes[..bc.min(bytes.len())];
+    let mut out = Vec::new();
+    while let Some((&fmt, rest)) = bytes.split_first() {
+        if fmt != 0x02 {
+            return None;
+        }
+        let end = rest.iter().position(|&b| b == 0)?;
+        out.push(String::from_utf8_lossy(&rest[..end]).into_owned());
+        bytes = &rest[end + 1..];
+        if out.len() > 64 {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Whether an SMB1 dialect list offers SMB2 (the multi-protocol upgrade).
+pub fn smb1_offers_smb2(dialects: &[String]) -> bool {
+    dialects.iter().any(|d| d == "SMB 2.002" || d == "SMB 2.???")
+}
+
+/// An SMB1 NEGOTIATE response with DialectIndex 0xFFFF ("no common
+/// dialect", MS-CIFS 2.2.4.52.2), echoing the request's PID/TID/UID/MID, for
+/// a client that offers only SMB1 dialects (#47).
+pub fn smb1_negotiate_refuse(req: &[u8], tx: &mut Vec<u8>) {
+    tx.pbytes(&[0xFF, b'S', b'M', b'B', SMB1_COM_NEGOTIATE]);
+    tx.p32(0); // Status: SUCCESS
+    tx.p8(0x80); // Flags: reply
+    tx.pbytes(&req[10..12]); // Flags2, as the client sent them
+    tx.pbytes(&req[12..14]); // PIDHigh
+    tx.zeros(8); // SecurityFeatures
+    tx.p16(0); // Reserved
+    tx.pbytes(&req[24..32]); // TID, PIDLow, UID, MID
+    tx.p8(1); // WordCount
+    tx.p16(0xFFFF); // DialectIndex: none
+    tx.p16(0); // ByteCount
+}
+
 pub fn negotiate_resp_smb1_wildcard(srv: &Srv, pc: &mut ProtoConn, tx: &mut Vec<u8>) {
     let h = ReqHdr {
         credit_charge: 0,

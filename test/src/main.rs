@@ -67,6 +67,8 @@ fn main() {
         ("sealed-aes128gcm", sealed_aes128gcm),
         ("lease-break-on-write", lease_break_on_write),
         ("healthz", healthz),
+        ("smb1-only-refused", smb1_only_refused),
+        ("smb1-upgrade-to-smb2", smb1_upgrade),
     ];
     if suite != "short" {
         tests.extend([
@@ -392,6 +394,59 @@ fn http_get(addr: &str, path: &str) -> R<(u16, String)> {
     let code = out.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("no HTTP status")?;
     let body = out.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
     Ok((code, body))
+}
+
+/// An SMB1 NEGOTIATE on a raw socket; the reply frame, and whether the
+/// server then closed the connection within 3 s.
+fn smb1_exchange(env: &Env, dialects: &[&str]) -> R<(Vec<u8>, bool)> {
+    let mut m = vec![0xFF, b'S', b'M', b'B', 0x72, 0, 0, 0, 0, 0x18, 0x53, 0xC8];
+    m.extend_from_slice(&[0; 12]);
+    m.extend_from_slice(&[0, 0, 0xFF, 0xFE, 0, 0, 0x34, 0x12, 0]); // TID PID UID MID, WordCount 0
+    let mut b = Vec::new();
+    for d in dialects {
+        b.push(2);
+        b.extend_from_slice(d.as_bytes());
+        b.push(0);
+    }
+    m.extend_from_slice(&(b.len() as u16).to_le_bytes());
+    m.extend_from_slice(&b);
+    let mut s = TcpStream::connect(&env.addr).map_err(|e| e.to_string())?;
+    let n = m.len() as u32;
+    s.write_all(&[0, (n >> 16) as u8, (n >> 8) as u8, n as u8]).map_err(|e| e.to_string())?;
+    s.write_all(&m).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(Duration::from_secs(3))).ok();
+    let mut nbt = [0u8; 4];
+    s.read_exact(&mut nbt).map_err(|e| format!("no reply: {e}"))?;
+    let len = ((nbt[1] as usize) << 16) | ((nbt[2] as usize) << 8) | nbt[3] as usize;
+    let mut frame = vec![0u8; len];
+    s.read_exact(&mut frame).map_err(|e| format!("short reply: {e}"))?;
+    let mut rest = [0u8; 1];
+    let closed = matches!(s.read(&mut rest), Ok(0));
+    Ok((frame, closed))
+}
+
+/// #47: a client offering only SMB1 (a Supermicro X9 BMC sends just
+/// "NT LM 0.12") is refused at once — an SMB1 reply with DialectIndex 0xFFFF,
+/// then the server closes — instead of hanging on an SMB2 reply.
+fn smb1_only_refused(env: &Env) -> R<String> {
+    let t0 = Instant::now();
+    let (r, closed) = smb1_exchange(env, &["NT LM 0.12"])?;
+    check(r.len() >= 37 && r[..5] == [0xFF, b'S', b'M', b'B', 0x72], || format!("not an SMB1 NEGOTIATE reply: {:02x?}", &r[..r.len().min(8)]))?;
+    let idx = u16::from_le_bytes([r[33], r[34]]);
+    check(idx == 0xFFFF, || format!("DialectIndex {idx:#x}, want 0xFFFF"))?;
+    check(closed, || "server kept the connection open".into())?;
+    Ok(format!("DialectIndex 0xFFFF, connection closed, {} ms", t0.elapsed().as_millis()))
+}
+
+/// A client offering SMB2 inside an SMB1 NEGOTIATE still gets the SMB2
+/// wildcard reply (dialect 0x02FF) and the connection stays open.
+fn smb1_upgrade(env: &Env) -> R<String> {
+    let (r, closed) = smb1_exchange(env, &["NT LM 0.12", "SMB 2.002", "SMB 2.???"])?;
+    check(r.len() >= 70 && r[..4] == [0xFE, b'S', b'M', b'B'], || "not an SMB2 reply".into())?;
+    let d = u16::from_le_bytes([r[68], r[69]]);
+    check(d == 0x02FF, || format!("dialect {d:#x}, want the 0x02FF wildcard"))?;
+    check(!closed, || "server closed an SMB2-capable client".into())?;
+    Ok("SMB2 wildcard reply, connection kept".into())
 }
 
 fn healthz(env: &Env) -> R<String> {

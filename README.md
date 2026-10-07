@@ -37,12 +37,14 @@ server's own Unix user, so on-disk permissions don't tell clients apart;
 per-client file identity is
 [#53](https://github.com/glennswest/rocketsmbd/issues/53).
 
-**No SMB1.** Every SMB1 NEGOTIATE gets the SMB2 wildcard (0x02FF) reply, and
-the dialects the client offers are never checked. A client that speaks
-SMB2 upgrades normally. An SMB1-only client (e.g. one that offers only
-`NT LM 0.12`, such as some BMCs) can't parse the reply and hangs until it times
-out (~20 s), instead of being refused
-([#47](https://github.com/glennswest/rocketsmbd/issues/47)).
+**No SMB1.** A client whose SMB1 NEGOTIATE also offers SMB2 (`SMB 2.002` /
+`SMB 2.???`) gets the SMB2 wildcard (0x02FF) reply and upgrades normally. An
+SMB1-only client (e.g. one that offers only `NT LM 0.12`, such as some BMCs)
+gets an SMB1 "no common dialect" reply (DialectIndex 0xFFFF), and the
+connection closes. The server log names the dialects it offered
+([#47](https://github.com/glennswest/rocketsmbd/issues/47); before, it hung
+until its own ~20 s timeout). For read-only SMB1 serving, such as BMC virtual
+media, see minismbd.
 
 Set `encrypt = true` to require encryption, or just mount with `seal` (Linux)
 / an encrypted share (Windows) — verified against cifs.ko and Windows Server

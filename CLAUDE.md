@@ -204,7 +204,7 @@ Order:
 - #53 P2 per-client file identity (idmap + fsuid / io_uring personalities)
 - #43 — **closed (2026-10-06):** `sc-build deploy/feature-matrix.sh` = clippy + tests for all six feature sets, musl clippy, aarch64 check, fuzz crate (verified 0adc386 on a build VM). #44 — **closed (2026-10-06):** `test/` = `rocketsmbd-test` (short 6, medium 13, long + waves) verified on build VMs; found + fixed the unsigned LOGOFF reply and send_zc ENOMEM drops. First on-node run via `stormcentral test run` = #66 (blade power-off window); writeback stall finding = #67.
 - #46 P1 rocketsmbd as a stormcos service golden for smbop. **rocketsmbd side done (2026-10-06):** opt-in `health_listen` / `GET /healthz` (b09a5f5, docs dbf6d08), unit tests plus a live sc-build run (200 healthy, 503 when a share dir goes, 404/405, bad address fails `--check`). Entry values (port 9104, `/healthz`, placeholder config with `allow_guest = false`) posted on stormcos#149. #46 is queued `--after` stormcos#149. Next step once registered: `stormcentral component build rocketsmbd`, then close #46.
-- #47 P3 SMB1-only clients get the SMB2 wildcard and hang ~20 s instead of a refusal
+- #47 P3 SMB1-only clients — **in progress (2026-10-06):** parse SMB1 dialects; no SMB2 offered → SMB1 DialectIndex 0xFFFF + `FrameAction::RespondClose`; unit test + test-container `smb1-only-refused` / `smb1-upgrade-to-smb2`.
 - #38 — **closed (2026-10-06):** multi-leg Kerberos (`GssAcceptCtx` in `ChannelState.krb_pending`); live-KDC test `deploy/krb5-local-test.sh` (single-leg raw/SPNEGO, DCE multi-leg, bad leg) green in all kerberos builds. `bench/krb5/e2e.sh` (root + lab KDC) not re-run.
 - #45, #27, #22, #23, #19, #14 P3
 

@@ -144,10 +144,13 @@ about NetBIOS framing and the `ZcRead` plan escape hatch.
   `clamp(requested, 1, 512 − outstanding)` (a 512-credit window per
   connection).
 - Dialects 2.0.2, 2.1, 3.0, 3.0.2, 3.1.1 (3.1.1 with SHA-512 preauth integrity
-  and the encryption/signing negotiate contexts). SMB1 negotiate gets the
-  0x02FF wildcard response whatever dialects it offers
-  (`negotiate_resp_smb1_wildcard`). An SMB1-only client can't parse that and
-  times out instead of being refused (#47).
+  and the encryption/signing negotiate contexts). An SMB1 NEGOTIATE
+  that offers SMB2 gets the 0x02FF wildcard response
+  (`negotiate_resp_smb1_wildcard`). One that offers only SMB1 dialects
+  (`smb1_negotiate_dialects`) gets an SMB1 reply with DialectIndex 0xFFFF
+  (`smb1_negotiate_refuse`). `process_frame` returns
+  `FrameAction::RespondClose`, and the reactor sends the reply, reads nothing
+  more, and closes the connection once it has gone out (#47).
 
 ## VFS layer (src/vfs.rs)
 
