@@ -3,6 +3,7 @@
 # Review reviewer (fedora-review) would:
 #   packaging/verify-srpm.sh v1.4.1              # the release's SRPM + tag spec
 #   packaging/verify-srpm.sh v1.4.1 FILE.src.rpm SPEC_URL
+#   packaging/verify-srpm.sh v1.4.1 - SPEC_URL   # newest release SRPM, that spec
 # 1. the spec at SPEC_URL is byte-identical to the spec inside the SRPM;
 # 2. Source0 in the SRPM is byte-identical to the upstream archive the spec's
 #    Source0 URL names (GitHub's tag archive);
@@ -24,7 +25,7 @@ fail=0
 step() { echo "==> $*"; }
 bad() { echo "FAIL: $*"; fail=1; }
 
-if [ -n "${2:-}" ]; then
+if [ -n "${2:-}" ] && [ "$2" != - ]; then
     srpm=$(realpath "$2")
     spec_url=${3:?SPEC_URL is required with an SRPM file}
     step "SRPM $(basename "$srpm")"
@@ -35,7 +36,7 @@ else
     [ -n "$srpm_name" ] || srpm_name="$name-$v-1.fc43.src.rpm"
     srpm=$work/dl/$srpm_name
     curl -fsSL -o "$srpm" "https://github.com/$repo/releases/download/$tag/$srpm_name"
-    spec_url="https://raw.githubusercontent.com/$repo/$tag/packaging/$name.spec"
+    spec_url=${3:-https://raw.githubusercontent.com/$repo/$tag/packaging/$name.spec}
 fi
 echo "    $(basename "$srpm") ($(stat -c %s "$srpm") bytes)"
 # Unpack the whole SRPM (spec, tarballs, rpmlintrc, sysusers) into spec/.
