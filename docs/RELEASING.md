@@ -32,3 +32,13 @@ through the build box with `sc-build`.
 
 crates.io, COPR and Debian uploads need the owner's tokens and are done only
 when the owner asks.
+
+## Fedora review SRPM
+
+The src.rpm above is a COPR input (its Source0 is a tarball of the checkout).
+The SRPM for the Fedora Package Review (RHBZ #2488339, #22) is built separately
+so its Source0 is GitHub's tag archive:
+`sc-build 'packaging/review-srpm.sh vX.Y.Z <spec-commit>'` — it verifies the
+result with `packaging/verify-srpm.sh` and prints it for decoding as above;
+attach it with `gh release upload vX.Y.Z`. docs/fedora-submission.md has the
+URLs and the bug comment.
