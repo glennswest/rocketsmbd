@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **fix(#23):** **`packaging/debian/` builds now.** It had never been built:
+  - `debian/compat` and `debhelper-compat` were both set, which is a hard error;
+  - there was no `source/format`;
+  - `rules` fell back to an online build and ignored test failures (`|| true`);
+  - `rocketsmbd.install` couldn't rename the config;
+  - the changelog had invented history with wrong weekdays;
+  - the description was stale;
+  - the license texts were incomplete;
+  - with debhelper compat 13, `dh_installsysusers` didn't run, so the `.deb` never created the `rocketsmbd` user.
+
+  Now: debhelper compat 14, `3.0 (quilt)` with the vendored crates as an `orig-vendor` component, an offline `--locked` build with the tests gating it, `dh_clean` keeping vendored `Cargo.toml.orig`, a single "Initial release" changelog entry, full BSD-3-Clause/Unicode-3.0 texts, and `debian/upstream/metadata`.
+- **test(#23):** `packaging/debian-build.sh [REF]` builds the source and binary packages in a rootless podman `debian:sid` container through sc-build, runs `lintian --pedantic`, and installs the `.deb`. It checks that the user exists and the shipped config passes `--check`. On `main` 3372ac9: 75 tests pass, 0 lintian errors, installs. docs/UPSTREAM.md lists the remaining warnings and the crate-route decision (sid is mid-RustCrypto transition; `ccm` isn't in Debian).
 - **fix(#22):** The Fedora review pair is now the **`rocketsmbd-1.4.1-2.fc43.src.rpm`** (attached to the v1.4.1 release) plus the spec at the commit it was built from (`release/1.4` fd892d4). The 1.4.1-1 SRPM had two review defects: its Source0 was a tarball of the build checkout, not GitHub's v1.4.1 archive that the spec's Source0 URL names, and its changelog had two wrong weekdays (also fixed in `main`'s spec). New `packaging/review-srpm.sh <tag> <spec-commit>` builds review SRPMs from the tag archive, verifies them and prints them for upload. `packaging/verify-srpm.sh` now also checks Source0 against upstream and builds the way Koji does (no `CARGO_TARGET_DIR`). Verified: all checks pass on the published SRPM, including offline rebuild with `%check` (34 tests) and rpmlint 0 errors / 0 warnings.
 - **docs(#22):** The Fedora review (RHBZ #2488339) is pinned to the **v1.4.1** spec and SRPM. The bug's spec URL pointed at `main`, whose spec no longer matches any SRPM; docs/fedora-submission.md now uses the `v1.4.1` tag spec URL and has the update comment to post on the bug. docs/UPSTREAM.md records the review status and what the 1.5.0 spec needs (the #39 sysusers user, and Provides/License regenerated because `cargo vendor` now also vendors the optional openssl/gssapi-sys trees).
 - **test(#22):** `packaging/verify-srpm.sh vX.Y.Z` checks a release's review pair as a reviewer would: the spec at the tag is identical to the spec in the release's SRPM, the `bundled(crate())` Provides match the vendored crates, `rpmbuild --rebuild` passes offline (with `%check`), and rpmlint is clean with the shipped rpmlintrc.

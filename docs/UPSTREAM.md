@@ -156,13 +156,53 @@ Path:
 3. Build with the `debian/` dir here (`dh $@ --buildsystem cargo`).
 4. Find a **DD/DM sponsor** to review and upload (mentors.debian.net).
 
-`packaging/debian/` here is current (1.4.0-1; control/rules/changelog/copyright/
-install/manpages; Standards-Version 4.7.2; copyright notes the bundled crate
-licenses). `debian/rules` runs `cargo build --release --offline` (falling back to
-an online build), default features only. Crate-dependency resolution is the main
-work. We require `io-uring` **0.7** (`send_zc`, #15), so debcargo (separate
-`librust-*` packages) only works if Debian's `librust-io-uring-dev` is at 0.7.
-If it isn't, vendor the crates, as the Fedora spec does.
+`packaging/debian/` builds and installs in sid (verified 2026-10-07): run
+`sc-build 'packaging/debian-build.sh [REF]'`. In a rootless podman `debian:sid`
+container it builds the source package as Debian would: `orig.tar.gz` from
+`git archive`, crates as a `3.0 (quilt)` component tarball
+(`orig-vendor.tar.xz` → `vendor/`), offline `--locked` build, and the test suite
+gates the build. It then runs lintian (`--pedantic`) and installs the `.deb`.
+Last result on `main` (3372ac9): 75 tests pass; lintian 0 errors; the
+`rocketsmbd` user is created by `systemd-sysusers` (debhelper compat 14 runs
+`dh_installsysusers`); the shipped `/etc/rocketsmbd.toml` passes `--check`.
+Remaining lintian warnings:
+- `initial-upload-closes-no-bugs`: needs the ITP bug number in `debian/changelog`.
+- `source-contains-prebuilt-windows-binary` (`vendor/libloading/tests/*.dll`):
+  `cargo vendor` vendors every crate in `Cargo.lock` (98, including Windows-only
+  crates and the optional openssl/gssapi-sys trees), not just what the default
+  build links.
+
+**Route — owner's decision (#23).** sid has io-uring 0.7.11, but it is in the
+middle of the RustCrypto generation change, so the unbundled dh-cargo route
+doesn't resolve today:
+
+| crate | we use | sid |
+|---|---|---|
+| io-uring | 0.7 | 0.7.11 ✓ |
+| aes / aes-gcm | 0.8 / 0.10 | 0.9 / 0.11 |
+| hmac | 0.12 | 0.13 |
+| sha2 / md-5 | 0.10 | 0.11 |
+| cmac / md4 | 0.7 / 0.10 | 0.7.2 / 0.10.2 (old generation) |
+| ccm | 0.5 | not in Debian |
+| libc, serde, toml | 0.2 / 1 / 1 | ✓ |
+
+1. **Unbundled (dh-cargo, the Rust team's way).** Port rocketsmbd to the new
+   RustCrypto generation (aes 0.9, aes-gcm 0.11, hmac 0.13, sha2/md-5 0.11,
+   plus the matching cmac/md4/ccm releases). Then get `rust-ccm` packaged and
+   `rust-cmac`/`rust-md4` updated through debcargo-conf (Rust team
+   contributions). This is the most work, but it is the route Debian reviewers
+   accept: ftp-masters generally reject embedded copies of crates Debian already
+   ships. The port also keeps Fedora unbundling possible later.
+2. **Vendored (what `debian/` does now).** This is the fastest route. It needs
+   `vendor/` pruned to what the Linux default build links (no DLLs, no
+   Windows/openssl trees), and a per-crate `debian/copyright`. Because almost
+   every crate is already in Debian, expect a sponsor or ftp-master to push back.
+3. **Wait** until sid's RustCrypto transition settles, then take route 1
+   without the cmac/md4 updates.
+
+Also undecided: which upstream version to upload. 1.4.1 is the latest
+release; `debian/` assumes the #39 service user, which is only on `main`
+(1.5.0).
 
 ### ITP bug — ready to file
 
@@ -215,6 +255,7 @@ Until official inclusion, users can install today from:
   (<https://bugzilla.redhat.com/show_bug.cgi?id=2488339>). The package is
   review-clean and passes `fedora-review`; it still needs a Rust SIG sponsor
   (#22, see docs/fedora-submission.md).
-- Debian: `packaging/debian/` current (1.4.0-1); ITP drafted above but **not
-  filed yet**; also needs a DD/DM sponsor (#23).
+- Debian: `packaging/debian/` builds, lints (0 errors) and installs in sid
+  (`packaging/debian-build.sh`); ITP drafted above but **not filed yet**; the
+  crate route and upload version are the owner's call; needs a DD/DM sponsor (#23).
 - 1.0 ✅, fuzzing in CI ✅ — no longer blocking.
