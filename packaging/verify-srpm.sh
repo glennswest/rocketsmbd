@@ -52,7 +52,7 @@ else
 fi
 
 step "Source0 == upstream archive"
-src0_url=$(rpmspec -P "$work/spec/$name.spec" 2>/dev/null | awk '/^Source0:/{print $2; exit}')
+src0_url=$(rpmspec -P "$work/spec/$name.spec" 2>/dev/null | awk '/^Source0:/ && !n++{print $2}')
 src0=$work/spec/$(basename "$src0_url")
 curl -fsSL -o "$work/dl/upstream.tar.gz" "$src0_url"
 if cmp -s "$work/dl/upstream.tar.gz" "$src0"; then
@@ -66,7 +66,7 @@ vendor=$work/spec/$name-$v-vendor.tar.xz
 tar -tJf "$vendor" | awk -F/ 'NF>2 && $3=="Cargo.toml"{print $2}' \
     | while read -r d; do
         tar -xJOf "$vendor" "vendor/$d/Cargo.toml" \
-            | awk -F'"' '/^\[package\]/{p=1} p&&/^name *=/{n=$2} p&&/^version *=/{sub(/\+.*/,"",$2); print n" = "$2; exit}'
+            | awk -F'"' '/^\[package\]/{p=1} p&&/^name *=/{n=$2} p&&!done&&/^version *=/{sub(/\+.*/,"",$2); print n" = "$2; done=1}'
     done | sort > "$work/vendored.txt"
 sed -n 's/^Provides: *bundled(crate(\(.*\))) = \(.*\)$/\1 = \2/p' "$work/spec/$name.spec" \
     | sort > "$work/provides.txt"
