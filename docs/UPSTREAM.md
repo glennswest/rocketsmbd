@@ -91,10 +91,14 @@ The bundled spec is **review-clean** (validated on Fedora 43):
 **Review status (2026-10-07):** Package Review bug filed,
 [RHBZ #2488339](https://bugzilla.redhat.com/show_bug.cgi?id=2488339); waiting on
 a reviewer + sponsor (the owner's FAS identity; texts in
-`docs/fedora-submission.md`). The review is pinned to the **v1.4.1** spec and
-SRPM: the spec URL must name a release tag, because `main`'s spec runs ahead
-of the last SRPM. Check a pair before posting it with
-`sc-build 'packaging/verify-srpm.sh vX.Y.Z'`.
+`docs/fedora-submission.md`). The review pair is the **1.4.1-2** SRPM on the
+v1.4.1 release and the spec at the commit it was built from (`release/1.4`,
+fd892d4). Verified with `packaging/verify-srpm.sh` on a fresh Fedora 43 VM:
+spec URL == SRPM spec, Source0 == GitHub's tag archive, Provides == vendored
+crates, offline `rpmbuild --rebuild` + `%check`, rpmlint 0/0 over all four
+packages. Build new review SRPMs with `packaging/review-srpm.sh`, never with
+`build-srpm.sh`: that one tars the checkout, which can't match the Source0 URL
+(the 1.4.1-1 SRPM had that defect, plus two wrong changelog weekdays).
 
 **Next spec update (1.5.0):** `main` adds the systemd sysusers user (#39) and
 optional dependencies (`openssl`, `gssapi-sys` and their build trees, e.g.

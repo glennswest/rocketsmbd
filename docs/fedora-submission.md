@@ -5,18 +5,27 @@ Everything below is drafted for you to paste/run. The package is review-clean
 
 **Review bug: https://bugzilla.redhat.com/show_bug.cgi?id=2488339** (filed).
 
-URLs the review uses — **pinned to a release tag**, never `main`. `main`'s
-spec moves ahead of the last SRPM (it already carries the #39 sysusers user and
-unreleased dependencies), and fedora-review fails a review whose spec URL
-doesn't match the spec inside the SRPM:
-- **Spec:** <https://raw.githubusercontent.com/glennswest/rocketsmbd/v1.4.1/packaging/rocketsmbd.spec>
-- **SRPM:** <https://github.com/glennswest/rocketsmbd/releases/download/v1.4.1/rocketsmbd-1.4.1-1.fc43.src.rpm>
+URLs the review uses — **pinned to the commit whose spec is inside the SRPM**,
+never `main` (its spec runs ahead of the last SRPM; fedora-review fails when the
+spec URL and the SRPM's spec differ):
+- **Spec:** <https://raw.githubusercontent.com/glennswest/rocketsmbd/fd892d4531108ef7b3fe8333ceb8f73d326e2e40/packaging/rocketsmbd.spec>
+  (`release/1.4` at fd892d4: spec `1.4.1-2`)
+- **SRPM:** <https://github.com/glennswest/rocketsmbd/releases/download/v1.4.1/rocketsmbd-1.4.1-2.fc43.src.rpm>
 - **COPR (already live):** <https://copr.fedorainfracloud.org/coprs/glennswest/rocketsmbd/>
 
-Before posting a new pair, check it as a reviewer would:
-`sc-build 'packaging/verify-srpm.sh vX.Y.Z'` (spec at the tag == spec in the
-SRPM, bundled Provides == vendored crates, offline `rpmbuild --rebuild` with
-`%check`, rpmlint with the shipped rpmlintrc).
+Verified 2026-10-07 on a fresh Fedora 43 build VM with
+`sc-build 'packaging/verify-srpm.sh v1.4.1 - <spec URL>'`: the spec URL is
+identical to the SRPM's spec; Source0 is byte-identical to GitHub's v1.4.1
+archive (the spec's Source0 URL); the 48 `bundled(crate())` Provides match the
+vendored crates; `rpmbuild --rebuild` passes offline with `%check` (34 tests);
+rpmlint over SRPM + RPM + debuginfo + debugsource: 0 errors, 0 warnings.
+
+How a review SRPM is made: `sc-build 'packaging/review-srpm.sh vX.Y.Z
+<spec-commit>'` builds it from GitHub's tag archive (not a tarball of the
+checkout, which never matches the Source0 URL), verifies it, and prints it
+base64-encoded; decode it as in docs/RELEASING.md and attach it to the tag's
+release (`gh release upload`). A packaging-only fix bumps `Release:` on the
+release branch and needs no new upstream tag.
 
 ## 0. Update comment for RHBZ #2488339 (post now)
 
@@ -25,20 +34,24 @@ comment on <https://bugzilla.redhat.com/show_bug.cgi?id=2488339> (logged in as
 glennswest) so the reviewer gets a matching, current pair:
 
 ```
-Updated to 1.4.1 (current stable release). Spec and SRPM now come from the same
-release tag, so they match:
+Updated to 1.4.1 (current stable release):
 
-Spec URL: https://raw.githubusercontent.com/glennswest/rocketsmbd/v1.4.1/packaging/rocketsmbd.spec
-SRPM URL: https://github.com/glennswest/rocketsmbd/releases/download/v1.4.1/rocketsmbd-1.4.1-1.fc43.src.rpm
+Spec URL: https://raw.githubusercontent.com/glennswest/rocketsmbd/fd892d4531108ef7b3fe8333ceb8f73d326e2e40/packaging/rocketsmbd.spec
+SRPM URL: https://github.com/glennswest/rocketsmbd/releases/download/v1.4.1/rocketsmbd-1.4.1-2.fc43.src.rpm
+
+The spec URL is pinned to the commit the SRPM was built from, so the two match;
+Source0 in the SRPM is GitHub's v1.4.1 archive, byte for byte.
 
 Changes since 1.1.0: AES-256-GCM and AES-CCM ciphers, read/handle-caching
 leases, send_zc, worker core pinning; 1.4.1 fixes the shipped
-/etc/rocketsmbd.toml, which failed to load in 1.4.0.
-Still bundled for the io-uring 0.7 reason given above; 48 bundled(crate())
-Provides, License: MIT AND BSD-3-Clause AND Unicode-3.0.
-```
+/etc/rocketsmbd.toml, which failed to load in 1.4.0. 1.4.1-2 corrects two
+changelog weekdays.
 
----
+Still bundled for the io-uring 0.7 reason given above; 48 bundled(crate())
+Provides, License: MIT AND BSD-3-Clause AND Unicode-3.0. rpmbuild --rebuild
+(with %check) passes offline on Fedora 43, and rpmlint over the SRPM and all
+built RPMs reports 0 errors, 0 warnings.
+```
 
 ## 1. Package Review bug (filed as #2488339 — kept for reference)
 
@@ -46,7 +59,7 @@ Provides, License: MIT AND BSD-3-Clause AND Unicode-3.0.
 bugzilla.redhat.com as glennswest — the reporter becomes the package
 maintainer). Open it, review, and click *Submit Bug*:
 
-<https://bugzilla.redhat.com/enter_bug.cgi?product=Fedora&component=Package%20Review&version=rawhide&bug_severity=medium&short_desc=Review%20Request%3A%20rocketsmbd%20-%20SMB2%2FSMB3%20file%20server%20built%20on%20Linux%20io_uring&comment=Spec%20URL%3A%20https%3A%2F%2Fraw.githubusercontent.com%2Fglennswest%2Frocketsmbd%2Fv1.4.1%2Fpackaging%2Frocketsmbd.spec%0ASRPM%20URL%3A%20https%3A%2F%2Fgithub.com%2Fglennswest%2Frocketsmbd%2Freleases%2Fdownload%2Fv1.4.1%2Frocketsmbd-1.4.1-1.fc43.src.rpm%0A%0ADescription%3A%0Arocketsmbd%20is%20a%20from-scratch%20SMB2%2FSMB3%20file%20server%20built%20on%20Linux%20io_uring%3A%20accept%2C%20receive%2C%20send%2C%20and%20file%20I%2FO%20flow%20through%20one%20ring%20per%20worker%2C%20reads%20zero-copy%20via%20splice.%20SMB%202.0.2-3.1.1%2C%20NTLMv2%2C%20SMB2%2F3%20signing%2C%203.1.1%20preauth%2C%20multichannel%2C%20AES-128%2F256-GCM%20and%20AES-CCM%20encryption%2C%20read%2Fhandle-caching%20leases.%20Rust%3B%20parsers%20fuzzed%20in%20CI.%0A%0AFAS%3A%20glennswest%0ACOPR%3A%20https%3A%2F%2Fcopr.fedorainfracloud.org%2Fcoprs%2Fglennswest%2Frocketsmbd%2F%0Acrates.io%3A%20https%3A%2F%2Fcrates.io%2Fcrates%2Frocketsmbd%0A%0ABUNDLING%3A%20vendored%20because%20it%20needs%20io-uring%200.7%20%28IORING_OP_SEND_ZC%29%20and%20Fedora%20ships%200.6.4%20in%20stable%2Brawhide%3B%20every%20other%20dep%20resolves%20unbundled.%2048%20bundled%28crate%28%29%29%20Provides%20listed.%20License%3A%20MIT%20AND%20BSD-3-Clause%20AND%20Unicode-3.0%20%28all%20Fedora-allowed%29.%20fedora-review%20%28rawhide%20mock%29%20passes%3B%20rpmlint%20clean%20with%20shipped%20rpmlintrc.%20First%20package%2C%20seeking%20a%20sponsor.&status_whiteboard=needs-sponsor>
+<https://bugzilla.redhat.com/enter_bug.cgi?product=Fedora&component=Package%20Review&version=rawhide&bug_severity=medium&short_desc=Review%20Request%3A%20rocketsmbd%20-%20SMB2%2FSMB3%20file%20server%20built%20on%20Linux%20io_uring&comment=Spec%20URL%3A%20https%3A%2F%2Fraw.githubusercontent.com%2Fglennswest%2Frocketsmbd%2Ffd892d4531108ef7b3fe8333ceb8f73d326e2e40%2Fpackaging%2Frocketsmbd.spec%0ASRPM%20URL%3A%20https%3A%2F%2Fgithub.com%2Fglennswest%2Frocketsmbd%2Freleases%2Fdownload%2Fv1.4.1%2Frocketsmbd-1.4.1-2.fc43.src.rpm%0A%0ADescription%3A%0Arocketsmbd%20is%20a%20from-scratch%20SMB2%2FSMB3%20file%20server%20built%20on%20Linux%20io_uring%3A%20accept%2C%20receive%2C%20send%2C%20and%20file%20I%2FO%20flow%20through%20one%20ring%20per%20worker%2C%20reads%20zero-copy%20via%20splice.%20SMB%202.0.2-3.1.1%2C%20NTLMv2%2C%20SMB2%2F3%20signing%2C%203.1.1%20preauth%2C%20multichannel%2C%20AES-128%2F256-GCM%20and%20AES-CCM%20encryption%2C%20read%2Fhandle-caching%20leases.%20Rust%3B%20parsers%20fuzzed%20in%20CI.%0A%0AFAS%3A%20glennswest%0ACOPR%3A%20https%3A%2F%2Fcopr.fedorainfracloud.org%2Fcoprs%2Fglennswest%2Frocketsmbd%2F%0Acrates.io%3A%20https%3A%2F%2Fcrates.io%2Fcrates%2Frocketsmbd%0A%0ABUNDLING%3A%20vendored%20because%20it%20needs%20io-uring%200.7%20%28IORING_OP_SEND_ZC%29%20and%20Fedora%20ships%200.6.4%20in%20stable%2Brawhide%3B%20every%20other%20dep%20resolves%20unbundled.%2048%20bundled%28crate%28%29%29%20Provides%20listed.%20License%3A%20MIT%20AND%20BSD-3-Clause%20AND%20Unicode-3.0%20%28all%20Fedora-allowed%29.%20fedora-review%20%28rawhide%20mock%29%20passes%3B%20rpmlint%20clean%20with%20shipped%20rpmlintrc.%20First%20package%2C%20seeking%20a%20sponsor.&status_whiteboard=needs-sponsor>
 
 (Full untruncated text below if you prefer to paste manually.) File at product
 **Fedora**, component **Package Review**.
@@ -60,8 +73,8 @@ Review Request: rocketsmbd - SMB2/SMB3 file server built on Linux io_uring
 **Description:**
 
 ```
-Spec URL: https://raw.githubusercontent.com/glennswest/rocketsmbd/v1.4.1/packaging/rocketsmbd.spec
-SRPM URL: https://github.com/glennswest/rocketsmbd/releases/download/v1.4.1/rocketsmbd-1.4.1-1.fc43.src.rpm
+Spec URL: https://raw.githubusercontent.com/glennswest/rocketsmbd/fd892d4531108ef7b3fe8333ceb8f73d326e2e40/packaging/rocketsmbd.spec
+SRPM URL: https://github.com/glennswest/rocketsmbd/releases/download/v1.4.1/rocketsmbd-1.4.1-2.fc43.src.rpm
 
 Description:
 rocketsmbd is a from-scratch SMB2/SMB3 file server built on Linux io_uring:
@@ -169,12 +182,12 @@ fedpkg request-repo rocketsmbd <REVIEW_BUG_ID>     # creates dist-git
 # (a releng admin approves; then:)
 fedpkg clone rocketsmbd && cd rocketsmbd
 # import the approved SRPM, commit, and build per branch:
-fedpkg import ~/rpmbuild/SRPMS/rocketsmbd-1.4.1-1.fc*.src.rpm
+fedpkg import ~/rpmbuild/SRPMS/rocketsmbd-1.4.1-2.fc*.src.rpm
 fedpkg commit -m "Initial import (#<REVIEW_BUG_ID>)" && fedpkg push
 fedpkg build                                       # rawhide (Koji)
 # stable branches:
 fedpkg switch-branch f41 && git merge rawhide && fedpkg push && fedpkg build
-bodhi updates new --type newpackage --notes "Initial Fedora import" rocketsmbd-1.4.1-1.fc41
+bodhi updates new --type newpackage --notes "Initial Fedora import" rocketsmbd-1.4.1-2.fc41
 # optional EPEL:
 fedpkg switch-branch epel9 && ... && fedpkg build && bodhi updates new ...
 ```
