@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-07
+- **docs(#19):** docs/SMBDIRECT.md "Developing without RDMA hardware". Soft-RoCE (`rdma_rxe`) or soft-iWARP (`siw`) plus the cifs `rdma` mount can validate SMB Direct phases 2–5 in VMs. The build VMs' kernel has both as modules and has libibverbs/librdmacm, but the modules package isn't installed and loading them needs root, so a test bed needs a template change.
 - **docs(#14):** Registered files assessed and not planned: every fd is also used by plain syscalls, so registering it only saves the per-SQE `fdget`/`fdput`, which is noise at this server's SQE rate. Registered buffers stay deferred as a prerequisite of SMB Direct (#19), and #14 is queued after it. docs/TUNING.md and docs/ARCHITECTURE.md updated.
 - **fix(#23):** **`packaging/debian/` builds now.** It had never been built:
   - `debian/compat` and `debhelper-compat` were both set, which is a hard error;

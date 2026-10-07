@@ -143,6 +143,30 @@ static-musl `scratch`/no-deps binary. Plan:
 7. Encryption: validate with MACsec/IPsec-over-RoCE offload; document the
    host-GCM-forces-buffered trade.
 
+## Developing without RDMA hardware (assessed 2026-10-07)
+
+Phases 2–5 don't need a ConnectX NIC. **Soft-RoCE** (`rdma_rxe`, RoCEv2 over
+any Ethernet netdev) and **soft-iWARP** (`siw`) present a normal verbs device
+to libibverbs and rdma-cm. The Linux cifs client mounts SMB Direct over them
+(`mount -t cifs -o rdma,...`, `CONFIG_CIFS_SMB_DIRECT`). So the transport,
+SMBD framing and credits, RDMA Read/Write and the `RDMA_CAPABLE`
+advertisement can all be developed and tested end to end in VMs. Soft-RoCE
+says nothing about performance; phase 6 still needs a real fabric.
+
+What the build VMs have today (Fedora 43, kernel 7.2.8):
+- `CONFIG_RDMA_RXE=m` and `CONFIG_RDMA_SIW=m` are set;
+- `libibverbs` and `librdmacm` 58 are installed (the `rdma` tool too);
+- the modules are **not** installed (`kernel-modules-extra` is missing from
+  the image);
+- the build user has no root, and `modprobe rdma_rxe` and
+  `rdma link add rxe0 type rxe netdev <if>` need it. So does the cifs `rdma`
+  mount used for end-to-end tests.
+
+A Soft-RoCE test bed therefore needs a change to the build-VM template (or a
+dedicated test VM): `kernel-modules-extra`, plus an rxe link created at boot,
+plus a root-run e2e test. That is a host change for the owner/stormcentral,
+not something done from a build job.
+
 ## Honest assessment
 
 This is the single largest item on the roadmap: a second transport stack
