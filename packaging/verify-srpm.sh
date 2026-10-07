@@ -31,17 +31,18 @@ echo "    $srpm_name ($(stat -c %s "$srpm") bytes)"
 
 step "spec at $tag == spec in the SRPM"
 spec_url="https://raw.githubusercontent.com/glennswest/$name/$tag/packaging/$name.spec"
-curl -fsSL -o "$work/spec/url.spec" "$spec_url"
-(cd "$work/spec" && rpm2cpio "$srpm" | cpio -id --quiet "$name.spec")
-if cmp -s "$work/spec/url.spec" "$work/spec/$name.spec"; then
+curl -fsSL -o "$work/url.spec" "$spec_url"
+# Unpack the whole SRPM (spec, tarballs, rpmlintrc) into spec/.
+(cd "$work/spec" && rpm2cpio "$srpm" | cpio -idm --quiet)
+ls "$work/spec" | sed 's/^/    srpm: /'
+if cmp -s "$work/url.spec" "$work/spec/$name.spec"; then
     echo "    identical ($spec_url)"
 else
     bad "spec at $spec_url differs from the SRPM's"
-    diff -u "$work/spec/url.spec" "$work/spec/$name.spec" | head -40 || true
+    diff -u "$work/url.spec" "$work/spec/$name.spec" | head -40 || true
 fi
 
 step "bundled(crate()) Provides == vendored crates"
-(cd "$work/spec" && rpm2cpio "$srpm" | cpio -id --quiet "$name-$v-vendor.tar.xz")
 tar -tJf "$work/spec/$name-$v-vendor.tar.xz" | awk -F/ 'NF>2 && $3=="Cargo.toml"{print $2}' \
     | while read -r d; do
         toml="$d/Cargo.toml"
@@ -68,7 +69,6 @@ fi
 
 step "rpmlint (SRPM + RPMs, shipped rpmlintrc)"
 if command -v rpmlint >/dev/null; then
-    (cd "$work/spec" && rpm2cpio "$srpm" | cpio -id --quiet "$name.rpmlintrc")
     rpms=$(find "$work/top/RPMS" -name '*.rpm' 2>/dev/null)
     # shellcheck disable=SC2086
     out=$(rpmlint -r "$work/spec/$name.rpmlintrc" "$srpm" $rpms 2>&1 || true)
