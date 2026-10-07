@@ -504,8 +504,8 @@ fn healthz_503(env: &Env) -> R<String> {
 fn waves(env: &Env, deadline: Instant) -> R<String> {
     let (fd0, rss0) = env.usage();
     let mut wave = 0u64;
-    let mut first_ms = 0u128;
-    let mut worst = (0usize, 0u64, 0u128);
+    let mut times: Vec<u128> = Vec::new();
+    let mut worst = (0usize, 0u64, 0u128, String::new());
     while Instant::now() < deadline {
         wave += 1;
         let n = 8 + (wave % 4) * 8;
@@ -545,28 +545,37 @@ fn waves(env: &Env, deadline: Instant) -> R<String> {
             }
         }
         let ms = t0.elapsed().as_millis();
-        if wave == 1 {
-            first_ms = ms.max(1);
-        }
+        times.push(ms);
         std::thread::sleep(Duration::from_millis(200)); // let teardown finish
         let (fd, rss) = env.usage();
-        worst = (worst.0.max(fd), worst.1.max(rss), worst.2.max(ms));
+        worst = (worst.0.max(fd), worst.1.max(rss), worst.2, worst.3);
+        if ms > worst.2 {
+            worst.2 = ms;
+            worst.3 = format!("wave {wave}, {n} clients; slowest client (ms): {}", slowest.1);
+        }
         if fd > fd0 + 16 {
             return Err(format!("wave {wave}: server fds {fd0} -> {fd} (leak)"));
-        }
-        if wave > 3 && ms > first_ms * 5 + 2000 {
-            return Err(format!(
-                "wave {wave} ({n} clients) took {ms} ms, first took {first_ms} ms; slowest client (ms): {}",
-                slowest.1
-            ));
         }
     }
     let (fd, rss) = env.usage();
     if rss0 > 0 && rss > rss0 * 3 + 64 * 1024 {
         return Err(format!("server RSS {rss0} KiB -> {rss} KiB over {wave} waves"));
     }
+    // The trend, not one wave: a single slow wave is usually the disk
+    // (writeback throttling stalls a worker's synchronous file writes); a
+    // slowdown that grows shows as the late waves' median rising.
+    let median = |v: &[u128]| {
+        let mut v = v.to_vec();
+        v.sort_unstable();
+        v[v.len() / 2]
+    };
+    let k = (times.len() / 3).clamp(1, 10);
+    let (early, late) = (median(&times[..k]), median(&times[times.len() - k..]));
+    if times.len() >= 6 && late > early * 3 + 500 {
+        return Err(format!("waves slowed down: median of the first {k} {early} ms, of the last {k} {late} ms"));
+    }
     Ok(format!(
-        "{wave} waves; fds {fd0} -> {fd} (max {}), RSS {rss0} -> {rss} KiB (max {}), slowest wave {} ms (first {first_ms})",
-        worst.0, worst.1, worst.2
+        "{wave} waves; fds {fd0} -> {fd} (max {}), RSS {rss0} -> {rss} KiB (max {}); wave median first {k} {early} ms, last {k} {late} ms; slowest {} ms ({})",
+        worst.0, worst.1, worst.2, worst.3
     ))
 }
