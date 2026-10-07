@@ -792,6 +792,9 @@ fn process_plain(
         req_off: usize,
         req_end: usize,
         sess_id: u64,
+        /// LOGOFF only: the session's signing key, taken before the handler
+        /// drops the channel, so the LOGOFF reply is still signed.
+        sign: Option<SignCtx>,
     }
     let mut recs: Vec<RespRec> = Vec::new();
     let mut members = 0usize;
@@ -825,6 +828,12 @@ fn process_plain(
             tx.patch32(p + 20, (here - p) as u32);
         }
         let resp_start = tx.len();
+        let logoff_sign = if h.command == CMD_LOGOFF {
+            let sid = if h.session_id != 0 && h.session_id != u64::MAX { h.session_id } else { chain.session_id };
+            pc.channels.get(&sid).and_then(|c| c.sign.clone())
+        } else {
+            None
+        };
         if let Some(z) = handlers::dispatch(srv, pc, &h, msg, &mut chain, tx) {
             plan = Some(z);
         }
@@ -836,6 +845,7 @@ fn process_plain(
                 req_off: off,
                 req_end: msg_end,
                 sess_id: chain.session_id,
+                sign: logoff_sign,
             });
         }
 
@@ -874,16 +884,16 @@ fn process_plain(
     for i in 0..recs.len() {
         let end = recs.get(i + 1).map(|r| r.start).unwrap_or(tx.len());
         let rec = &recs[i];
-        let Some(ch) = pc.channels.get(&rec.sess_id) else {
-            continue;
-        };
         // Responses to encrypted requests are wrapped (AEAD tag = integrity),
         // so they're not separately signed. Plaintext-path responses — incl.
         // the session-setup response that *enables* encryption — are signed.
         if encrypted {
             continue;
         }
-        if let Some(sc) = ch.sign.clone() {
+        // A LOGOFF has removed its channel by now: use the key taken before
+        // (#44: the reply went out unsigned on a signed session).
+        let sc = pc.channels.get(&rec.sess_id).and_then(|c| c.sign.clone()).or_else(|| rec.sign.clone());
+        if let Some(sc) = sc {
             sign_in_place(tx, rec.start, end, &sc);
         }
     }
@@ -1846,6 +1856,17 @@ mod tests {
             verify_signature(&tx[4..], &expect_sc),
             "final SS response signature must verify under spec-derived key"
         );
+
+        // LOGOFF's reply is signed too, though LOGOFF drops the channel (#44).
+        let mut lo = req_hdr(CMD_LOGOFF, 3, 0, sess);
+        lo.p16(4);
+        lo.p16(0);
+        let mut tx = Vec::new();
+        process_frame(&srv, &mut pc, &lo, &mut tx);
+        assert_eq!(u32::from_le_bytes(tx[12..16].try_into().unwrap()), status::SUCCESS);
+        let rflags = u32::from_le_bytes(tx[20..24].try_into().unwrap());
+        assert_ne!(rflags & FLAG_SIGNED, 0, "LOGOFF reply must be signed");
+        assert!(verify_signature(&tx[4..], &expect_sc), "LOGOFF reply signature must verify");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
