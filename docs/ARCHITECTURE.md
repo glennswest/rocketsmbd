@@ -170,6 +170,8 @@ about NetBIOS framing and the `ZcRead` plan escape hatch.
   the bottleneck (#12, docs/CONCURRENCY.md); multichannel is the scaling path.
 - IPC$ tree connects get a stub tree (no pipes/RPC); DFS referrals are
   unsupported.
-- No registered buffers/files (#14) and no SMB Direct (#19).
+- No registered buffers (#14, waits for SMB Direct #19) and no registered
+  files (not worth it: the fds are also used by plain syscalls; docs/TUNING.md).
+  No SMB Direct (#19).
 - No external security review yet (#39); see SECURITY.md for the deployment
   posture.

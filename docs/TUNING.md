@@ -135,8 +135,20 @@ Implemented (more):
   kernel thread per worker), hence off by default.
 
 Not implemented:
-- **Registered files + registered buffers** (`IORING_REGISTER_*`) — deferred
-  until SMB Direct needs them (#14).
+- **Registered buffers** (`IORING_REGISTER_BUFFERS`) are deferred until SMB
+  Direct needs them (#14, queued after #19). rx/tx are per-connection growable
+  buffers, and the fast read path is splice, which doesn't use them, so they
+  would mostly save page pinning on buffers that are already long-lived.
+  RDMA requires registered memory regions, so the pool will be designed for
+  that.
+- **Registered files** (`IORING_REGISTER_FILES`) aren't planned (assessed
+  2026-10-07, #14). Every socket and file fd is also used by plain syscalls:
+  `setsockopt`; `fstat`, `pread`/`pwrite`, `ftruncate`, OFD-lock `fcntl`,
+  `fsync`, `futimens` and `fstatvfs` in vfs.rs. So the fds must stay in the
+  process fd table anyway, and registering them only saves the per-SQE
+  `fdget`/`fdput`. The server issues few SQEs per byte (one recv per batch of
+  frames, splice reads of up to 1 MiB), so that saving is too small to
+  measure.
 - **SMB Direct (RDMA)** — the endgame for 100GbE+; designed
   (docs/SMBDIRECT.md) but blocked on RDMA hardware (#19).
 - **Worker pinning aligned to NIC RSS queues** — not built (see above).
