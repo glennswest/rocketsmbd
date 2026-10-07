@@ -173,8 +173,8 @@ struct Conn {
     notif_pending: u32,
     /// The send in flight is a send_zc (so ENOBUFS can fall back to a copy).
     send_is_zc: bool,
-    /// send_zc failed with ENOBUFS on this connection: copy from now on.
-    zc_send_off: bool,
+    /// The last send_zc failed for lack of pinnable memory: copy the retry.
+    copy_next: bool,
     /// Set once teardown has begun: stop submitting new ops and drop the
     /// connection when `inflight` drains to zero.
     closing: bool,
@@ -613,7 +613,7 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         inflight: 0,
         notif_pending: 0,
         send_is_zc: false,
-        zc_send_off: false,
+        copy_next: false,
         closing: false,
         inotify_cancelled: false,
     });
@@ -1010,7 +1010,8 @@ fn submit_send(ring: &mut IoUring, w: &mut Worker, idx: usize, msg_flags: i32) {
     let buf = &c.tx[c.tx_off..];
     // Only the plain buffered path (msg_flags == 0) is eligible; the ZcHdr
     // send sets MSG_MORE and must stay a regular Send.
-    c.send_is_zc = send_zc_ok && !c.zc_send_off && msg_flags == 0 && buf.len() >= ZC_SEND_MIN;
+    c.send_is_zc = send_zc_ok && !c.copy_next && msg_flags == 0 && buf.len() >= ZC_SEND_MIN;
+    c.copy_next = false;
     if c.send_is_zc {
         let e = opcode::SendZc::new(types::Fd(c.fd), buf.as_ptr(), buf.len() as u32)
             .build()
@@ -1035,12 +1036,13 @@ fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
         submit_send(ring, w, idx, flags);
         return;
     }
-    if res == -libc::ENOBUFS && conn_mut(w, idx).send_is_zc {
-        // MSG_ZEROCOPY ran out of buffer space (optmem / locked pages) under
-        // load: send this connection's data by copy instead of dropping the
-        // client (#44).
-        logd!("worker {}: send_zc ENOBUFS (slot {idx}): copying sends from now on", w.wid);
-        conn_mut(w, idx).zc_send_off = true;
+    if (res == -libc::ENOMEM || res == -libc::ENOBUFS) && conn_mut(w, idx).send_is_zc {
+        // send_zc pins the buffer's pages against RLIMIT_MEMLOCK (8 MiB by
+        // default for an unprivileged service user) and optmem; under load
+        // that runs out. Send this one by copy instead of dropping the client
+        // (#44: concurrent 1 MiB reads did exactly that).
+        logd!("worker {}: send_zc errno {} (slot {idx}): sending by copy", w.wid, -res);
+        conn_mut(w, idx).copy_next = true;
         submit_send(ring, w, idx, 0);
         return;
     }
