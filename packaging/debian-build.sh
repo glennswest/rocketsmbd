@@ -61,7 +61,7 @@ inst=0
 if getent passwd rocketsmbd >/dev/null; then getent passwd rocketsmbd | sed "s/^/    user: /"
 else echo "    FAIL: no rocketsmbd user after install"; inst=1; fi
 rocketsmbd --version | sed "s/^/    /"
-dpkg -L rocketsmbd | grep -E "^/(usr/bin|etc|usr/lib/systemd|usr/lib/sysusers|usr/share/man)/." | sed "s/^/    /"
+dpkg -L rocketsmbd | grep -E "^/(usr/bin|etc|usr/lib/systemd/system|usr/lib/sysusers.d|usr/share/man/man8)/." | sed "s/^/    /"
 mkdir -p /srv/share
 sed "s#^path = .*#path = \"/srv/share\"#" /etc/rocketsmbd.toml > /tmp/check.toml
 rocketsmbd --config /tmp/check.toml --check | sed "s/^/    /"

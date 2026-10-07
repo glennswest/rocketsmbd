@@ -2,7 +2,7 @@ Source: rocketsmbd
 Section: net
 Maintainer: Glenn West <glennswest@neuralcloudcomputing.com>
 Build-Depends:
- debhelper-compat (= 13),
+ debhelper-compat (= 14),
  cargo,
  rustc
 Standards-Version: 4.7.2

@@ -1,6 +1,6 @@
 rocketsmbd (1.4.0-1) unstable; urgency=medium
 
-  * Initial release. The ITP bug is not filed yet (upstream issue #23); its
-    number goes here as (Closes: #NNNNNN) before upload.
+  * Initial release. The ITP bug is not filed yet (upstream issue 23); a
+    "Closes:" for it goes here before upload.
 
  -- Glenn West <glennswest@neuralcloudcomputing.com>  Wed, 07 Oct 2026 12:00:00 +0000
