@@ -673,7 +673,9 @@ fn frame_total(c: &Conn) -> Result<Option<usize>, ()> {
     }
     let b = &c.rx[c.rx_off..c.rx_len];
     if b[0] != 0 {
-        return Err(()); // only NetBIOS session messages on direct TCP 445
+        // Only NetBIOS session messages on direct TCP 445.
+        logw!("dropping connection: NBT message type {:#x} is not a session message", b[0]);
+        return Err(());
     }
     let flen = ((b[1] as usize) << 16) | ((b[2] as usize) << 8) | b[3] as usize;
     // Until a session is established, frames stay small: otherwise four bytes
@@ -686,6 +688,10 @@ fn frame_total(c: &Conn) -> Result<Option<usize>, ()> {
         PREAUTH_MAX_FRAME
     };
     if flen > cap {
+        logw!(
+            "dropping connection: {flen}-byte frame over the {cap}-byte limit{}",
+            if cap == PREAUTH_MAX_FRAME { " before a session is established" } else { "" }
+        );
         return Err(());
     }
     Ok(Some(4 + flen))
@@ -737,6 +743,9 @@ fn on_recv(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
     if res <= 0 {
         // Peer closed or socket error. If the tx side is mid-stream it will
         // also fail shortly; tearing down now is safe (gen guards CQEs).
+        if res < 0 {
+            logd!("worker {}: recv error {} (slot {idx})", w.wid, -res);
+        }
         close_conn_ring(ring, w, idx);
         return;
     }

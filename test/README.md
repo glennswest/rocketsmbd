@@ -27,6 +27,6 @@ without an image:
 sc-build 'test/build.sh && ROCKETSMBD_BIN=test/out/rocketsmbd test/out/test short'
 ```
 
-`ROCKETSMBD_BIN` points at the server (default `/rocketsmbd`); `TMPDIR`
+`ROCKETSMBD_BIN` points at the server (default `/rocketsmbd`), `ROCKETSMBD_LOG_LEVEL` sets its log level (default 1), `RESULTS_DIR` replaces `/results`; `TMPDIR`
 (default `/tmp`) holds the run's shares and the server log, which is removed
 at the end and copied to `/results/rocketsmbd.log` if `/results` exists.

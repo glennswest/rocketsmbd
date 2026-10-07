@@ -8,6 +8,9 @@
 
 mod client;
 
+/// One test: a detail string on pass, the reason on failure.
+type TestFn = fn(&Env) -> R<String>;
+
 use client::{Client, R};
 use rocketsmbd::crypto;
 use rocketsmbd::status;
@@ -58,7 +61,7 @@ fn main() {
     };
     t.report("server-start", "pass", env.started_ms, &format!("rocketsmbd on {} (pid {})", env.addr, env.child.id()));
 
-    let mut tests: Vec<(&str, fn(&Env) -> R<String>)> = vec![
+    let mut tests: Vec<(&str, TestFn)> = vec![
         ("guest-write-read-dir", guest_write_read_dir),
         ("ntlmv2-signed-311", ntlmv2_signed_311),
         ("sealed-aes128gcm", sealed_aes128gcm),
@@ -67,7 +70,7 @@ fn main() {
     ];
     if suite != "short" {
         tests.extend([
-            ("wrong-password-refused", wrong_password_refused as fn(&Env) -> R<String>),
+            ("wrong-password-refused", wrong_password_refused as TestFn),
             ("read-only-share", read_only_share),
             ("sealed-all-ciphers", sealed_all_ciphers),
             ("large-file-64mib", large_file),
@@ -174,14 +177,15 @@ impl Env {
         let addr = format!("127.0.0.1:{port}");
         let health = format!("127.0.0.1:{hport}");
         let cfg = format!(
-            "listen = \"{addr}\"\nworkers = 2\nserver_name = \"RSMBDTEST\"\nlog_level = 1\n\
+            "listen = \"{addr}\"\nworkers = 2\nserver_name = \"RSMBDTEST\"\nlog_level = {lvl}\n\
              core_pinning = false\nhealth_listen = \"{health}\"\noplocks = true\n\
              allow_guest = true\nrequire_signing = false\nencrypt = false\n\
              [[share]]\nname = \"data\"\npath = \"{d}/data\"\n\
              [[share]]\nname = \"ro\"\npath = \"{d}/ro\"\nread_only = true\n\
              [[share]]\nname = \"extra\"\npath = \"{d}/extra\"\n\
              [[user]]\nname = \"{USER}\"\npassword = \"{password}\"\n",
-            d = dir.display()
+            d = dir.display(),
+            lvl = std::env::var("ROCKETSMBD_LOG_LEVEL").unwrap_or_else(|_| "1".into())
         );
         let cfg_path = dir.join("rocketsmbd.toml");
         std::fs::write(&cfg_path, cfg).map_err(|e| other(e.to_string()))?;
