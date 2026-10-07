@@ -52,7 +52,8 @@ freed when their connection dropped. An external review is still to be done
     Kerberos-only configs. An unknown NTLM user is mapped to guest when guest
     is allowed. `invalid_users` never matches a guest, so
     use `valid_users` to keep guests off a share. No account lockout yet.
-  - Kerberos accepts single-leg AP-REQ exchanges only (#38).
+  - Kerberos accepts single-leg AP-REQ exchanges (cifs.ko, Windows) and
+    multi-leg GSS exchanges such as DCE style (#38).
 - **Authorization is per share** — `valid_users` / `invalid_users` /
   `read_only_users` decide at TREE_CONNECT who may use a share and who gets it
   read-only, by user, Kerberos principal, or AD group SID from the PAC (#40).

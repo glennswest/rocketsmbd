@@ -98,10 +98,17 @@ per SESSION_SETUP:
   on error -> log GSS major/minor, STATUS_LOGON_FAILURE
 ```
 
-- **Implemented:** single-leg only. If `gss_accept_sec_context` returns
-  `CONTINUE_NEEDED`, the handler logs it and fails with `STATUS_LOGON_FAILURE`;
-  the partial context isn't persisted across SESSION_SETUP legs (#38).
-  cifs.ko and Windows send a complete AP-REQ in one leg.
+- **Implemented:** single- and multi-leg (#38). cifs.ko and Windows send a
+  complete AP-REQ in one leg. When `gss_accept_sec_context` returns
+  `CONTINUE_NEEDED` (e.g. a DCE-style exchange: AP-REQ → AP-REP → AP-REP),
+  the partial context (`krb5::GssAcceptCtx`, which holds no borrow of the
+  `Acceptor`) is kept in the channel's `ChannelState.krb_pending` under a new
+  session id. The reply is `MORE_PROCESSING_REQUIRED` with GSS's token,
+  SPNEGO accept-incomplete if the request was SPNEGO. The client's next leg
+  names that session id and continues the context; the 3.1.1 preauth hash
+  chains over every leg. A failed later leg drops the half-made session, and
+  so does the connection closing. Half-open setups count toward the
+  4-per-connection limit.
 - The authenticated client name (`gss_display_name`) becomes the session
   user; share access lists match it (`alice@REALM`, or bare `alice` when
   `[kerberos].realm` is set).
@@ -219,10 +226,7 @@ the binary.
       clock skew mapped to `STATUS_TIME_DIFFERENCE_AT_DC`; GSS major+minor
       decoded with `gss_display_status` so failures read as text in the log
       (validated: a wrong-SPN run logs *"No key table entry found matching
-      cifs/wronghost.g8.lo@"*). Single-leg AP-REQ only (the cifs/Windows norm);
-      a multi-leg GSS exchange is logged + rejected — persisting a partial GSS
-      context across SESSION_SETUP round-trips is a future item, not exercised
-      by real SMB clients.
+      cifs/wronghost.g8.lo@"*). Multi-leg exchanges are supported since #38.
 - [x] #37 live `sec=krb5` interop — **PASSED** against realm `G8.LO` (KDC
       krb5.g8.lo) on dev.g8.lo: cifs.ko `sec=krb5` authenticated `alice@G8.LO`,
       md5-verified read/write; a second run with `require_signing=true` +
@@ -232,10 +236,14 @@ the binary.
 
 Build verified on dev.g8.lo (all four feature combinations clippy-clean):
 `cargo build/test --features kerberos` and `--no-default-features --features
-kerberos`. Single-leg AP-REQ only so far (the common cifs/Windows case); a
-multi-leg GSS exchange is logged + rejected pending per-channel context
-persistence (#38). Those feature builds were verified by hand on dev.g8.lo;
-CI builds only the default features (#43).
+kerberos`. Every feature build is checked by `deploy/feature-matrix.sh`
+(#43). `deploy/krb5-local-test.sh` (#38) runs live Kerberos without root or
+the lab KDC: it creates a private MIT realm in the job's temp dir (KDC on a
+high port, service keytab, a user ticket) and runs `tests/krb5_live.rs`. That
+drives `process_frame` with a real GSS initiator through a single-leg AP-REQ
+(raw and SPNEGO), a DCE-style multi-leg exchange, and a broken second leg.
+The client derives the 3.1.1 signing key itself and checks the server's final
+reply.
 
 ### e2e runbook (run once krb5.g8.lo is up)
 

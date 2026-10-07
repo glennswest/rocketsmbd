@@ -126,7 +126,8 @@ about NetBIOS framing and the `ZcRead` plan escape hatch.
   (`ntlm_session_setup`, `src/ntlm.rs`) verifies NTLMv2 against the `[[user]]`
   database, or accepts guest when allowed. Kerberos (`kerberos_session_setup`,
   `src/krb5.rs`, `kerberos` feature) runs one `gss_accept_sec_context` over
-  the AP-REQ; multi-leg GSS exchanges are rejected (#38). Either way, the
+  the AP-REQ, and keeps a partial GSS context on the channel between legs
+  when GSS asks for more (#38). Either way, the
   session key feeds the SP800-108 KDF for signing and encryption keys.
 - Authorization (`src/authz.rs`) runs at TREE_CONNECT: the share's
   `valid_users` / `invalid_users` / `read_only_users` against the session's
