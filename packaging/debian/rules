@@ -31,3 +31,8 @@ override_dh_auto_install:
 
 override_dh_auto_clean:
 	rm -rf target $(CARGO_HOME)
+
+# dh_clean deletes *.orig, but the vendored crates' Cargo.toml.orig are covered
+# by their .cargo-checksum.json.
+override_dh_clean:
+	dh_clean -XCargo.toml.orig
