@@ -513,18 +513,36 @@ fn waves(env: &Env, deadline: Instant) -> R<String> {
         let handles: Vec<_> = (0..n)
             .map(|i| {
                 let (addr, pw) = (env.addr.clone(), env.password.clone());
-                std::thread::spawn(move || -> R<()> {
+                std::thread::spawn(move || -> R<String> {
+                    // Per-step times, to say where a slow wave spent it.
+                    let mut steps = Vec::new();
+                    let mut t = Instant::now();
+                    let mut lap = |name: &str, t: &mut Instant| {
+                        steps.push(format!("{name} {}", t.elapsed().as_millis()));
+                        *t = Instant::now();
+                    };
                     let mut c = Client::connect(&addr)?;
+                    lap("connect", &mut t);
                     c.negotiate(&[0x0311, 0x0302], None, true)?;
+                    lap("negotiate", &mut t);
                     c.session_setup(Some((USER, &pw)), true)?;
+                    lap("session", &mut t);
                     let (_, tree) = c.tree_connect("data")?;
-                    roundtrip(&mut c, tree, &format!("wave-{i}.bin"), &pattern(1 << 20, wave * 1000 + i))
+                    lap("tree", &mut t);
+                    roundtrip(&mut c, tree, &format!("wave-{i}.bin"), &pattern(1 << 20, wave * 1000 + i))?;
+                    lap("1MiB-roundtrip", &mut t);
                     // dropped without LOGOFF: teardown must free the session
+                    Ok(steps.join(", "))
                 })
             })
             .collect();
+        let mut slowest = (0u128, String::new());
         for h in handles {
-            h.join().map_err(|_| "client thread panicked".to_string())?.map_err(|e| format!("wave {wave}: {e}"))?;
+            let steps = h.join().map_err(|_| "client thread panicked".to_string())?.map_err(|e| format!("wave {wave}: {e}"))?;
+            let total: u128 = steps.split(", ").filter_map(|s| s.rsplit(' ').next()?.parse::<u128>().ok()).sum();
+            if total > slowest.0 {
+                slowest = (total, steps);
+            }
         }
         let ms = t0.elapsed().as_millis();
         if wave == 1 {
@@ -537,7 +555,10 @@ fn waves(env: &Env, deadline: Instant) -> R<String> {
             return Err(format!("wave {wave}: server fds {fd0} -> {fd} (leak)"));
         }
         if wave > 3 && ms > first_ms * 5 + 2000 {
-            return Err(format!("wave {wave} took {ms} ms, first took {first_ms} ms"));
+            return Err(format!(
+                "wave {wave} ({n} clients) took {ms} ms, first took {first_ms} ms; slowest client (ms): {}",
+                slowest.1
+            ));
         }
     }
     let (fd, rss) = env.usage();
