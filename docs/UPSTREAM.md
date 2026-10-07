@@ -88,9 +88,21 @@ The bundled spec is **review-clean** (validated on Fedora 43):
 - **`rpmlint`** over SRPM + RPM + `-debuginfo` together (how `fedora-review`
   runs it): **0 errors, 0 warnings, 0 badness.**
 
-Remaining before filing: run `fedora-review -b <bug>` (full mock build; the
-`rpmbuild --rebuild` offline build + `%check` already pass), then file the
-Package Review bug and ping the Rust SIG for a sponsor.
+**Review status (2026-10-07):** Package Review bug filed,
+[RHBZ #2488339](https://bugzilla.redhat.com/show_bug.cgi?id=2488339); waiting on
+a reviewer + sponsor (the owner's FAS identity; texts in
+`docs/fedora-submission.md`). The review is pinned to the **v1.4.1** spec and
+SRPM: the spec URL must name a release tag, because `main`'s spec runs ahead
+of the last SRPM. Check a pair before posting it with
+`sc-build 'packaging/verify-srpm.sh vX.Y.Z'`.
+
+**Next spec update (1.5.0):** `main` adds the systemd sysusers user (#39) and
+optional dependencies (`openssl`, `gssapi-sys` and their build trees, e.g.
+`bindgen`). `cargo vendor` vendors every crate in `Cargo.lock`, so the
+`bundled(crate())` Provides and the `License:` aggregate must be regenerated
+from the 1.5.0 vendor tarball (or the vendor tarball filtered to what the
+default features build) before the review moves to 1.5.0. verify-srpm.sh fails
+on a Provides/vendor mismatch.
 
 Path:
 1. **COPR first** (no review, instant `dnf copr enable`): build from the spec
