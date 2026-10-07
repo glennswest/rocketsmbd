@@ -206,7 +206,8 @@ Order:
 - #46 P1 rocketsmbd as a stormcos service golden for smbop. **rocketsmbd side done (2026-10-06):** opt-in `health_listen` / `GET /healthz` (b09a5f5, docs dbf6d08), unit tests plus a live sc-build run (200 healthy, 503 when a share dir goes, 404/405, bad address fails `--check`). Entry values (port 9104, `/healthz`, placeholder config with `allow_guest = false`) posted on stormcos#149. #46 is queued `--after` stormcos#149. Next step once registered: `stormcentral component build rocketsmbd`, then close #46.
 - #47 — **closed (2026-10-06):** SMB1-only clients get SMB1 DialectIndex 0xFFFF and the connection closes (`FrameAction::RespondClose`); SMB2-offering SMB1 negotiates still get the wildcard. Not replayed against the real X9 BMC.
 - #38 — **closed (2026-10-06):** multi-leg Kerberos (`GssAcceptCtx` in `ChannelState.krb_pending`); live-KDC test `deploy/krb5-local-test.sh` (single-leg raw/SPNEGO, DCE multi-leg, bad leg) green in all kerberos builds. `bench/krb5/e2e.sh` (root + lab KDC) not re-run.
-- #45, #27, #22, #23, #19, #14 P3
+- #45 P3 — **in progress (2026-10-06):** `[kerberos].realm` now names the acceptor principal (`<spn>@<realm>`, imported as a krb5 principal name; unset = hostbased as before); validation + live-KDC tests in `tests/krb5_live.rs`.
+- #27, #22, #23, #19, #14 P3
 
 ## Testing
 
