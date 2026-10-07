@@ -53,6 +53,7 @@ fn spn_host() -> String {
 }
 
 fn server() -> Srv {
+    rocketsmbd::log::set_level(2);
     let dir = std::env::temp_dir().join(format!("rsmbd-krb5-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     rocketsmbd::fuzzing::srv_from_toml(&format!(
