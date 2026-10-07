@@ -397,7 +397,7 @@ fn http_get(addr: &str, path: &str) -> R<(u16, String)> {
 }
 
 /// An SMB1 NEGOTIATE on a raw socket; the reply frame, and whether the
-/// server then closed the connection within 3 s.
+/// server then closed the connection (checked for 1 s).
 fn smb1_exchange(env: &Env, dialects: &[&str]) -> R<(Vec<u8>, bool)> {
     let mut m = vec![0xFF, b'S', b'M', b'B', 0x72, 0, 0, 0, 0, 0x18, 0x53, 0xC8];
     m.extend_from_slice(&[0; 12]);
@@ -420,6 +420,8 @@ fn smb1_exchange(env: &Env, dialects: &[&str]) -> R<(Vec<u8>, bool)> {
     let len = ((nbt[1] as usize) << 16) | ((nbt[2] as usize) << 8) | nbt[3] as usize;
     let mut frame = vec![0u8; len];
     s.read_exact(&mut frame).map_err(|e| format!("short reply: {e}"))?;
+    // Closed promptly, or still open a second later.
+    s.set_read_timeout(Some(Duration::from_secs(1))).ok();
     let mut rest = [0u8; 1];
     let closed = matches!(s.read(&mut rest), Ok(0));
     Ok((frame, closed))
