@@ -13,7 +13,7 @@ use rocketsmbd::crypto;
 use rocketsmbd::status;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -254,9 +254,11 @@ impl Drop for Env {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // Keep the server log as an artifact when /results exists.
-        if Path::new("/results").is_dir() {
-            let _ = std::fs::copy(self.dir.join("server.log"), "/results/rocketsmbd.log");
+        // Keep the server log as an artifact when the results dir exists
+        // (/results in the Job; RESULTS_DIR overrides it for local runs).
+        let results = std::env::var_os("RESULTS_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/results"));
+        if results.is_dir() {
+            let _ = std::fs::copy(self.dir.join("server.log"), results.join("rocketsmbd.log"));
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
