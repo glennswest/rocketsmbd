@@ -207,7 +207,8 @@ Order:
 - #47 — **closed (2026-10-06):** SMB1-only clients get SMB1 DialectIndex 0xFFFF and the connection closes (`FrameAction::RespondClose`); SMB2-offering SMB1 negotiates still get the wildcard. Not replayed against the real X9 BMC.
 - #38 — **closed (2026-10-06):** multi-leg Kerberos (`GssAcceptCtx` in `ChannelState.krb_pending`); live-KDC test `deploy/krb5-local-test.sh` (single-leg raw/SPNEGO, DCE multi-leg, bad leg) green in all kerberos builds. `bench/krb5/e2e.sh` (root + lab KDC) not re-run.
 - #45 P3 — **in progress (2026-10-06):** `[kerberos].realm` now names the acceptor principal (`<spn>@<realm>`, imported as a krb5 principal name; unset = hostbased as before); validation + live-KDC tests in `tests/krb5_live.rs`. Code + docs pushed (19a1ce1); **not yet verified**: sc-build got no slot on dev (exit 75 twice) and build VMs had no ssh route (2026-10-06/07). Next: `sc-build 'deploy/feature-matrix.sh && deploy/krb5-local-test.sh'`, then close #45.
-- #27, #22, #23, #19, #14 P3
+- #22 P3 Fedora review (RHBZ #2488339) — **in progress (2026-10-07):** the bug's spec URL points at `main`'s spec, which has drifted from every SRPM (sysusers from #39, Version still 1.4.0, Cargo.lock now carries optional openssl/gssapi-sys/bindgen deps that `cargo vendor` would bundle). Plan: pin the review to the v1.4.1 tag spec + v1.4.1 SRPM (docs/fedora-submission.md, new update comment), verify that pair with `packaging/verify-srpm.sh v1.4.1` (spec==SRPM spec, offline `rpmbuild --rebuild` incl. %check, rpmlint), then hand the Bugzilla comment + sponsor ping to the owner (needs their FAS/Bugzilla identity).
+- #27, #23, #19, #14 P3
 
 ## Testing
 
