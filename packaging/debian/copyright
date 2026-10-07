@@ -15,11 +15,11 @@ Comment:
  uses it under MIT. A per-crate copyright listing is still to be generated if
  Debian accepts the vendored route (#23).
 
-Files: vendor/subtle-*
+Files: vendor/subtle/*
 Copyright: 2016-2017 Isis Agora Lovecruft, Henry de Valence
 License: BSD-3-Clause
 
-Files: vendor/unicode-ident-*
+Files: vendor/unicode-ident/*
 Copyright: 2011- David Tolnay
            1991- Unicode, Inc.
 License: (MIT or Apache-2.0) and Unicode-3.0

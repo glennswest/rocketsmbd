@@ -1,6 +1,5 @@
 Source: rocketsmbd
 Section: net
-Priority: optional
 Maintainer: Glenn West <glennswest@neuralcloudcomputing.com>
 Build-Depends:
  debhelper-compat (= 13),
@@ -10,7 +9,6 @@ Standards-Version: 4.7.2
 Homepage: https://github.com/glennswest/rocketsmbd
 Vcs-Git: https://github.com/glennswest/rocketsmbd.git
 Vcs-Browser: https://github.com/glennswest/rocketsmbd
-Rules-Requires-Root: no
 
 Package: rocketsmbd
 Architecture: linux-any

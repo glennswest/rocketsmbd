@@ -55,13 +55,18 @@ errors=$(grep -c "^E: " lintian.txt || true)
 
 echo "==> install test"
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ./${name}_*_$(dpkg --print-architecture).deb >/dev/null
-getent passwd rocketsmbd | sed "s/^/    user: /"
+dpkg-deb -f ${name}_*_$(dpkg --print-architecture).deb Depends | sed "s/^/    Depends: /"
+dpkg-deb -e ${name}_*_$(dpkg --print-architecture).deb ctl && grep -h sysusers ctl/* | sed "s/^/    maintscript: /" || true
+inst=0
+if getent passwd rocketsmbd >/dev/null; then getent passwd rocketsmbd | sed "s/^/    user: /"
+else echo "    FAIL: no rocketsmbd user after install"; inst=1; fi
 rocketsmbd --version | sed "s/^/    /"
 dpkg -L rocketsmbd | grep -E "^/(usr/bin|etc|usr/lib/systemd|usr/lib/sysusers|usr/share/man)/." | sed "s/^/    /"
 mkdir -p /srv/share
 sed "s#^path = .*#path = \"/srv/share\"#" /etc/rocketsmbd.toml > /tmp/check.toml
 rocketsmbd --config /tmp/check.toml --check | sed "s/^/    /"
 
+[ "$inst" = 0 ] || exit 1
 if [ "$errors" != 0 ]; then echo "FAIL: $errors lintian error(s)"; exit 1; fi
 echo "PASS: $name builds, lints without errors, installs"
 '
