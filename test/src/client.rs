@@ -79,6 +79,9 @@ pub struct Client {
     pub unsolicited: Vec<Resp>,
     /// The last request exactly as written to the socket (NBT included).
     pub last_wire: Vec<u8>,
+    /// The server reset the connection (vs. closing it cleanly).
+    reset: bool,
+    last_cmd: u16,
 }
 
 impl Client {
@@ -102,6 +105,8 @@ impl Client {
             cipher: 0,
             unsolicited: Vec::new(),
             last_wire: Vec::new(),
+            reset: false,
+            last_cmd: 0,
         })
     }
 
@@ -110,6 +115,7 @@ impl Client {
     }
 
     fn hdr(&mut self, cmd: u16, tree: u32, charge: u16) -> (Vec<u8>, u64) {
+        self.last_cmd = cmd;
         let id = self.next_id;
         self.next_id += charge.max(1) as u64;
         let mut v = Vec::with_capacity(128);
@@ -162,8 +168,10 @@ impl Client {
         let mut nbt = [0u8; 4];
         match self.s.read_exact(&mut nbt) {
             Ok(()) => {}
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset) => {
-                return Ok(None)
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                self.reset = true;
+                return Ok(None);
             }
             Err(e) => return Err(format!("recv: {e}")),
         }
@@ -199,7 +207,13 @@ impl Client {
 
     fn wait_for(&mut self, id: u64) -> R<Resp> {
         loop {
-            let r = self.recv()?.ok_or("connection closed by server")?;
+            let Some(r) = self.recv()? else {
+                return Err(format!(
+                    "connection {} by server waiting for the reply to command {} (message {id})",
+                    if self.reset { "reset" } else { "closed" },
+                    self.last_cmd
+                ));
+            };
             if r.msg_id == id {
                 if r.status == status::PENDING && r.flags & smb2::FLAG_ASYNC != 0 {
                     continue;
