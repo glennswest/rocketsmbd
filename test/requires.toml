@@ -1,0 +1,9 @@
+# What rocketsmbd-test needs beyond the runner's namespace-only Role
+# (stormcentral docs/test-standard.md): nothing. Every suite runs rocketsmbd
+# inside the pod on loopback (an unprivileged port) and drives it with its own
+# SMB2/3 client: no host network, no privileges, no host paths, no API objects.
+#
+# requires: a kernel with io_uring (>= 5.15) that the pod's seccomp profile
+# doesn't block. Without it the server can't start: the run reports
+# `server-start` skip and exits 2 (could not run), never pass. No hardware,
+# core count or device is assumed.

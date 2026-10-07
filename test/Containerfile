@@ -1,0 +1,5 @@
+# rocketsmbd test image (stormcos test standard): /test <short|medium|long>.
+# Build context: the repo root, after test/build.sh.
+FROM scratch
+COPY test/out/rocketsmbd /rocketsmbd
+COPY test/out/test /test

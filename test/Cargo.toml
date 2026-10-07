@@ -1,0 +1,17 @@
+[package]
+name = "rocketsmbd-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "rocketsmbd's test container: short, medium and long suites per stormcentral docs/test-standard.md (#44)."
+
+# Its own workspace (like fuzz/), built by test/build.sh. The SMB client's
+# crypto, signing and transform code is rocketsmbd's own library.
+[workspace]
+
+[dependencies]
+rocketsmbd = { path = ".." }
+
+[[bin]]
+name = "rocketsmbd-test"
+path = "src/main.rs"
