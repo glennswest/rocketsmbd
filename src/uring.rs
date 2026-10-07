@@ -171,6 +171,10 @@ struct Conn {
     /// for the current `tx`. The tx buffer is still referenced by the kernel
     /// until these arrive, so it must not be reused/cleared while > 0.
     notif_pending: u32,
+    /// The send in flight is a send_zc (so ENOBUFS can fall back to a copy).
+    send_is_zc: bool,
+    /// send_zc failed with ENOBUFS on this connection: copy from now on.
+    zc_send_off: bool,
     /// Set once teardown has begun: stop submitting new ops and drop the
     /// connection when `inflight` drains to zero.
     closing: bool,
@@ -608,6 +612,8 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         deferred: std::collections::VecDeque::new(),
         inflight: 0,
         notif_pending: 0,
+        send_is_zc: false,
+        zc_send_off: false,
         closing: false,
         inotify_cancelled: false,
     });
@@ -1004,7 +1010,8 @@ fn submit_send(ring: &mut IoUring, w: &mut Worker, idx: usize, msg_flags: i32) {
     let buf = &c.tx[c.tx_off..];
     // Only the plain buffered path (msg_flags == 0) is eligible; the ZcHdr
     // send sets MSG_MORE and must stay a regular Send.
-    if send_zc_ok && msg_flags == 0 && buf.len() >= ZC_SEND_MIN {
+    c.send_is_zc = send_zc_ok && !c.zc_send_off && msg_flags == 0 && buf.len() >= ZC_SEND_MIN;
+    if c.send_is_zc {
         let e = opcode::SendZc::new(types::Fd(c.fd), buf.as_ptr(), buf.len() as u32)
             .build()
             .user_data(ud(OP_SEND, idx, c.gen, 0));
@@ -1028,7 +1035,19 @@ fn on_send(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
         submit_send(ring, w, idx, flags);
         return;
     }
+    if res == -libc::ENOBUFS && conn_mut(w, idx).send_is_zc {
+        // MSG_ZEROCOPY ran out of buffer space (optmem / locked pages) under
+        // load: send this connection's data by copy instead of dropping the
+        // client (#44).
+        logd!("worker {}: send_zc ENOBUFS (slot {idx}): copying sends from now on", w.wid);
+        conn_mut(w, idx).zc_send_off = true;
+        submit_send(ring, w, idx, 0);
+        return;
+    }
     if res <= 0 {
+        if res < 0 {
+            logw!("dropping connection: send failed, errno {}", -res);
+        }
         close_conn_ring(ring, w, idx);
         return;
     }
