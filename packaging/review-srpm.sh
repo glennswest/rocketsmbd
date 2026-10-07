@@ -47,7 +47,7 @@ echo "==> Source1: vendored crates"
     && tar caf "$work/top/SOURCES/$name-$v-vendor.tar.xz" vendor)
 
 echo "==> SRPM"
-rpmbuild -q --define "_topdir $work/top" -bs "$work/top/SPECS/$name.spec"
+rpmbuild --define "_topdir $work/top" -bs "$work/top/SPECS/$name.spec" >/dev/null
 srpm=$(ls "$work"/top/SRPMS/$name-$v-*.src.rpm)
 
 echo "==> verify"
