@@ -122,10 +122,52 @@ pub struct KerberosCfg {
     /// Service principal, e.g. `cifs/fileserver.example.com`. Defaults to
     /// `cifs/<server_name>` when unset.
     pub spn: Option<String>,
-    /// Kerberos realm. Qualifies bare names in share user lists (`alice`
-    /// matches `alice@<realm>`, #40). The acceptor itself still takes the
-    /// realm from the system `krb5.conf` (#45).
+    /// Kerberos realm of the server's service principal. When set, the
+    /// acceptor takes exactly `<spn>@<realm>` from the keytab (#45); unset, it
+    /// takes the host-based `cifs@host`, whatever realm the keytab entry has.
+    /// It also qualifies bare names in share user lists (`alice` matches
+    /// `alice@<realm>`, #40).
     pub realm: Option<String>,
+}
+
+/// The name the Kerberos acceptor acquires its credential for (#45).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptorName {
+    /// `service@host` (GSS_C_NT_HOSTBASED_SERVICE): any keytab entry for
+    /// `service/host`, in whatever realm.
+    HostBased(String),
+    /// `service/host@REALM` (GSS_KRB5_NT_PRINCIPAL_NAME): exactly that
+    /// principal.
+    Principal(String),
+}
+
+impl KerberosCfg {
+    fn validate(&self) -> Result<(), String> {
+        if let Some(r) = &self.realm {
+            if r.is_empty() || r.contains(['@', '/']) {
+                return Err(format!("[kerberos] realm {r:?}: must be a bare realm name, e.g. EXAMPLE.COM"));
+            }
+        }
+        if let Some(spn) = &self.spn {
+            let (svc, realm) = match spn.split_once('@') {
+                Some((svc, realm)) => (svc, Some(realm)),
+                None => (spn.as_str(), None),
+            };
+            if !svc.split_once('/').is_some_and(|(s, h)| !s.is_empty() && !h.is_empty())
+                || realm.is_some_and(|r| r.is_empty() || r.contains(['@', '/']))
+            {
+                return Err(format!(
+                    "[kerberos] spn {spn:?}: must be service/host or service/host@REALM, e.g. cifs/fs.example.com"
+                ));
+            }
+            if let (Some(a), Some(b)) = (realm, &self.realm) {
+                if a != b {
+                    return Err(format!("[kerberos] spn {spn:?} names realm {a}, but realm = {b:?}"));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,8 +285,28 @@ impl Config {
                 }
             }
         }
+        if let Some(k) = &self.kerberos {
+            k.validate()?;
+        }
         crate::authz::validate(self)?;
         Ok(())
+    }
+
+    /// The service principal the Kerberos acceptor uses: `[kerberos].spn`
+    /// (default `cifs/<server_name>`), qualified with `[kerberos].realm` when
+    /// that is set. An `spn` that already names a realm is used as given.
+    pub fn krb_acceptor_name(&self) -> AcceptorName {
+        let k = self.kerberos.as_ref();
+        let spn = k
+            .and_then(|k| k.spn.clone())
+            .unwrap_or_else(|| format!("cifs/{}", self.server_name));
+        match (spn.contains('@'), k.and_then(|k| k.realm.as_deref())) {
+            (true, _) => AcceptorName::Principal(spn),
+            (false, Some(realm)) => AcceptorName::Principal(format!("{spn}@{realm}")),
+            // SMB SPNs are `service/host`; the GSS host-based form is
+            // `service@host`.
+            (false, None) => AcceptorName::HostBased(spn.replacen('/', "@", 1)),
+        }
     }
 
     /// Resolved (lowercased-name → NT hash) map. NT hashes only feed the NTLM
@@ -381,6 +443,49 @@ mod tests {
         assert!(parse("[kerberos]\nenabled = false").guest_allowed(), "disabled table");
         assert!(parse("allow_guest = true\n[kerberos]\nkeytab = \"/k\"").guest_allowed());
         assert!(!parse("[[user]]\nname = \"u\"\npassword = \"p\"").guest_allowed());
+    }
+
+    /// `[kerberos].realm` qualifies the acceptor principal (#45); without
+    /// it the acceptor stays host-based.
+    #[test]
+    fn krb_acceptor_name_uses_realm() {
+        use AcceptorName::*;
+        let name = |extra: &str| parse(&format!("server_name = \"fs\"\n{extra}")).krb_acceptor_name();
+        assert_eq!(name(""), HostBased("cifs@fs".into()));
+        assert_eq!(name("[kerberos]\nspn = \"cifs/fs.example.com\""), HostBased("cifs@fs.example.com".into()));
+        assert_eq!(name("[kerberos]\nrealm = \"EXAMPLE.COM\""), Principal("cifs/fs@EXAMPLE.COM".into()));
+        assert_eq!(
+            name("[kerberos]\nspn = \"cifs/fs.example.com\"\nrealm = \"EXAMPLE.COM\""),
+            Principal("cifs/fs.example.com@EXAMPLE.COM".into())
+        );
+        assert_eq!(
+            name("[kerberos]\nspn = \"cifs/fs.example.com@EXAMPLE.COM\""),
+            Principal("cifs/fs.example.com@EXAMPLE.COM".into())
+        );
+    }
+
+    #[test]
+    fn kerberos_spn_realm_validation() {
+        let v = |k: &str| parse(&format!("[kerberos]\n{k}")).validate();
+        for ok in [
+            "",
+            "realm = \"EXAMPLE.COM\"",
+            "spn = \"cifs/fs.example.com\"",
+            "spn = \"cifs/fs.example.com@EXAMPLE.COM\"",
+            "spn = \"cifs/fs.example.com@EXAMPLE.COM\"\nrealm = \"EXAMPLE.COM\"",
+        ] {
+            assert!(v(ok).is_ok(), "{ok:?}: {:?}", v(ok));
+        }
+        for bad in [
+            "realm = \"\"",
+            "realm = \"alice@EXAMPLE.COM\"",
+            "spn = \"cifs\"",
+            "spn = \"/fs\"",
+            "spn = \"cifs/fs@\"",
+            "spn = \"cifs/fs.example.com@OTHER.COM\"\nrealm = \"EXAMPLE.COM\"",
+        ] {
+            assert!(v(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 
     /// `require_signing` unset is false for now, and warns (#39: true in 2.0).

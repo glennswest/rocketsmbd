@@ -1096,10 +1096,7 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
             err_resp(tx, h, status::NOT_SUPPORTED, chain);
             return;
         }
-        let spn = kcfg
-            .and_then(|k| k.spn.clone())
-            .unwrap_or_else(|| format!("cifs/{}", srv.cfg.server_name));
-        match crate::krb5::Acceptor::new(&spn) {
+        match crate::krb5::Acceptor::new(&srv.cfg.krb_acceptor_name()) {
             Ok(a) => pc.krb_acceptor = Some(a),
             Err(e) => {
                 crate::logw!("kerberos: acceptor init failed ({e})");

@@ -43,7 +43,7 @@ auth = "both"
 # [kerberos]
 # keytab = "/etc/rocketsmbd.keytab"   # default: $KRB5_KTNAME / system keytab
 # spn = "cifs/fileserver.example.com" # default: cifs/<server_name>
-# realm = "EXAMPLE.COM"               # qualifies bare names in share lists
+# realm = "EXAMPLE.COM"               # acceptor uses <spn>@EXAMPLE.COM; qualifies bare names in share lists
 
 [[share]]
 name = "data"

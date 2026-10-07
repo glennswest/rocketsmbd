@@ -54,6 +54,15 @@ gssapi-sys = { version = "0.2", optional = true }
   acquires a credential for exactly one SPN: `kerberos.spn`, or
   `cifs/<server_name>` when unset. Set `server_name` to the FQDN clients
   mount by, or set `spn` explicitly. There is no `host/` fallback.
+- Realm (#45): without `kerberos.realm` the SPN is imported host-based
+  (`cifs@host`, `GSS_C_NT_HOSTBASED_SERVICE`), so any keytab entry for
+  `cifs/host` matches, whatever its realm. With `realm = "EXAMPLE.COM"` it is
+  imported as the Kerberos principal `cifs/host@EXAMPLE.COM`
+  (`GSS_KRB5_NT_PRINCIPAL_NAME`): only that keytab entry is used, and a server
+  outside the `krb5.conf` default realm names its own. An `spn` that already
+  ends in `@REALM` is used as given (and must agree with `realm` if both are
+  set). A principal name is not canonicalized, so give the host as clients
+  request it.
 - Keytab: path from config (`kerberos.keytab = "/etc/rocketsmbd.keytab"`), or
   fall back to `KRB5_KTNAME`. The acceptor acquires its credential for the SPN
   from this keytab via `gss_acquire_cred` (or `gss_krb5_import_cred`).
@@ -154,7 +163,7 @@ per SESSION_SETUP:
 enabled = true
 keytab  = "/etc/rocketsmbd.keytab"   # or $KRB5_KTNAME
 spn     = "cifs/fileserver.example.com"   # optional; default cifs/<server_name>
-realm   = "EXAMPLE.COM"                   # accepted but currently ignored (#45)
+realm   = "EXAMPLE.COM"                   # optional; acceptor takes cifs/<host>@EXAMPLE.COM (#45)
 
 # top-level auth selector
 auth = "both"   # "kerberos" | "ntlm" | "both" (default "both")
@@ -241,8 +250,9 @@ kerberos`. Every feature build is checked by `deploy/feature-matrix.sh`
 the lab KDC: it creates a private MIT realm in the job's temp dir (KDC on a
 high port, service keytab, a user ticket) and runs `tests/krb5_live.rs`. That
 drives `process_frame` with a real GSS initiator through a single-leg AP-REQ
-(raw and SPNEGO), a DCE-style multi-leg exchange, and a broken second leg.
-The client derives the 3.1.1 signing key itself and checks the server's final
+(raw and SPNEGO), a DCE-style multi-leg exchange, a broken second leg, and
+`realm` naming the acceptor principal (right realm logs on, a realm the keytab
+has no key for is refused, #45). The client derives the 3.1.1 signing key itself and checks the server's final
 reply.
 
 ### e2e runbook (run once krb5.g8.lo is up)

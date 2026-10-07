@@ -52,15 +52,23 @@ fn spn_host() -> String {
     std::env::var("RSMBD_KRB5_HOST").unwrap_or_else(|_| "rsmbd.test".into())
 }
 
+fn realm() -> String {
+    std::env::var("RSMBD_KRB5_REALM").unwrap_or_else(|_| "RSMBD.TEST".into())
+}
+
 fn server() -> Srv {
+    server_with(&format!("spn = \"cifs/{}\"", spn_host()))
+}
+
+/// A server whose `[kerberos]` table is `kerberos`.
+fn server_with(kerberos: &str) -> Srv {
     rocketsmbd::log::set_level(2);
     let dir = std::env::temp_dir().join(format!("rsmbd-krb5-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     rocketsmbd::fuzzing::srv_from_toml(&format!(
         "server_name = \"KRBTEST\"\nworkers = 1\nauth = \"kerberos\"\nallow_guest = false\n\
          require_signing = true\ncore_pinning = false\n\
-         [kerberos]\nspn = \"cifs/{}\"\n[[share]]\nname = \"t\"\npath = '{}'\n",
-        spn_host(),
+         [kerberos]\n{kerberos}\n[[share]]\nname = \"t\"\npath = '{}'\n",
         dir.display()
     ))
 }
@@ -274,14 +282,17 @@ fn spnego_wrap(tok: &[u8], first: bool) -> Vec<u8> {
 /// clients do (a DCE-style AP-REQ is raw, so it is only recognisable inside
 /// SPNEGO's NegTokenInit).
 fn exchange(dce: bool, spnego: bool) -> usize {
-    let srv = server();
+    exchange_on(&server(), dce, spnego)
+}
+
+fn exchange_on(srv: &Srv, dce: bool, spnego: bool) -> usize {
     let mut c = Conn::negotiate(&srv);
     let mut init = Initiator::new(dce);
     let (mut tok, mut client_done) = init.step(&[]);
     let mut sess = 0u64;
     for leg in 1..=4 {
         let wire = if spnego { spnego_wrap(&tok, leg == 1) } else { tok.clone() };
-        let (st, sid, reply_tok, raw) = c.setup_leg(&srv, sess, &wire);
+        let (st, sid, reply_tok, raw) = c.setup_leg(srv, sess, &wire);
         let reply_tok = if spnego && !reply_tok.is_empty() {
             rocketsmbd::spnego::classify(&reply_tok).token.to_vec()
         } else {
@@ -359,4 +370,26 @@ fn multi_leg_bad_second_token() {
     assert_ne!(st, status::MORE_PROCESSING_REQUIRED);
     assert!(srv.sessions.get(sid).is_none(), "failed exchange drops its session");
     assert!(c.pc.channels.get(&sid).is_none());
+}
+
+/// `[kerberos].realm` makes the acceptor take exactly `<spn>@<realm>` (#45):
+/// the right realm (given in `realm` or in `spn` itself) logs on, a realm the
+/// keytab has no key for fails at the acceptor instead of being ignored.
+#[test]
+fn realm_qualifies_acceptor_principal() {
+    if !enabled() {
+        return;
+    }
+    let (host, realm) = (spn_host(), realm());
+    let srv = server_with(&format!("spn = \"cifs/{host}\"\nrealm = \"{realm}\""));
+    assert_eq!(exchange_on(&srv, false, true), 1, "spn + realm");
+    let srv = server_with(&format!("spn = \"cifs/{host}@{realm}\""));
+    assert_eq!(exchange_on(&srv, false, true), 1, "spn naming its realm");
+
+    let srv = server_with(&format!("spn = \"cifs/{host}\"\nrealm = \"NOT-{realm}\""));
+    let mut c = Conn::negotiate(&srv);
+    let (tok, _) = Initiator::new(false).step(&[]);
+    let (st, _, _, _) = c.setup_leg(&srv, 0, &spnego_wrap(&tok, true));
+    assert_eq!(st, status::LOGON_FAILURE, "no key for cifs/{host}@NOT-{realm}: the realm is not ignored");
+    assert_eq!(srv.sessions.len(), 0);
 }

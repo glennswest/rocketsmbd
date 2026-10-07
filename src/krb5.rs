@@ -21,6 +21,8 @@ use std::ptr;
 
 use gssapi_sys as gss;
 
+use crate::config::AcceptorName;
+
 // `gssapi-sys` binds only the base RFC 2744 `gssapi.h`. The session-key
 // extraction needs three symbols from the MIT/Heimdal extension header
 // (`gssapi_ext.h`) plus the `GSS_C_INDEFINITE` lifetime constant; declare them
@@ -112,18 +114,31 @@ pub fn set_keytab_env(keytab: Option<&std::path::Path>) {
     }
 }
 
+/// GSS_KRB5_NT_PRINCIPAL_NAME (1.2.840.113554.1.2.2.1): a Kerberos principal
+/// name, `service/host@REALM`. Spelled out here rather than linked because
+/// MIT exports it as a variable and Heimdal as a macro over a private symbol.
+const NT_KRB5_PRINCIPAL_OID: [u8; 10] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x12, 0x01, 0x02, 0x02, 0x01];
+
 impl Acceptor {
-    /// Acquire the acceptor credential for `spn` (e.g. `cifs/host.example.com`)
-    /// from the keytab `$KRB5_KTNAME` names (set once at startup by
-    /// [`set_keytab_env`]) or the system default keytab.
-    pub fn new(spn: &str) -> Result<Acceptor, String> {
+    /// Acquire the acceptor credential for `name` (see
+    /// `Config::krb_acceptor_name`) from the keytab `$KRB5_KTNAME` names (set
+    /// once at startup by [`set_keytab_env`]) or the system default keytab.
+    /// A `Principal` name must be in the keytab exactly, realm included.
+    pub fn new(name: &AcceptorName) -> Result<Acceptor, String> {
         // SAFETY: name is released on every path; cred is only wrapped in an
         // Acceptor on GSS_S_COMPLETE. Optional out-params are NULL.
         unsafe {
-            // Import the SPN. SMB SPNs are `service/host`; the GSS hostbased
-            // form is `service@host`, so translate the first `/`.
-            let hostbased = spn.replacen('/', "@", 1);
-            let name = import_name(&hostbased)?;
+            let (shown, name) = match name {
+                AcceptorName::HostBased(n) => (n, import_name(n, gss::GSS_C_NT_HOSTBASED_SERVICE)?),
+                AcceptorName::Principal(n) => {
+                    let mut oid_val = NT_KRB5_PRINCIPAL_OID;
+                    let mut oid = gss::gss_OID_desc {
+                        length: oid_val.len() as _,
+                        elements: oid_val.as_mut_ptr() as *mut _,
+                    };
+                    (n, import_name(n, &mut oid)?)
+                }
+            };
             let mut cred: gss::gss_cred_id_t = ptr::null_mut();
             let mut minor: gss::OM_uint32 = 0;
             let major = gss::gss_acquire_cred(
@@ -138,7 +153,7 @@ impl Acceptor {
             );
             release_name(name);
             if major != gss::GSS_S_COMPLETE {
-                return Err(format!("gss_acquire_cred({hostbased}) failed: {}", status_str(major, minor)));
+                return Err(format!("gss_acquire_cred({shown}) failed: {}", status_str(major, minor)));
             }
             Ok(Acceptor { cred })
         }
@@ -295,8 +310,8 @@ impl Drop for GssAcceptCtx {
 // ----------------------------------------------------------- FFI helper glue
 
 // SAFETY: (# Safety) returns an owned gss_name_t the caller must release_name exactly once;
-// `bytes` outlives gss_import_name, which copies it.
-unsafe fn import_name(s: &str) -> Result<gss::gss_name_t, String> {
+// `bytes` and `name_type` outlive gss_import_name, which copies both.
+unsafe fn import_name(s: &str, name_type: gss::gss_OID) -> Result<gss::gss_name_t, String> {
     let mut minor: gss::OM_uint32 = 0;
     let mut bytes = s.as_bytes().to_vec();
     let mut nb = gss::gss_buffer_desc {
@@ -304,13 +319,7 @@ unsafe fn import_name(s: &str) -> Result<gss::gss_name_t, String> {
         value: bytes.as_mut_ptr() as *mut _,
     };
     let mut name: gss::gss_name_t = ptr::null_mut();
-    // GSS_C_NT_HOSTBASED_SERVICE — `service@host`.
-    let major = gss::gss_import_name(
-        &mut minor,
-        &mut nb,
-        gss::GSS_C_NT_HOSTBASED_SERVICE,
-        &mut name,
-    );
+    let major = gss::gss_import_name(&mut minor, &mut nb, name_type, &mut name);
     if major != gss::GSS_S_COMPLETE {
         return Err(format!("gss_import_name({s}) failed: {}", status_str(major, minor)));
     }

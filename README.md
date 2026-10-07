@@ -218,7 +218,7 @@ Unknown keys are rejected. A full example is in
 | `health_listen` | unset (off) | Address for an HTTP health endpoint, e.g. `"127.0.0.1:9104"`. `GET /healthz` returns `200` while every worker is running and every share path is a directory, `503` otherwise, with a JSON body (status, version, worker and share counts; no names or paths). Bind it to loopback or an admin network. |
 | `oplocks` | `true` | Grant leases: read-caching and handle-caching (R/RH). Write-caching is never granted. |
 | `auth` | `"both"` | `"ntlm"`, `"kerberos"` or `"both"` (Kerberos preferred). Intersected with the built features. |
-| `[kerberos]` | absent | `enabled` (default true), `keytab` (default `$KRB5_KTNAME` / system keytab), `spn` (default `cifs/<server_name>`), `realm` (qualifies bare names in share lists; the acceptor still takes the realm from `krb5.conf`, #45). Used only in a `kerberos` build. |
+| `[kerberos]` | absent | `enabled` (default true), `keytab` (default `$KRB5_KTNAME` / system keytab), `spn` (default `cifs/<server_name>`), `realm` (the acceptor then takes exactly `<spn>@<realm>` from the keytab instead of any realm's `cifs/host`; also qualifies bare names in share lists, #45). Used only in a `kerberos` build. |
 | `[[share]]` | at least one required | `name`, `path` (must be an existing directory), `read_only` (default false), and the access lists `valid_users`, `invalid_users`, `read_only_users` (default empty; see below). `IPC$` is reserved. |
 | `[[user]]` | none | `name` plus exactly one of `password` or `nt_hash` (32 hex chars). NTLM users only; Kerberos principals come from the KDC. |
 | `[[group]]` | none | `name` plus `sid` (an AD group SID, matched against the PAC) and/or `members` (user entries). Named in share lists as `@name`. |

@@ -7,7 +7,8 @@
 # service keytab for cifs/rsmbd.test, user alice with a ticket), then runs
 # tests/krb5_live.rs with `--features kerberos` (and the NTLM-free and FIPS
 # builds): single-leg AP-REQ, a DCE-style multi-leg exchange, and a broken
-# second leg, each through process_frame with a real GSS initiator. Needs
+# second leg, and [kerberos].realm naming the acceptor principal (#45), each
+# through process_frame with a real GSS initiator. Needs
 # krb5-server and krb5-workstation (the build box and build VMs have them).
 # The KDC is stopped and everything removed on exit.
 set -euo pipefail
@@ -74,7 +75,7 @@ for flags in "--features kerberos" "--no-default-features --features kerberos" \
              "--no-default-features --features backend-openssl,kerberos"; do
     echo "==> cargo test $flags --test krb5_live"
     # shellcheck disable=SC2086
-    out=$(RSMBD_KRB5_TEST=1 RSMBD_KRB5_HOST=$host cargo test $flags --test krb5_live -- --test-threads=1 2>&1) || fail=1
+    out=$(RSMBD_KRB5_TEST=1 RSMBD_KRB5_HOST=$host RSMBD_KRB5_REALM=$realm cargo test $flags --test krb5_live -- --test-threads=1 2>&1) || fail=1
     grep -E '^test |^test result|panicked|assert|^error' <<<"$out" || echo "$out" | tail -30
 done
 exit $fail
