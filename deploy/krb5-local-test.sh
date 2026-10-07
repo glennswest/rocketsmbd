@@ -74,7 +74,7 @@ for flags in "--features kerberos" "--no-default-features --features kerberos" \
              "--no-default-features --features backend-openssl,kerberos"; do
     echo "==> cargo test $flags --test krb5_live"
     # shellcheck disable=SC2086
-    out=$(RUST_LOG=debug RSMBD_KRB5_TEST=1 RSMBD_KRB5_HOST=$host cargo test $flags --test krb5_live -- --test-threads=1 2>&1) || fail=1
+    out=$(RSMBD_KRB5_TEST=1 RSMBD_KRB5_HOST=$host cargo test $flags --test krb5_live -- --test-threads=1 2>&1) || fail=1
     grep -E '^test |^test result|panicked|assert|^error' <<<"$out" || echo "$out" | tail -30
 done
 exit $fail

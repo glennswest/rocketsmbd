@@ -254,15 +254,39 @@ impl Conn {
     }
 }
 
+/// SPNEGO framing, as SMB clients send Kerberos: the first leg a
+/// NegTokenInit naming krb5 with the token as mechToken, later legs a
+/// NegTokenResp carrying it as responseToken.
+fn spnego_wrap(tok: &[u8], first: bool) -> Vec<u8> {
+    use rocketsmbd::spnego::{der, OID_KRB5, OID_SPNEGO};
+    if first {
+        let mech_types = der(0xA0, &der(0x30, &der(0x06, OID_KRB5)));
+        let mech_token = der(0xA2, &der(0x04, tok));
+        let init = der(0xA0, &der(0x30, &[mech_types, mech_token].concat()));
+        der(0x60, &[der(0x06, OID_SPNEGO), init].concat())
+    } else {
+        der(0xA1, &der(0x30, &der(0xA2, &der(0x04, tok))))
+    }
+}
+
 /// Run a whole exchange; returns the number of SESSION_SETUP legs it took.
-fn exchange(dce: bool) -> usize {
+/// `dce`: DCE-style GSS (a third leg). `spnego`: wrap the tokens as SMB
+/// clients do (a DCE-style AP-REQ is raw, so it is only recognisable inside
+/// SPNEGO's NegTokenInit).
+fn exchange(dce: bool, spnego: bool) -> usize {
     let srv = server();
     let mut c = Conn::negotiate(&srv);
     let mut init = Initiator::new(dce);
     let (mut tok, mut client_done) = init.step(&[]);
     let mut sess = 0u64;
     for leg in 1..=4 {
-        let (st, sid, reply_tok, raw) = c.setup_leg(&srv, sess, &tok);
+        let wire = if spnego { spnego_wrap(&tok, leg == 1) } else { tok.clone() };
+        let (st, sid, reply_tok, raw) = c.setup_leg(&srv, sess, &wire);
+        let reply_tok = if spnego && !reply_tok.is_empty() {
+            rocketsmbd::spnego::classify(&reply_tok).token.to_vec()
+        } else {
+            reply_tok
+        };
         sess = sid;
         if !client_done && !reply_tok.is_empty() {
             let (t, done) = init.step(&reply_tok);
@@ -304,7 +328,8 @@ fn single_leg_ap_req() {
     if !enabled() {
         return;
     }
-    assert_eq!(exchange(false), 1, "a plain AP-REQ completes in one SESSION_SETUP");
+    assert_eq!(exchange(false, false), 1, "a raw AP-REQ completes in one SESSION_SETUP");
+    assert_eq!(exchange(false, true), 1, "a SPNEGO-wrapped AP-REQ completes in one SESSION_SETUP");
 }
 
 #[test]
@@ -312,7 +337,7 @@ fn multi_leg_dce_style() {
     if !enabled() {
         return;
     }
-    let legs = exchange(true);
+    let legs = exchange(true, true);
     assert!(legs >= 2, "DCE style needs another leg (took {legs})");
 }
 
@@ -326,7 +351,7 @@ fn multi_leg_bad_second_token() {
     let mut c = Conn::negotiate(&srv);
     let mut init = Initiator::new(true);
     let (tok, _) = init.step(&[]);
-    let (st, sid, _, _) = c.setup_leg(&srv, 0, &tok);
+    let (st, sid, _, _) = c.setup_leg(&srv, 0, &spnego_wrap(&tok, true));
     assert_eq!(st, status::MORE_PROCESSING_REQUIRED);
     assert_eq!(srv.sessions.len(), 1);
     let (st, _, _, _) = c.setup_leg(&srv, sid, b"\x60\x03garbage");
