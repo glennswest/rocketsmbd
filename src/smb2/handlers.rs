@@ -648,14 +648,12 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
     };
 
     use crate::spnego::Mech;
-    let mut mech = crate::spnego::classify(blob).mech;
+    let mech = crate::spnego::classify(blob).mech;
     // A later leg of a multi-leg Kerberos exchange (#38): its SPNEGO
-    // NegTokenResp needn't name the mechanism, so route by the channel's
-    // pending GSS context.
+    // NegTokenResp (or DCE-style raw AP-REP) needn't name the mechanism, so
+    // route by the channel's pending GSS context.
     #[cfg(feature = "kerberos")]
-    if pc.channels.get(&h.session_id).is_some_and(|c| c.krb_pending.is_some()) {
-        mech = Mech::Krb5;
-    }
+    let mech = if pc.channels.get(&h.session_id).is_some_and(|c| c.krb_pending.is_some()) { Mech::Krb5 } else { mech };
     let allow_krb = srv.cfg.auth.allows_kerberos();
     let allow_ntlm = srv.cfg.auth.allows_ntlm();
 

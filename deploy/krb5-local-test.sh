@@ -34,7 +34,9 @@ cat >"$KRB5_CONFIG" <<CONF
     rdns = false
     udp_preference_limit = 1
 [realms]
-    $realm = { kdc = 127.0.0.1:$port }
+    $realm = {
+        kdc = 127.0.0.1:$port
+    }
 [domain_realm]
     $host = $realm
 CONF
