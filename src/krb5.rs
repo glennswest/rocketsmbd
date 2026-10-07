@@ -145,8 +145,8 @@ impl Acceptor {
     }
 
     /// Begin a new per-session context.
-    pub fn begin(&self) -> AcceptCtx<'_> {
-        AcceptCtx { acc: self, ctx: ptr::null_mut() }
+    pub fn begin(&self) -> GssAcceptCtx {
+        GssAcceptCtx::new()
     }
 }
 
@@ -161,16 +161,41 @@ impl Drop for Acceptor {
     }
 }
 
-/// An in-progress acceptor context for one SMB session/channel.
-pub struct AcceptCtx<'a> {
-    acc: &'a Acceptor,
+/// An acceptor context for one SMB session/channel. It holds no borrow of the
+/// `Acceptor` (the credential is passed to each `step`), so a partial context
+/// can be kept in the channel's state between SESSION_SETUP legs of a
+/// multi-leg exchange (#38).
+pub struct GssAcceptCtx {
     ctx: gss::gss_ctx_id_t,
 }
 
-impl AcceptCtx<'_> {
-    /// Feed one client token (the GSS AP-REQ, unwrapped from SPNEGO by
-    /// `spnego::classify`). On completion, extracts the session key.
-    pub fn step(&mut self, token: &[u8]) -> Step {
+// SAFETY: like the credential, a gss_ctx_id_t has no thread affinity in
+// MIT/Heimdal; the context is owned by one channel and only used by the worker
+// that owns that connection, never from two threads at once (it is !Sync).
+unsafe impl Send for GssAcceptCtx {}
+
+impl std::fmt::Debug for GssAcceptCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GssAcceptCtx").field("started", &!self.ctx.is_null()).finish()
+    }
+}
+
+impl Default for GssAcceptCtx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GssAcceptCtx {
+    /// A fresh context (GSS_C_NO_CONTEXT until the first `step`).
+    pub fn new() -> Self {
+        GssAcceptCtx { ctx: ptr::null_mut() }
+    }
+
+    /// Feed one client token (the GSS AP-REQ, or a later leg's token,
+    /// unwrapped from SPNEGO by `spnego::classify`) with `acc`'s credential.
+    /// On completion, extracts the session key.
+    pub fn step(&mut self, acc: &Acceptor, token: &[u8]) -> Step {
         // SAFETY: input borrows `token` for the call only (GSS treats it as const); output
         // and src_name are GSS-allocated and released on every path (take_buf /
         // release_name); ctx is owned by self and freed in Drop.
@@ -183,7 +208,7 @@ impl AcceptCtx<'_> {
             let major = gss::gss_accept_sec_context(
                 &mut minor,
                 &mut self.ctx,
-                self.acc.cred,
+                acc.cred,
                 &mut input,
                 ptr::null_mut(),               // no channel bindings
                 &mut src_name,
@@ -254,9 +279,9 @@ impl AcceptCtx<'_> {
     }
 }
 
-impl Drop for AcceptCtx<'_> {
+impl Drop for GssAcceptCtx {
     fn drop(&mut self) {
-        // SAFETY: ctx is NO_CONTEXT or a live context owned solely by this AcceptCtx;
+        // SAFETY: ctx is NO_CONTEXT or a live context owned solely by this GssAcceptCtx;
         // deleted once, and GSS resets the handle.
         unsafe {
             if !self.ctx.is_null() {

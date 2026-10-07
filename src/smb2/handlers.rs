@@ -234,9 +234,9 @@ const MAX_OPENS_PER_SESSION: usize = 16384;
 const MAX_TREES_PER_SESSION: usize = 1024;
 const MAX_NOTIFY_PER_CONN: usize = 1024;
 
-/// Unfinished session setups one connection may hold at once (only NTLM
-/// creates a session before authenticating).
-#[cfg(feature = "ntlm")]
+/// Unfinished session setups one connection may hold at once (NTLM, and
+/// multi-leg Kerberos, create a session before authenticating).
+#[cfg(any(feature = "ntlm", feature = "kerberos"))]
 const MAX_PENDING_SETUPS: usize = 4;
 
 /// How far past the lowest unused MessageId a request may reach. Far above any
@@ -648,7 +648,14 @@ fn session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &
     };
 
     use crate::spnego::Mech;
-    let mech = crate::spnego::classify(blob).mech;
+    let mut mech = crate::spnego::classify(blob).mech;
+    // A later leg of a multi-leg Kerberos exchange (#38): its SPNEGO
+    // NegTokenResp needn't name the mechanism, so route by the channel's
+    // pending GSS context.
+    #[cfg(feature = "kerberos")]
+    if pc.channels.get(&h.session_id).is_some_and(|c| c.krb_pending.is_some()) {
+        mech = Mech::Krb5;
+    }
     let allow_krb = srv.cfg.auth.allows_kerberos();
     let allow_ntlm = srv.cfg.auth.allows_ntlm();
 
@@ -998,9 +1005,11 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
 /// through the per-connection GSS acceptor, and on success establishes the
 /// session using the Kerberos sub-session key for SMB signing/encryption.
 ///
-/// Single-leg only for now: a Kerberos AP-REQ from cifs.ko / Windows completes
-/// in one `gss_accept_sec_context`. A multi-leg exchange (rare) is logged and
-/// rejected pending per-channel GSS-context persistence (#35).
+/// A Kerberos AP-REQ from cifs.ko / Windows completes in one
+/// `gss_accept_sec_context`. When GSS asks for more (`CONTINUE_NEEDED`, e.g. a
+/// DCE-style exchange), the partial context is kept in the channel's
+/// `krb_pending` and the reply is MORE_PROCESSING_REQUIRED with GSS's token;
+/// the client's next leg names the session and continues it (#38).
 #[cfg(feature = "kerberos")]
 fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     // Re-extract the security blob and its flags.
@@ -1050,30 +1059,71 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
         }
     }
 
-    // Run one acceptor leg. Scope the GSS borrow so we can mutate `pc` after.
-    let step = {
-        let mut ctx = pc.krb_acceptor.as_ref().unwrap().begin();
-        ctx.step(incoming.token)
+    // A later leg continues the context this channel keeps for the session
+    // (#38); the first leg starts a new one. The 3.1.1 preauth hash chains
+    // over every leg: the connection's negotiate hash, or the channel's
+    // hash so far (which the post-pass extends with each interim reply).
+    let continuing = pc.channels.get_mut(&h.session_id).and_then(|c| c.krb_pending.take()).map(|ctx| (h.session_id, ctx));
+    let base_preauth = match &continuing {
+        Some((sid, _)) => pc.channels.get(sid).map(|c| c.preauth).unwrap_or(pc.preauth_neg),
+        None => pc.preauth_neg,
     };
+    let ch_preauth = if dialect == 0x0311 { crate::crypto::sha512(&[&base_preauth, msg]) } else { [0u8; 64] };
+    let (existing, mut ctx) = match continuing {
+        Some((sid, ctx)) => (Some(sid), ctx),
+        None => (None, crate::krb5::GssAcceptCtx::new()),
+    };
+    let step = ctx.step(pc.krb_acceptor.as_ref().unwrap(), incoming.token);
     use crate::krb5::Step;
     let est = match step {
         Step::Done(est) => est,
-        Step::Continue(_) => {
-            crate::logw!("kerberos: multi-leg exchange not yet supported (#35)");
-            err_resp(tx, h, status::LOGON_FAILURE, chain);
+        Step::Continue(out) => {
+            // More legs: keep the context on this channel under a session id
+            // the client echoes back, and send this leg's token.
+            let sid = match existing {
+                Some(sid) => sid,
+                None => {
+                    let pending = pc.channels.values().filter(|c| !c.established).count();
+                    if pending >= MAX_PENDING_SETUPS {
+                        err_resp(tx, h, status::INSUFFICIENT_RESOURCES, chain);
+                        return;
+                    }
+                    srv.sessions.create().0
+                }
+            };
+            let ch = pc.channels.entry(sid).or_default();
+            ch.krb_pending = Some(ctx);
+            ch.preauth = ch_preauth;
+            chain.session_id = sid;
+            crate::logd!("session {:x}: kerberos exchange continues ({} byte token)", sid, out.len());
+            let token = if wrapped {
+                crate::spnego::neg_resp(crate::spnego::ACCEPT_INCOMPLETE, crate::spnego::Mech::Krb5, &out)
+            } else {
+                out
+            };
+            ss_resp(tx, h, status::MORE_PROCESSING_REQUIRED, chain.related, sid, 0, &token);
             return;
         }
         Step::Failed(e) => {
+            if let Some(sid) = existing {
+                pc.channels.remove(&sid);
+                srv.sessions.remove(sid);
+            }
             let st = crate::krb5::status_for_failure(&e);
             crate::logw!("kerberos: authentication failed ({e})");
             err_resp(tx, h, st, chain);
             return;
         }
     };
+    drop(ctx);
 
     // `encrypt = true` and no 3.1.1 cipher: the session can't be sealed (#39 R8).
     if srv.cfg.encrypt && !(pc.cipher != 0 && pc.dialect == 0x0311) {
         crate::logw!("kerberos: session for {} denied — encryption is required but no cipher was negotiated", est.client);
+        if let Some(sid) = existing {
+            pc.channels.remove(&sid);
+            srv.sessions.remove(sid);
+        }
         err_resp(tx, h, status::ACCESS_DENIED, chain);
         return;
     }
@@ -1083,14 +1133,12 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
     let n = est.session_key.len().min(16);
     key[..n].copy_from_slice(&est.session_key[..n]);
 
-    // Fresh session; chain the 3.1.1 preauth over this single setup message.
-    let (sid, sref) = srv.sessions.create();
-    chain.session_id = sid;
-    let ch_preauth = if dialect == 0x0311 {
-        crate::crypto::sha512(&[&pc.preauth_neg, msg])
-    } else {
-        [0u8; 64]
+    // The session a multi-leg exchange already created, or a fresh one.
+    let (sid, sref) = match existing.and_then(|sid| srv.sessions.get(sid).map(|s| (sid, s))) {
+        Some(v) => v,
+        None => srv.sessions.create(),
     };
+    chain.session_id = sid;
 
     {
         let mut s = sref.lock().unwrap();

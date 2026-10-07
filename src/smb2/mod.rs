@@ -182,6 +182,10 @@ pub struct ChannelState {
     /// Encrypt responses on this session (client requested or server/share
     /// requires). When set, signing is implied by the AEAD tag.
     pub encrypt: bool,
+    /// A Kerberos (GSS) acceptor context between the legs of a multi-leg
+    /// SESSION_SETUP (#38); `None` otherwise.
+    #[cfg(feature = "kerberos")]
+    pub krb_pending: Option<crate::krb5::GssAcceptCtx>,
 }
 
 impl Default for ChannelState {
@@ -194,6 +198,8 @@ impl Default for ChannelState {
             preauth: [0; 64],
             enc: None,
             encrypt: false,
+            #[cfg(feature = "kerberos")]
+            krb_pending: None,
         }
     }
 }
