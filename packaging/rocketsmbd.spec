@@ -144,9 +144,9 @@ cargo test --release --offline
 %{_mandir}/man8/%{name}.8*
 
 %changelog
-* Sun Jun 15 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 1.4.0-1
+* Mon Jun 15 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 1.4.0-1
 - Handle-caching (RH) leases: persist past CLOSE, validated on cifs + Windows.
-* Sun Jun 15 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 1.3.0-1
+* Mon Jun 15 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 1.3.0-1
 - Read-caching leases on by default (cifs + Windows validated).
 * Sun Jun 14 2026 Glenn West <glennswest@neuralcloudcomputing.com> - 1.2.0-1
 - AES-256-GCM + AES-CCM ciphers; send_zc; core pinning; SQPOLL; multishot accept;
