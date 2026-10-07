@@ -195,3 +195,21 @@ To compare on equal footing (same client, same NIC/fabric):
 
 RDMA-capable NICs would let both use SMB Direct; without RDMA the comparison
 is the pure TCP multichannel path, which is where rocketsmbd is strongest.
+
+## Zero-copy sends and the locked-memory limit
+
+Responses of 64 KiB and more go out with io_uring `send_zc` (MSG_ZEROCOPY).
+The kernel pins the response's pages until the data has gone, and charges
+them to the service user's `RLIMIT_MEMLOCK`, which is 8 MiB by default for a
+non-root user. The packaged unit runs as `rocketsmbd`, so with many large
+replies in flight the limit runs out. That send then fails with ENOMEM or
+ENOBUFS, and rocketsmbd sends it by copy instead (#44; it used to drop the
+connection). Only throughput is affected, not correctness. To keep sends
+zero-copy under heavy load, raise the limit with a drop-in
+(`systemctl edit rocketsmbd`):
+
+```ini
+[Service]
+LimitMEMLOCK=256M
+```
+

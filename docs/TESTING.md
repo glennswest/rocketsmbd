@@ -147,6 +147,18 @@ cargo +nightly fuzz run spnego -- -max_total_time=60   # likewise ntlm, transfor
 ```
 On the build box that is one `sc-build` (cargo-fuzz is installed per job).
 
+## Test container (`test/`, stormcos test standard)
+
+`test/` holds the `rocketsmbd-test` image: `/test short|medium|long` starts the
+server on loopback and drives it with its own SMB2/3 client. It covers guest,
+signed and sealed I/O, leases, health, read-only enforcement, every cipher,
+large and parallel transfers, replay refusal, and leak/slowdown waves. See
+[test/README.md](../test/README.md). Run it on the build box without an image:
+
+```sh
+sc-build 'test/build.sh && ROCKETSMBD_BIN=test/out/rocketsmbd test/out/test medium'
+```
+
 ## Environments
 
 - **Loopback** on a Linux host — server-bound measurement, no network limit.
