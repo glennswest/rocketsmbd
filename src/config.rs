@@ -49,7 +49,7 @@ pub struct Config {
     /// busy kernel thread per worker, so it is opt-in. Default off.
     #[serde(default)]
     pub sqpoll: bool,
-    /// Opt-in HTTP health endpoint (`GET /healthz`), e.g. `"127.0.0.1:9104"`.
+    /// Opt-in HTTP health endpoint (`GET /healthz`), e.g. `"127.0.0.1:9108"`.
     /// Unset (default) = no listener: the server stays TCP 445 only. See
     /// `health.rs` for what it reports.
     #[serde(default)]

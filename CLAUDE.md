@@ -32,11 +32,12 @@ thread-per-connection — one io_uring reactor per worker thread.
   packaging in `packaging/` (Fedora spec, `debian/`); see docs/UPSTREAM.md.
 - **Ports**: SMB on TCP 445 only (`listen`, default `0.0.0.0:445`). No NetBIOS, no
   management/REST API. An opt-in HTTP health endpoint (`health_listen`, off by
-  default; `GET /healthz`, src/health.rs) exists for stormd; the stormcos golden uses `127.0.0.1:9104`.
-- **Not a stormcos component yet** (#46): `stormcentral component list` has no
-  `rocketsmbd`, so there's no golden to request yet. rocketsmbd-operator (`smbop`)
-  expects a `rocketsmbd` service golden with the binary at `/usr/sbin/rocketsmbd`,
-  config at `/etc/rocketsmbd/rocketsmbd.toml`, and the `ntlm` feature.
+  default; `GET /healthz`, src/health.rs) exists for stormd; the stormcos golden uses `127.0.0.1:9108` (9104 is stormblock-csi's).
+- **A stormcos service component** (#46, registered via stormcos#149): `kind =
+  "service"`, port 9108, `/healthz`, default features (ntlm); its registry config
+  is a placeholder (guest off, read-only share at `/var/lib/rocketsmbd`) that
+  rocketsmbd-operator (`smbop`) replaces. Request a golden after finished work with
+  `stormcentral component build rocketsmbd --url http://stormcentral.g8.lo`.
 
 ## Architecture
 
@@ -203,7 +204,7 @@ Order:
 - #40 — **closed (2026-10-06)** per the owner's decision: share access lists + PAC group SIDs on `main`, re-verified on fccbc97. Live AD-group test is #62 (needs-owner: dc1.ad.g8.lo unreachable, AD keytab + test users by gist).
 - #53 P2 per-client file identity (idmap + fsuid / io_uring personalities)
 - #43 — **closed (2026-10-06):** `sc-build deploy/feature-matrix.sh` = clippy + tests for all six feature sets, musl clippy, aarch64 check, fuzz crate (verified 0adc386 on a build VM). #44 — **closed (2026-10-06):** `test/` = `rocketsmbd-test` (short 6, medium 13, long + waves) verified on build VMs; found + fixed the unsigned LOGOFF reply and send_zc ENOMEM drops. First on-node run via `stormcentral test run` = #66 (blade power-off window); writeback stall finding = #67.
-- #46 P1 rocketsmbd as a stormcos service golden for smbop. **rocketsmbd side done (2026-10-06):** opt-in `health_listen` / `GET /healthz` (b09a5f5, docs dbf6d08), unit tests plus a live sc-build run (200 healthy, 503 when a share dir goes, 404/405, bad address fails `--check`). Entry values (port 9104, `/healthz`, placeholder config with `allow_guest = false`) posted on stormcos#149. #46 is queued `--after` stormcos#149. Next step once registered: `stormcentral component build rocketsmbd`, then close #46.
+- #46 — **done (2026-10-10):** registered by stormcos#149 (health on 127.0.0.1:9108, not the 9104 we proposed; docs updated). First golden `golden-rocketsmbd-6b5aac44a121` at e0355f4, release request stormcos#389; a new golden was requested for the docs commit. Ships in a release.
 - #47 — **closed (2026-10-06):** SMB1-only clients get SMB1 DialectIndex 0xFFFF and the connection closes (`FrameAction::RespondClose`); SMB2-offering SMB1 negotiates still get the wildcard. Not replayed against the real X9 BMC.
 - #38 — **closed (2026-10-06):** multi-leg Kerberos (`GssAcceptCtx` in `ChannelState.krb_pending`); live-KDC test `deploy/krb5-local-test.sh` (single-leg raw/SPNEGO, DCE multi-leg, bad leg) green in all kerberos builds. `bench/krb5/e2e.sh` (root + lab KDC) not re-run.
 - #45 P3 — **in progress (2026-10-06):** `[kerberos].realm` now names the acceptor principal (`<spn>@<realm>`, imported as a krb5 principal name; unset = hostbased as before); validation + live-KDC tests in `tests/krb5_live.rs`. Code + docs pushed (19a1ce1); **not yet verified**: sc-build got no slot on dev (exit 75 twice) and build VMs had no ssh route (2026-10-06/07). Next: `sc-build 'deploy/feature-matrix.sh && deploy/krb5-local-test.sh'`, then close #45.

@@ -14,7 +14,7 @@ sqpoll = false         # kernel-thread SQ polling; only helps at high IOPS/many 
 
 # HTTP health endpoint for service managers (GET /healthz). Off unless set;
 # bind it to loopback or an admin network.
-# health_listen = "127.0.0.1:9104"
+# health_listen = "127.0.0.1:9108"
 
 # SMB3 multichannel: one client mount stripes across several connections.
 multichannel = false
