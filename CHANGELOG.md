@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-07
+- **docs(#22):** Re-checked the Fedora review pair (all pinned URLs return 200). RHBZ #2488339 is unchanged, so the owner's two Bugzilla/FAS steps are now a to-do card, not a decision.
+
 ### 2026-10-10
 - **docs(#46):** rocketsmbd is registered as a stormcos service component (stormcos#149). Its golden serves `health_listen` on `127.0.0.1:9108`, not 9104 (stormblock-csi already uses that port). The README, man page, example config, `config.rs` doc comment and CLAUDE.md now use 9108.
 
