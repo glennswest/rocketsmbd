@@ -190,14 +190,17 @@ use. `main` is ported to it (Cargo.toml requires rustc ≥ 1.85):
 | aes / aes-gcm | 0.9 / 0.11 | 0.9.3 / 0.11.1 | — |
 | hmac | 0.13 | 0.13.0 | — |
 | sha2 / md-5 / md4 | 0.11 | 0.11.1 / 0.11.0 / 0.11.0 | — |
-| cmac | 0.8 | **0.7.2 only** | update `rust-cmac` to 0.8.0 (debcargo-conf) |
+| cmac | 0.8 | **0.7.2 only** | update `rust-cmac` to 0.8.0 and `rust-dbl` 0.3.2 → 0.5.0, which it needs (debcargo-conf) |
 | ccm | 0.6 | **not in Debian** | new `rust-ccm` 0.6.1 (debcargo-conf; deps `aead` 0.6, `cipher` 0.5, `ctr` 0.10, `ctutils` 0.4) |
 | libc, serde, toml | 0.2 / 1 / 1 | ✓ | — |
 
 Remaining steps, in order:
 1. Debian Rust team contributions: a merge request to
    [debcargo-conf](https://salsa.debian.org/rust-team/debcargo-conf) for
-   `rust-cmac` 0.8.0 and a new `rust-ccm` 0.6.1. This needs a salsa account
+   `rust-cmac` 0.8.0 (with `rust-dbl` 0.5.0) and a new `rust-ccm` 0.6.1. Every
+   other crate in the new lock (hybrid-array, cmov, cpubits, ctutils, inout,
+   crypto-common, block-buffer, ghash, polyval, ctr, …) is already in sid at a
+   semver-compatible version. This needs a salsa account
    (the maintainer's identity).
 2. Release 1.5.0 upstream.
 3. Switch `packaging/debian/` from the vendored component tarball to dh-cargo
