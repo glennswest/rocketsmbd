@@ -252,6 +252,43 @@ mod tests {
         assert_eq!(rc4(b"Key", b"Plaintext"), hex("bbf316e8d940af0ad3"));
     }
 
+    /// Known-answer vectors from an independent implementation (OpenSSL EVP,
+    /// `deploy/aead-kat.c`), so a RustCrypto upgrade can't silently change the
+    /// bytes on the wire (#23). Same inputs as `aead_roundtrip_and_tamper`.
+    #[test]
+    fn aead_known_answer_openssl_evp() {
+        fn unhex(s: &str) -> Vec<u8> {
+            (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        }
+        let aad = b"smb2-transform-header-aad";
+        let plain = b"the quick brown fox jumps over the lazy SMB share";
+        let kats: [(u16, &str, &str); 4] = [
+            (CIPHER_AES128_GCM,
+             "dd9d3937f62d45f72766fb3817150b83f56dbe5614a6d3d2082ddf634cdf8bbd10c01a1fde88e7ba785491cd376b7c1f53",
+             "8d8f132e0fbb4a747afdb459684f0651"),
+            (CIPHER_AES256_GCM,
+             "639f6269b1baf63c8e1fbc4e27d187f579fcb5c200f4c13b216f659e6c9345772d1a8b6e32d280fe1d15af0d95302847d6",
+             "8f595ed69ac8bbe195b893ae18ddec47"),
+            (CIPHER_AES128_CCM,
+             "5cc8ab1aae85879b4ade172cde71617c22a8e7c9a50b2f37bcdd17d6687e2d6fbb21c70dd28e97ea98ed2b638c3a1e6f90",
+             "b3e73a7ef8c085cdd23fcf66a0a016b8"),
+            (CIPHER_AES256_CCM,
+             "cd0b8d941736713cd404172be1d4a5f2d2e58039d77f83cbb91006faaab1758096c9acc2309ce31c2f32d2a9e924639ecd",
+             "cd0fc73cb3e42ee29c0a6fd372cabf97"),
+        ];
+        for (cipher, ct, tag) in kats {
+            let key = vec![0x11u8; cipher_key_len(cipher)];
+            let nonce = vec![0x22u8; cipher_nonce_len(cipher)];
+            let mut buf = plain.to_vec();
+            let got = aead_seal(cipher, &key, &nonce, aad, &mut buf);
+            assert_eq!(buf, unhex(ct), "ciphertext {cipher:#x}");
+            assert_eq!(got.to_vec(), unhex(tag), "tag {cipher:#x}");
+            let want: [u8; 16] = unhex(tag).try_into().unwrap();
+            assert!(aead_open(cipher, &key, &nonce, aad, &mut buf, &want), "open {cipher:#x}");
+            assert_eq!(buf, plain, "plaintext {cipher:#x}");
+        }
+    }
+
     #[test]
     fn aead_roundtrip_and_tamper() {
         let aad = b"smb2-transform-header-aad";
