@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-11-07
+- **refactor(#23):** Moved to the RustCrypto 0.11 generation that Debian sid/forky now ship: sha2/md-5/md4 0.11, hmac 0.13, cmac 0.8, aes 0.9, aes-gcm 0.11, ccm 0.6 (aead 0.6 / hybrid-array). The AEAD calls now use `AeadInOut` through one generic seal/open helper per backend. aes-gcm and ccm are built without default features (no getrandom/alloc). The MSRV is now declared: rustc 1.87 (the crates need 1.85; `usize::is_multiple_of` needs 1.87). This is the code side of the unbundled Debian route (owner's decision on #23). No wire or config change: the existing signing/KDF/AEAD test vectors cover it.
+- **test(#23):** `aead_known_answer_openssl_evp`: AES-128/256-GCM and -CCM vectors from OpenSSL EVP (`deploy/aead-kat.c`, an independent implementation), checked under both backends, so a crypto-crate upgrade cannot change the bytes on the wire unnoticed.
+- **docs(#23):** docs/UPSTREAM.md Debian route: the decision recorded, sid status as of 2026-11-07 (only `rust-cmac` 0.8 with `rust-dbl` 0.5, and a new `rust-ccm`, are missing), and the remaining steps.
 - **docs(#22):** Re-checked the Fedora review pair (all pinned URLs return 200). RHBZ #2488339 is unchanged, so the owner's two Bugzilla/FAS steps are now a to-do card, not a decision.
 
 ### 2026-10-10
