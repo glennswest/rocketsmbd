@@ -99,34 +99,43 @@ pub fn aead_open(
 /// AES-CCM via the pure-Rust `ccm` crate (OpenSSL's one-shot AEAD can't do CCM).
 mod ccm_fallback {
     use super::{CIPHER_AES128_CCM, CIPHER_AES256_CCM};
+    use ccm::aead::{AeadInOut, KeyInit, Nonce, Tag};
 
     type Ccm128 = ccm::Ccm<aes::Aes128, ccm::consts::U16, ccm::consts::U11>;
     type Ccm256 = ccm::Ccm<aes::Aes256, ccm::consts::U16, ccm::consts::U11>;
 
+    fn seal_with<C: AeadInOut + KeyInit>(key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
+        let nonce = Nonce::<C>::try_from(nonce).expect("ccm nonce length");
+        let tag = C::new_from_slice(key)
+            .expect("ccm key length")
+            .encrypt_inout_detached(&nonce, aad, buf.into())
+            .expect("ccm seal");
+        tag[..].try_into().expect("16-byte tag")
+    }
+
+    fn open_with<C: AeadInOut + KeyInit>(key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8], tag: &[u8; 16]) -> bool {
+        let (Ok(c), Ok(nonce), Ok(tag)) = (
+            C::new_from_slice(key),
+            Nonce::<C>::try_from(nonce),
+            Tag::<C>::try_from(&tag[..]),
+        ) else {
+            return false;
+        };
+        c.decrypt_inout_detached(&nonce, aad, buf.into(), &tag).is_ok()
+    }
+
     pub fn seal(cipher: u16, key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
-        use ccm::aead::{generic_array::GenericArray, AeadInPlace, KeyInit};
         match cipher {
-            CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
-                .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-                .expect("ccm")
-                .into(),
-            CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
-                .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-                .expect("ccm")
-                .into(),
+            CIPHER_AES128_CCM => seal_with::<Ccm128>(key, nonce, aad, buf),
+            CIPHER_AES256_CCM => seal_with::<Ccm256>(key, nonce, aad, buf),
             _ => panic!("unknown cipher {cipher:#x}"),
         }
     }
 
     pub fn open(cipher: u16, key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8], tag: &[u8; 16]) -> bool {
-        use ccm::aead::{generic_array::GenericArray, AeadInPlace, KeyInit};
         match cipher {
-            CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
-                .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-                .is_ok(),
-            CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
-                .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-                .is_ok(),
+            CIPHER_AES128_CCM => open_with::<Ccm128>(key, nonce, aad, buf, tag),
+            CIPHER_AES256_CCM => open_with::<Ccm256>(key, nonce, aad, buf, tag),
             _ => false,
         }
     }

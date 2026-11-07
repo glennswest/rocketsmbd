@@ -5,8 +5,9 @@
 //! (OpenSSL) backend can be swapped in for FIPS deployments.
 
 use aes::Aes128;
+use aes_gcm::aead::{AeadInOut, Nonce, Tag};
 use cmac::Cmac;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256, Sha512};
 
 use super::{CIPHER_AES128_CCM, CIPHER_AES128_GCM, CIPHER_AES256_CCM, CIPHER_AES256_GCM};
@@ -30,7 +31,7 @@ pub fn sha512(parts: &[&[u8]]) -> [u8; 64] {
 }
 
 pub fn aes128_cmac(key: &[u8], parts: &[&[u8]]) -> [u8; 16] {
-    let mut m = <Cmac<Aes128> as Mac>::new_from_slice(key).expect("cmac key");
+    let mut m = <Cmac<Aes128> as KeyInit>::new_from_slice(key).expect("cmac key");
     for p in parts {
         m.update(p);
     }
@@ -42,26 +43,35 @@ pub fn aes128_cmac(key: &[u8], parts: &[&[u8]]) -> [u8; 16] {
 type Ccm128 = ccm::Ccm<aes::Aes128, ccm::consts::U16, ccm::consts::U11>;
 type Ccm256 = ccm::Ccm<aes::Aes256, ccm::consts::U16, ccm::consts::U11>;
 
+/// Seal `buf` in place with AEAD `C`; returns the 16-byte tag. Key and nonce
+/// lengths are fixed by the SMB3 cipher, so a mismatch is a caller bug.
+fn seal_with<C: AeadInOut + KeyInit>(key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
+    let nonce = Nonce::<C>::try_from(nonce).expect("aead nonce length");
+    let tag = C::new_from_slice(key)
+        .expect("aead key length")
+        .encrypt_inout_detached(&nonce, aad, buf.into())
+        .expect("aead seal");
+    tag[..].try_into().expect("16-byte tag")
+}
+
+/// Open `buf` in place with AEAD `C`; false on a bad tag (or bad lengths).
+fn open_with<C: AeadInOut + KeyInit>(key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8], tag: &[u8; 16]) -> bool {
+    let (Ok(c), Ok(nonce), Ok(tag)) = (
+        C::new_from_slice(key),
+        Nonce::<C>::try_from(nonce),
+        Tag::<C>::try_from(&tag[..]),
+    ) else {
+        return false;
+    };
+    c.decrypt_inout_detached(&nonce, aad, buf.into(), &tag).is_ok()
+}
+
 pub fn aead_seal(cipher: u16, key: &[u8], nonce: &[u8], aad: &[u8], buf: &mut [u8]) -> [u8; 16] {
-    use aes_gcm::aead::{AeadInPlace, KeyInit};
-    use ccm::aead::generic_array::GenericArray;
     match cipher {
-        CIPHER_AES128_GCM => aes_gcm::Aes128Gcm::new(GenericArray::from_slice(key))
-            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-            .expect("gcm")
-            .into(),
-        CIPHER_AES256_GCM => aes_gcm::Aes256Gcm::new(GenericArray::from_slice(key))
-            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-            .expect("gcm")
-            .into(),
-        CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
-            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-            .expect("ccm")
-            .into(),
-        CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
-            .encrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf)
-            .expect("ccm")
-            .into(),
+        CIPHER_AES128_GCM => seal_with::<aes_gcm::Aes128Gcm>(key, nonce, aad, buf),
+        CIPHER_AES256_GCM => seal_with::<aes_gcm::Aes256Gcm>(key, nonce, aad, buf),
+        CIPHER_AES128_CCM => seal_with::<Ccm128>(key, nonce, aad, buf),
+        CIPHER_AES256_CCM => seal_with::<Ccm256>(key, nonce, aad, buf),
         _ => panic!("unknown cipher {cipher:#x}"),
     }
 }
@@ -74,21 +84,11 @@ pub fn aead_open(
     buf: &mut [u8],
     tag: &[u8; 16],
 ) -> bool {
-    use aes_gcm::aead::{AeadInPlace, KeyInit};
-    use ccm::aead::generic_array::GenericArray;
     match cipher {
-        CIPHER_AES128_GCM => aes_gcm::Aes128Gcm::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-            .is_ok(),
-        CIPHER_AES256_GCM => aes_gcm::Aes256Gcm::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-            .is_ok(),
-        CIPHER_AES128_CCM => Ccm128::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-            .is_ok(),
-        CIPHER_AES256_CCM => Ccm256::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(GenericArray::from_slice(nonce), aad, buf, tag.into())
-            .is_ok(),
+        CIPHER_AES128_GCM => open_with::<aes_gcm::Aes128Gcm>(key, nonce, aad, buf, tag),
+        CIPHER_AES256_GCM => open_with::<aes_gcm::Aes256Gcm>(key, nonce, aad, buf, tag),
+        CIPHER_AES128_CCM => open_with::<Ccm128>(key, nonce, aad, buf, tag),
+        CIPHER_AES256_CCM => open_with::<Ccm256>(key, nonce, aad, buf, tag),
         _ => false,
     }
 }

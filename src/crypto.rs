@@ -32,7 +32,7 @@ pub const BACKEND: &str = "rustcrypto";
 // (#30); a FIPS build uses `--no-default-features` so they are absent.
 
 #[cfg(feature = "ntlm")]
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 
 #[cfg(feature = "ntlm")]
 pub type HmacMd5 = Hmac<md5::Md5>;

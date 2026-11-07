@@ -2,6 +2,7 @@
 name = "rocketsmbd"
 version = "1.4.0"
 edition = "2021"
+rust-version = "1.85"
 description = "smbd replacement: io_uring end-to-end, zero-copy file-to-socket, SMB3 multichannel"
 license = "MIT"
 repository = "https://github.com/glennswest/rocketsmbd"
@@ -38,15 +39,15 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 # Pure-Rust crypto (RustCrypto) for SMB2/3 signing + encryption.
-sha2 = "0.10"
-hmac = "0.12"
-cmac = "0.7"
-aes = "0.8"
-aes-gcm = "0.10"
-ccm = "0.5"
+sha2 = "0.11"
+hmac = "0.13"
+cmac = "0.8"
+aes = "0.9"
+aes-gcm = { version = "0.11", default-features = false, features = ["aes"] }
+ccm = { version = "0.6", default-features = false }
 # Legacy NTLM-only primitives — optional, gated by the `ntlm` feature.
-md4 = { version = "0.10", optional = true }
-md-5 = { version = "0.10", optional = true }
+md4 = { version = "0.11", optional = true }
+md-5 = { version = "0.11", optional = true }
 # OpenSSL crypto backend — optional, gated by the `backend-openssl` feature
 # (system libcrypto at build/link time; dynamically linked).
 openssl = { version = "0.10", optional = true }
