@@ -54,6 +54,8 @@ on Fedora 43 + rawhide with a fully-offline build against
 | toml | `1` (was 0.8) | 1.1.2 | ✅ (bumped to match) |
 | aes, aes-gcm, cmac, hmac, sha2, md-5, md4, serde, libc | as-is | match | ✅ |
 | ccm | `0.5` (added 1.4.0) | not re-checked | ? |
+
+(Rows above are for 1.4.x. `main` (1.5.0) is on the RustCrypto 0.11 generation, #23. Re-check Fedora's versions before unbundling there.)
 | **io-uring** | **`0.7`** (need `SendZc`) | **0.6.4** (F43 *and* rawhide) | ❌ |
 
 `io-uring` is the blocker: we depend on 0.7-only API (`send_zc`, #15) and
@@ -172,37 +174,37 @@ Remaining lintian warnings:
   crates and the optional openssl/gssapi-sys trees), not just what the default
   build links.
 
-**Route — owner's decision (#23).** sid has io-uring 0.7.11, but it is in the
-middle of the RustCrypto generation change, so the unbundled dh-cargo route
-doesn't resolve today:
+**Route — decided (owner, 2026-10-09, #23): wait for sid's RustCrypto
+transition, then go unbundled (dh-cargo); upload 1.5.0.** Vendoring (the old
+`debian/` approach) would be rejected, since Debian already ships almost every
+crate. 1.5.0 is the first release with the #39 service user that `debian/`
+assumes.
 
-| crate | we use | sid |
-|---|---|---|
-| io-uring | 0.7 | 0.7.11 ✓ |
-| aes / aes-gcm | 0.8 / 0.10 | 0.9 / 0.11 |
-| hmac | 0.12 | 0.13 |
-| sha2 / md-5 | 0.10 | 0.11 |
-| cmac / md4 | 0.7 / 0.10 | 0.7.2 / 0.10.2 (old generation) |
-| ccm | 0.5 | not in Debian |
-| libc, serde, toml | 0.2 / 1 / 1 | ✓ |
+**Status (2026-11-07): the transition has settled.** The new generation is in
+sid *and* forky (testing), and upstream has stable releases of every crate we
+use. `main` is ported to it (Cargo.toml requires rustc ≥ 1.85):
 
-1. **Unbundled (dh-cargo, the Rust team's way).** Port rocketsmbd to the new
-   RustCrypto generation (aes 0.9, aes-gcm 0.11, hmac 0.13, sha2/md-5 0.11,
-   plus the matching cmac/md4/ccm releases). Then get `rust-ccm` packaged and
-   `rust-cmac`/`rust-md4` updated through debcargo-conf (Rust team
-   contributions). This is the most work, but it is the route Debian reviewers
-   accept: ftp-masters generally reject embedded copies of crates Debian already
-   ships. The port also keeps Fedora unbundling possible later.
-2. **Vendored (what `debian/` does now).** This is the fastest route. It needs
-   `vendor/` pruned to what the Linux default build links (no DLLs, no
-   Windows/openssl trees), and a per-crate `debian/copyright`. Because almost
-   every crate is already in Debian, expect a sponsor or ftp-master to push back.
-3. **Wait** until sid's RustCrypto transition settles, then take route 1
-   without the cmac/md4 updates.
+| crate | we use (main) | sid / forky | gap |
+|---|---|---|---|
+| io-uring | 0.7 | 0.7.15 | — |
+| aes / aes-gcm | 0.9 / 0.11 | 0.9.3 / 0.11.1 | — |
+| hmac | 0.13 | 0.13.0 | — |
+| sha2 / md-5 / md4 | 0.11 | 0.11.1 / 0.11.0 / 0.11.0 | — |
+| cmac | 0.8 | **0.7.2 only** | update `rust-cmac` to 0.8.0 (debcargo-conf) |
+| ccm | 0.6 | **not in Debian** | new `rust-ccm` 0.6.1 (debcargo-conf; deps `aead` 0.6, `cipher` 0.5, `ctr` 0.10, `ctutils` 0.4) |
+| libc, serde, toml | 0.2 / 1 / 1 | ✓ | — |
 
-Also undecided: which upstream version to upload. 1.4.1 is the latest
-release; `debian/` assumes the #39 service user, which is only on `main`
-(1.5.0).
+Remaining steps, in order:
+1. Debian Rust team contributions: a merge request to
+   [debcargo-conf](https://salsa.debian.org/rust-team/debcargo-conf) for
+   `rust-cmac` 0.8.0 and a new `rust-ccm` 0.6.1. This needs a salsa account
+   (the maintainer's identity).
+2. Release 1.5.0 upstream.
+3. Switch `packaging/debian/` from the vendored component tarball to dh-cargo
+   against the system registry (`librust-*-dev` Build-Depends). It can be
+   tested once (1) is in sid.
+4. File the ITP (below; update the Version to 1.5.0) and find a DD/DM sponsor.
+   Both need the maintainer's Debian identity.
 
 ### ITP bug — ready to file
 
