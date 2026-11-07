@@ -2,7 +2,7 @@
 name = "rocketsmbd"
 version = "1.4.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "smbd replacement: io_uring end-to-end, zero-copy file-to-socket, SMB3 multichannel"
 license = "MIT"
 repository = "https://github.com/glennswest/rocketsmbd"

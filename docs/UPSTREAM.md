@@ -182,7 +182,7 @@ assumes.
 
 **Status (2026-11-07): the transition has settled.** The new generation is in
 sid *and* forky (testing), and upstream has stable releases of every crate we
-use. `main` is ported to it (Cargo.toml requires rustc ≥ 1.85):
+use. `main` is ported to it (Cargo.toml declares rustc ≥ 1.87):
 
 | crate | we use (main) | sid / forky | gap |
 |---|---|---|---|
