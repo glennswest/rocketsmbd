@@ -257,9 +257,6 @@ mod tests {
     /// bytes on the wire (#23). Same inputs as `aead_roundtrip_and_tamper`.
     #[test]
     fn aead_known_answer_openssl_evp() {
-        fn unhex(s: &str) -> Vec<u8> {
-            (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
-        }
         let aad = b"smb2-transform-header-aad";
         let plain = b"the quick brown fox jumps over the lazy SMB share";
         let kats: [(u16, &str, &str); 4] = [
@@ -281,9 +278,9 @@ mod tests {
             let nonce = vec![0x22u8; cipher_nonce_len(cipher)];
             let mut buf = plain.to_vec();
             let got = aead_seal(cipher, &key, &nonce, aad, &mut buf);
-            assert_eq!(buf, unhex(ct), "ciphertext {cipher:#x}");
-            assert_eq!(got.to_vec(), unhex(tag), "tag {cipher:#x}");
-            let want: [u8; 16] = unhex(tag).try_into().unwrap();
+            assert_eq!(buf, hex(ct), "ciphertext {cipher:#x}");
+            assert_eq!(got.to_vec(), hex(tag), "tag {cipher:#x}");
+            let want: [u8; 16] = hex(tag).try_into().unwrap();
             assert!(aead_open(cipher, &key, &nonce, aad, &mut buf, &want), "open {cipher:#x}");
             assert_eq!(buf, plain, "plaintext {cipher:#x}");
         }
