@@ -41,7 +41,8 @@ the original design and increment plan.
   CLOSE (detached) until one of the operations above breaks it or the
   connection is torn down.
 - **Not implemented:** write-caching (RW/RWH, which needs break-with-ack and
-  deferred-op replay; deliberately deferred in #27), directory leases, lease v2
+  deferred-op replay; closed as deferred in #27 by the owner's decision of
+  2026-10-09: reopen it if a write-heavy, high-latency workload shows up), directory leases, lease v2
   epoch/parent-key semantics beyond parsing, and durable handles (DH2Q).
 
 ## Why
@@ -173,7 +174,7 @@ Steps 1–4 and RH are done; W, the ack handler and durable handles are not.
    conflicting holder; on WRITE / conflicting CREATE from another client, send
    a lease break (R→None) via the mailbox; track ack. Most-tested path first
    because R is shared (no exclusivity bugs).
-5. **Grant RH (done, v1.4.0), then RW/RWH (exclusive; deferred, #27):** handle/write caching with the
+5. **Grant RH (done, v1.4.0), then RW/RWH (exclusive; closed as deferred, #27):** handle/write caching with the
    exclusivity invariant; break W→R / RW→R on second opener.
 6. **Oplock-break acknowledgement** handler (not built) (cmd 0x12 inbound) + the
    wait-for-ack state on the breaking op.

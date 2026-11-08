@@ -60,8 +60,6 @@ kerberos"` → OpenSSL crypto, Kerberos auth, no NTLM/MD4/RC4 in the binary.
 ## Open
 
 - External security review (#39).
-- Write-caching leases (#27,
-  deferred).
 - Per-client file identity: SID→uid map and I/O under the client's uid (#53).
   (Per-share user/group authorization via the Kerberos PAC landed on `main`,
   #40.)
@@ -73,6 +71,10 @@ kerberos"` → OpenSSL crypto, Kerberos auth, no NTLM/MD4/RC4 in the binary.
 
 ## Beyond
 
+- Write-caching (W/RWH) leases: closed as deferred (#27, owner 2026-10-09).
+  Needs break-with-ack and STATUS_PENDING replay of the conflicting op; the
+  gain is fewer WRITE round-trips on high-latency links. Reopen #27 if a
+  write-heavy, high-latency workload shows up.
 - Registered files + buffers (#14), driven by SMB Direct's needs.
 - SMB Direct (RDMA) transport for 400/800GbE (#19) —
   design: [docs/SMBDIRECT.md](docs/SMBDIRECT.md) (RoCEv2 target).
