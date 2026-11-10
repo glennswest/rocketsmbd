@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-10
+- **docs(#19):** docs/SMBDIRECT.md records the owner's decision (2026-10-09): no Soft-RoCE test bed. SMB Direct waits for RoCE on the X9 blades' ConnectX-3 under stormcos. That gate is now filed as stormcos#914 (the verbs stack: mlx4_ib, rdma_cm, /dev/infiniband, libibverbs) and comes after stormcos#211.
+
 ### 2026-11-07
 - **docs(#27):** Write-caching (W/RWH) leases closed as deferred, by the owner's decision (2026-10-09). Read (v1.3.0) and handle (v1.4.0) caching stay as shipped; CREATE still grants `R | (requested & H)` and breaks need no ack. ROADMAP.md, docs/OPLOCKS.md and the work plan now say so. Reopen #27 if a write-heavy, high-latency workload shows up.
 - **refactor(#23):** Moved to the RustCrypto 0.11 generation that Debian sid/forky now ship: sha2/md-5/md4 0.11, hmac 0.13, cmac 0.8, aes 0.9, aes-gcm 0.11, ccm 0.6 (aead 0.6 / hybrid-array). The AEAD calls now use `AeadInOut` through one generic seal/open helper per backend. aes-gcm and ccm are built without default features (no getrandom/alloc). The MSRV is now declared: rustc 1.87 (the crates need 1.85; `usize::is_multiple_of` needs 1.87). This is the code side of the unbundled Debian route (owner's decision on #23). No wire or config change: the existing signing/KDF/AEAD test vectors cover it.

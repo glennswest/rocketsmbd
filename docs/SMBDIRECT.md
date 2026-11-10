@@ -167,6 +167,15 @@ dedicated test VM): `kernel-modules-extra`, plus an rxe link created at boot,
 plus a root-run e2e test. That is a host change for the owner/stormcentral,
 not something done from a build job.
 
+**Decision (owner, 2026-10-09):** no Soft-RoCE bed. Wait for real RDMA: the
+X9 blades' ConnectX-3 cards do RoCE, so SMB Direct is developed and tested
+there once the blades run stormcos. The gate is stormcos#914 (verbs stack on
+the ConnectX-3 under stormcos: `mlx4_ib`, `rdma_cm`, `/dev/infiniband` in a
+pod, libibverbs + the mlx4 provider), which comes after stormcos#211 (the
+ConnectX-3 port up as Ethernet). Order when it lands: #14 (registered
+buffers), then the transport phases above. ConnectX-3 is RoCE v1/v2 at
+10/40 GbE, so phase 6's numbers from it are a floor, not the 400 GbE story.
+
 ## Honest assessment
 
 This is the single largest item on the roadmap: a second transport stack
