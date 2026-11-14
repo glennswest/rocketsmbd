@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-14
+- **docs:** Refreshed from the code since 2026-11-07 (only the #23 RustCrypto 0.11 port touched code; the rest was docs). README "Build from source" and CLAUDE.md Platform & Build now state the MSRV, rustc 1.87 (`rust-version` in Cargo.toml). Config keys, defaults, ports and shipping are unchanged. Nothing the docs promise is missing from the code.
+
 ### 2026-11-10
 - **docs(#19):** docs/SMBDIRECT.md records the owner's decision (2026-10-09): no Soft-RoCE test bed. SMB Direct waits for RoCE on the X9 blades' ConnectX-3 under stormcos. That gate is now filed as stormcos#914 (the verbs stack: mlx4_ib, rdma_cm, /dev/infiniband, libibverbs) and comes after stormcos#211.
 

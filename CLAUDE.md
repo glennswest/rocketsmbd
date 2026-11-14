@@ -21,6 +21,7 @@ thread-per-connection — one io_uring reactor per worker thread.
   `cargo build && cargo test` on the build box); `sc-build 'cargo clippy --target
   x86_64-unknown-linux-musl -- -D warnings'` etc. for other commands. Scratch
   files go in `tmp/` (gitignored).
+- **MSRV**: `main` declares `rust-version = "1.87"` (RustCrypto 0.11 generation, #23; `usize::is_multiple_of`). 1.4.x predates it.
 - **Cargo features**: `ntlm` (default), `backend-rustcrypto` (default),
   `backend-openssl` (dynamic, FIPS), `kerberos` (dynamic, system GSS). `sc-build deploy/feature-matrix.sh` checks every feature set (#43); releases build the defaults.
 - **How it ships**: not GitHub Actions (owner, 2026-10-06): `sc-build 'deploy/release-artifacts.sh vX.Y.Z'`

@@ -99,7 +99,7 @@ behaviour, add a drop-in with `systemctl edit rocketsmbd` containing
 planted in a share reaches anything root can.
 
 Or build from source via [crates.io](https://crates.io/crates/rocketsmbd)
-(Linux; needs a Rust toolchain):
+(Linux; needs a Rust toolchain, rustc 1.87 or newer on `main` — the `rust-version` in Cargo.toml; the published 1.4.x needs older):
 
 ```sh
 cargo install rocketsmbd
