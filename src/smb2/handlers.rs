@@ -804,8 +804,21 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
             chain.session_id = sid;
             let mut chal = [0u8; 8];
             crate::config::urandom(&mut chal);
+            let challenge_msg = ntlm::challenge(&srv.cfg.server_name, chal);
+            let negotiate_msg = ntlm::exact_token(blob).unwrap_or_default().to_vec();
+            let token = if spnego {
+                ntlm::spnego_wrap_challenge(&challenge_msg)
+            } else {
+                challenge_msg.clone()
+            };
             let mut ch = crate::smb2::ChannelState {
-                pending: Some(crate::smb2::PendingAuth { challenge: chal, spnego, binding }),
+                pending: Some(crate::smb2::PendingAuth {
+                    challenge: chal,
+                    negotiate_msg,
+                    challenge_msg,
+                    spnego,
+                    binding,
+                }),
                 preauth: pc.preauth_neg,
                 ..Default::default()
             };
@@ -814,10 +827,6 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
             }
             pc.channels.insert(sid, ch);
 
-            let mut token = ntlm::challenge(&srv.cfg.server_name, chal);
-            if spnego {
-                token = ntlm::spnego_wrap_challenge(&token);
-            }
             ss_resp(tx, h, status::MORE_PROCESSING_REQUIRED, chain.related, sid, 0, &token);
         }
         ntlm::Token::Authenticate => {
@@ -847,6 +856,8 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
                 return;
             };
             let auth = ntlm::parse_authenticate(blob);
+            let transcript =
+                ntlm::Transcript { negotiate: &pending.negotiate_msg, challenge: &pending.challenge_msg };
 
             if pending.binding {
                 // Channel binding: prove the same identity, then derive this
@@ -861,7 +872,7 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
                                 && srv
                                     .users
                                     .get(&a.user.to_lowercase())
-                                    .map(|nt| ntlm::verify_ntlmv2(nt, a, &pending.challenge).is_some())
+                                    .map(|nt| ntlm::verify_ntlmv2(nt, a, &pending.challenge, &transcript).is_some())
                                     .unwrap_or(false)
                         }
                         _ => false,
@@ -924,7 +935,7 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
             }
             let verdict = match &auth {
                 Some(a) if !a.is_anonymous() => match srv.users.get(&a.user.to_lowercase()) {
-                    Some(nt) => match ntlm::verify_ntlmv2(nt, a, &pending.challenge) {
+                    Some(nt) => match ntlm::verify_ntlmv2(nt, a, &pending.challenge, &transcript) {
                         Some(key) => Verdict::User(key, a.user.clone()),
                         None => Verdict::Reject,
                     },

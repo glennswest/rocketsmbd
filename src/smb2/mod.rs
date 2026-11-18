@@ -160,6 +160,10 @@ pub struct EncCtx {
 #[derive(Debug)]
 pub struct PendingAuth {
     pub challenge: [u8; 8],
+    /// The client's NTLM NEGOTIATE and our CHALLENGE, exactly as exchanged
+    /// (unwrapped): the AUTHENTICATE MIC covers them (#86).
+    pub negotiate_msg: Vec<u8>,
+    pub challenge_msg: Vec<u8>,
     pub spnego: bool,
     /// Set when this is a multichannel session-binding handshake.
     pub binding: bool,
@@ -1505,6 +1509,72 @@ mod tests {
             FrameAction::Close | FrameAction::RespondClose => panic!("unexpected close"),
         }
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// NTLM MIC through process_frame (#86): a SPNEGO-wrapped handshake from
+    /// a client that sends MsvAvFlags=MIC. The server must keep the exact
+    /// NEGOTIATE and CHALLENGE bytes and check the MIC: right → SUCCESS,
+    /// one bit off → LOGON_FAILURE.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn ntlm_mic_verified_end_to_end() {
+        use crate::ntlm;
+        use crate::ntlm::testmsg::{mic_type1, type3_with_mic};
+
+        let dir = std::env::temp_dir().join(format!("rsmbd-mic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut srv = test_srv(&dir);
+        srv.cfg.users.push(crate::config::UserCfg {
+            name: "glenn".into(),
+            password: Some("s3cret".into()),
+            nt_hash: None,
+        });
+        srv.users = srv.cfg.user_db();
+        srv.allow_guest = srv.cfg.guest_allowed();
+
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let mut f = req_hdr(CMD_NEGOTIATE, 0, 0, 0);
+        f.p16(36);
+        f.p16(1);
+        f.p16(1);
+        f.p16(0);
+        f.p32(0);
+        f.zeros(16 + 8);
+        f.p16(0x0302);
+        assert_eq!(roundtrip(&srv, &mut pc, f).status, status::SUCCESS);
+
+        let ss = |sess: u64, blob: &[u8]| {
+            let mut f = req_hdr(CMD_SESSION_SETUP, 1, 0, sess);
+            f.p16(25);
+            f.p8(0);
+            f.p8(1);
+            f.p32(0);
+            f.p32(0);
+            f.p16(88);
+            f.p16(blob.len() as u16);
+            f.p64(0);
+            f.pbytes(blob);
+            f
+        };
+        let neg = mic_type1();
+        // SPNEGO-wrapped, with a trailing element the MIC must not cover.
+        let mut neg_blob = ntlm::spnego_wrap_challenge(&neg);
+        neg_blob.extend_from_slice(&[0xA3, 0x02, 0x04, 0x00]);
+
+        for (flip, want) in [(true, status::LOGON_FAILURE), (false, status::SUCCESS)] {
+            let r = roundtrip(&srv, &mut pc, ss(0, &neg_blob));
+            assert_eq!(r.status, status::MORE_PROCESSING_REQUIRED);
+            let sess = r.session_id;
+            let ch = ntlm::exact_token(&r.body[8..]).unwrap().to_vec();
+            let chal: [u8; 8] = ch[24..32].try_into().unwrap();
+            let mut t3 = type3_with_mic("glenn", "WG", "s3cret", &chal, &neg, &ch, true);
+            if flip {
+                t3[72] ^= 0x80;
+            }
+            let r = roundtrip(&srv, &mut pc, ss(sess, &ntlm::spnego_wrap_challenge(&t3)));
+            assert_eq!(r.status, want, "MIC flipped = {flip}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -35,7 +35,9 @@ freed when their connection dropped. An external review is still to be done
   integrity (SHA-512). Signing is **off unless the client asks** by default
   (`require_signing` unset or `false`; unset logs a warning, and the default
   becomes `true` in 2.0, #64); without it, an on-path attacker can tamper
-  with requests, and NTLM (which has no MIC check here) can be relayed. Set
+  with requests, and NTLM can be relayed (a client's NTLM MIC is verified
+  when it sends one, #86, but the server doesn't demand one, so a MIC alone
+  doesn't stop relay). Set
   `require_signing = true` on anything but a trusted LAN. Each MessageId is
   accepted once per connection, so captured signed or sealed requests can't
   be replayed. With `encrypt`, sessions that can't be sealed are refused and

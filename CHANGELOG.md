@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-18
+- **feat(#86):** NTLM MIC verification. When the client's NTLMv2 response carries MsvAvFlags with the MIC bit (Windows, and any client that sends one), the server checks the AUTHENTICATE MIC: HMAC-MD5(ExportedSessionKey, NEGOTIATE ‖ CHALLENGE ‖ AUTHENTICATE with the MIC zeroed), MS-NLMP 3.2.5.1.2. It does this on the first logon and on multichannel binding. A wrong or truncated MIC is a logon failure (LOGON_FAILURE, or ACCESS_DENIED for a bind). The session setup keeps the exact NEGOTIATE and CHALLENGE bytes for this. SPNEGO-wrapped tokens are bounded by their DER OCTET STRING (`ntlm::exact_token`), so a trailing mechListMIC is not hashed. The "MIC verification is not implemented" note in `src/ntlm.rs` is gone. Clients that send no MIC are unaffected: the CHALLENGE still omits MsvAvTimestamp, so no MIC is demanded. Tests cover a good MIC (with and without KEY_EXCH) and a tampered MIC, NEGOTIATE or CHALLENGE, a MIC flag with no MIC field, DER bounding, and the handshake end to end through `process_frame`.
+
 ### 2026-11-14
 - **docs:** Refreshed from the code since 2026-11-07 (only the #23 RustCrypto 0.11 port touched code; the rest was docs). README "Build from source" and CLAUDE.md Platform & Build now state the MSRV, rustc 1.87 (`rust-version` in Cargo.toml). Config keys, defaults, ports and shipping are unchanged. Nothing the docs promise is missing from the code.
 
