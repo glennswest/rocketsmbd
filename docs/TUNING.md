@@ -134,7 +134,7 @@ Implemented (more):
   need no syscall. Worth it only at high IOPS / many channels (it spins a
   kernel thread per worker), hence off by default.
 
-Not implemented:
+Not used:
 - **Registered buffers** (`IORING_REGISTER_BUFFERS`) are deferred until SMB
   Direct needs them (#14, queued after #19). rx/tx are per-connection growable
   buffers, and the fast read path is splice, which doesn't use them, so they

@@ -1,6 +1,6 @@
 # SMB Direct (RDMA / RoCE) — design
 
-**Status:** design only (#19). Not implemented. This document scopes the work
+**Status:** design only (#19); rocketsmbd has no RDMA transport. This document scopes the work
 so it is shovel-ready and so the architectural constraints are understood
 before any code lands.
 

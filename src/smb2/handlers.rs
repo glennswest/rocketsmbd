@@ -1340,8 +1340,8 @@ fn tree_connect(srv: &Srv, sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], chai
 // ------------------------------------------------------------------- CREATE
 
 /// A parsed lease request from the `RqLs` create context (v1 = 32-byte data,
-/// v2 = 52-byte data, distinguished by `v2`/`parent`/`epoch`). Parsed now;
-/// consumed by the grant path once cross-worker lease-break delivery lands.
+/// v2 = 52-byte data, distinguished by `v2`/`parent`/`epoch`), consumed by
+/// the grant path below.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct LeaseReq {
@@ -1610,7 +1610,7 @@ fn create(
         && lease_req.as_ref().is_some_and(|l| l.state & LEASE_READ_CACHING != 0);
     // Grant read-caching, plus handle-caching if the client asked for it — that
     // lets the client keep its lease (and cache) across CLOSE, avoiding re-opens.
-    // Never write-caching (dirty client data needs break-with-ack — not yet).
+    // Never write-caching (dirty client data would need break-with-ack, #27).
     let granted_state = if grant_lease {
         LEASE_READ_CACHING | (lease_req.as_ref().unwrap().state & LEASE_HANDLE_CACHING)
     } else {

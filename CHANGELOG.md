@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-19
+- **docs(#87):** docs/OPLOCKS.md states what the lease code does instead of a "not implemented" list: the W bit of a request is dropped (RW/RWH → R/RH), directories get no lease, v2 parent key and epoch are echoed and a break carries epoch + 1, and a DHnQ/DH2Q request gets no durable response context. Write-caching stays closed as deferred (#27). The same wording fix in docs/TUNING.md (registered buffers/files "not used") and docs/SMBDIRECT.md ("no RDMA transport"), and two stale comments in `src/smb2/handlers.rs` (the lease request is consumed by the grant path). No behavior change.
+
 ### 2026-11-18
 - **feat(#86):** NTLM MIC verification. When the client's NTLMv2 response carries MsvAvFlags with the MIC bit (Windows, and any client that sends one), the server checks the AUTHENTICATE MIC: HMAC-MD5(ExportedSessionKey, NEGOTIATE ‖ CHALLENGE ‖ AUTHENTICATE with the MIC zeroed), MS-NLMP 3.2.5.1.2. It does this on the first logon and on multichannel binding. A wrong or truncated MIC is a logon failure (LOGON_FAILURE, or ACCESS_DENIED for a bind). The session setup keeps the exact NEGOTIATE and CHALLENGE bytes for this. SPNEGO-wrapped tokens are bounded by their DER OCTET STRING (`ntlm::exact_token`), so a trailing mechListMIC is not hashed. The `src/ntlm.rs` note that said MIC was unchecked is gone. Clients that send no MIC are unaffected: the CHALLENGE still omits MsvAvTimestamp, so no MIC is demanded. Tests cover a good MIC (with and without KEY_EXCH) and a tampered MIC, NEGOTIATE or CHALLENGE, a MIC flag with no MIC field, DER bounding, and the handshake end to end through `process_frame`.
 

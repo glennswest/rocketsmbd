@@ -40,10 +40,17 @@ the original design and increment plan.
 - **Lifetime:** without H, the lease is released at CLOSE. With H, it survives
   CLOSE (detached) until one of the operations above breaks it or the
   connection is torn down.
-- **Not implemented:** write-caching (RW/RWH, which needs break-with-ack and
-  deferred-op replay; closed as deferred in #27 by the owner's decision of
-  2026-10-09: reopen it if a write-heavy, high-latency workload shows up), directory leases, lease v2
-  epoch/parent-key semantics beyond parsing, and durable handles (DH2Q).
+- **What is granted, and what is not:** the granted state is R, plus H when
+  the client asked for it; the W bit of a request is dropped, so a client
+  asking for RW or RWH gets R or RH and writes through to the server.
+  Directories get no lease (a CREATE of a directory answers
+  `OplockLevel = NONE`). A v2 request is answered with its own parent key and
+  epoch echoed; a break carries epoch + 1, and no other parent-key or epoch
+  rule is applied. A durable-handle request (DHnQ/DH2Q) gets no durable
+  response context, so the client treats the handle as non-durable.
+  Write-caching was closed as deferred in #27 by the owner's decision of
+  2026-10-09 (reopen it if a write-heavy, high-latency workload shows up):
+  it would need break-with-ack and deferred-op replay.
 
 ## Why
 
