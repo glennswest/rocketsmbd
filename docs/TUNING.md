@@ -93,8 +93,8 @@ On loopback (tiny BDP) this is moot; it matters on real links with RTT.
 - **IRQ affinity**: pin NIC IRQs across cores (or run `irqbalance`).
 - **CPU governor**: `performance` governor for latency-sensitive throughput.
 - **Worker pinning**: `core_pinning` (default on) pins worker N to core
-  N mod ncpu. Aligning workers to the NIC RSS queue their flows land on is not
-  implemented; the kernel's `SO_REUSEPORT` balancing picks the worker.
+  N mod ncpu. The kernel's `SO_REUSEPORT` hash picks the worker for each
+  connection, independent of the NIC RSS queue its flow lands on.
 
 ## Read-ahead
 
@@ -151,7 +151,8 @@ Not used:
   measure.
 - **SMB Direct (RDMA)** — the endgame for 100GbE+; designed
   (docs/SMBDIRECT.md) but blocked on RDMA hardware (#19).
-- **Worker pinning aligned to NIC RSS queues** — not built (see above).
+- **RSS-queue-aware worker selection** — workers are chosen by the
+  `SO_REUSEPORT` hash, not matched to the NIC RSS queue (see above).
 
 Investigated and dropped:
 - **Intra-connection read concurrency** — shelved; the server wasn't the

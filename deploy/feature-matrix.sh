@@ -11,7 +11,8 @@
 #
 # Each row runs `cargo clippy -- -D warnings` and `cargo test`; the default
 # row also does the musl clippy and the aarch64 cross-check the old CI did,
-# the fuzz crate is checked, and the test container's crate (test/) is linted. Every row runs even if an earlier one fails;
+# the fuzz crate is checked, the test container's crate (test/) is linted, and
+# deploy/check-stubs.sh refuses stub markers (#89). Every row runs even if an earlier one fails;
 # the script exits non-zero if any did.
 set -uo pipefail
 
@@ -55,6 +56,7 @@ step "default: check aarch64-musl" cargo check -q --target aarch64-unknown-linux
 step "fuzz crate: check" cargo check -q --manifest-path fuzz/Cargo.toml
 [ -f test/Cargo.lock ] || cp Cargo.lock test/Cargo.lock
 step "test crate: clippy" cargo clippy -q --manifest-path test/Cargo.toml -- -D warnings
+step "stub markers (#89, stormcentral#1455)" deploy/check-stubs.sh
 
 echo
 echo "==== feature matrix"

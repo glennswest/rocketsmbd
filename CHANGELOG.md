@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-19
+- **build(#89):** `deploy/check-stubs.sh` (copied from stormcentral, #1455) runs in `deploy/feature-matrix.sh` and fails the build on a stub marker in any tracked file outside tests and history. docs/TUNING.md: the RSS-queue sentence that wrapped such a marker across two lines now states the behavior (the `SO_REUSEPORT` hash picks the worker, not the NIC RSS queue). The `Not used:` header that replaced the swept one came in with #87. No behavior change.
 - **docs(#87):** docs/OPLOCKS.md states what the lease code does instead of a "not implemented" list: the W bit of a request is dropped (RW/RWH → R/RH), directories get no lease, v2 parent key and epoch are echoed and a break carries epoch + 1, and a DHnQ/DH2Q request gets no durable response context. Write-caching stays closed as deferred (#27). The same wording fix in docs/TUNING.md (registered buffers/files "not used") and docs/SMBDIRECT.md ("no RDMA transport", #88), and two stale comments in `src/smb2/handlers.rs` (the lease request is consumed by the grant path). No behavior change.
 
 ### 2026-11-18
