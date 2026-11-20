@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### 2026-11-19
+- **feat(#83):** IPC$ named pipes forwarded to an RPC backend, the SMB half of a Windows domain join against irondirectory (irondirectory#20, #53). A new `[ipc]` table sets `backend` (a Unix stream socket, e.g. `iron-rpcd`'s) and `pipes` (default `samr`, `lsarpc`, `netlogon`).
+  - A CREATE of a served pipe on `IPC$` connects to the backend and sends a versioned preamble: pipe name, flags, dialect, the SMB application key (MS-SMB2 Session.ApplicationKey on 3.x, which SAMR's AES password set is keyed from), user, and the PAC's user and group SIDs. Its layout is in docs/IPC-PIPES.md.
+  - WRITE, READ and FSCTL_PIPE_TRANSCEIVE pass DCE/RPC bytes through. Each read returns one fragment, with STATUS_BUFFER_OVERFLOW for a short buffer.
+  - A read whose reply hasn't arrived answers STATUS_PENDING. The worker's ring polls a dup of the backend socket (no blocking on the reactor), and CANCEL and CLOSE end the wait.
+  - Pipes are refused on guest sessions and on any request that is neither signed nor sealed.
+  - Without `[ipc]`, a CREATE on IPC$ now answers OBJECT_NAME_NOT_FOUND (it was ACCESS_DENIED).
+  - Covered by unit tests (`src/pipe.rs`, and `src/smb2/ipc.rs` through `process_frame`) and by `ipc-pipe-forward` in the `rocketsmbd-test` short suite over the real reactor.
+  - Not yet tried with impacket or Windows, or against `iron-rpcd`.
+- **fix:** An async completion that a frame produced with no response of its own (a CANCEL'd CHANGE_NOTIFY) used to wait in the reactor's deferred queue until the connection's next event. It now goes out with that frame's batch.
 - **build(#89):** `deploy/check-stubs.sh` (copied from stormcentral, #1455) runs in `deploy/feature-matrix.sh` and fails the build on a stub marker in any tracked file outside tests and history. docs/TUNING.md: the RSS-queue sentence that wrapped such a marker across two lines now states the behavior (the `SO_REUSEPORT` hash picks the worker, not the NIC RSS queue). The `Not used:` header that replaced the swept one came in with #87. No behavior change.
 - **docs(#87):** docs/OPLOCKS.md states what the lease code does instead of a "not implemented" list: the W bit of a request is dropped (RW/RWH → R/RH), directories get no lease, v2 parent key and epoch are echoed and a break carries epoch + 1, and a DHnQ/DH2Q request gets no durable response context. Write-caching stays closed as deferred (#27). The same wording fix in docs/TUNING.md (registered buffers/files "not used") and docs/SMBDIRECT.md ("no RDMA transport", #88), and two stale comments in `src/smb2/handlers.rs` (the lease request is consumed by the grant path). No behavior change.
 

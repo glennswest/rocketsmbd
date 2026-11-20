@@ -90,6 +90,14 @@ JSON body. Bind it to loopback or an admin network.
 \fB"both"\fR (default; Kerberos preferred, NTLM fallback), \fB"ntlm"\fR, or
 \fB"kerberos"\fR. Intersected with the mechanisms the binary was built with.
 .PP
+An optional \fB[ipc]\fR table forwards named pipes on \fBIPC$\fR to an RPC
+backend: \fBbackend\fR is the absolute path of the backend's Unix stream
+socket, and \fBpipes\fR lists the pipe names served (default \fBsamr\fR,
+\fBlsarpc\fR, \fBnetlogon\fR). Each opened pipe is its own connection to
+the backend, which starts with a preamble carrying the session's identity and
+application key. Only authenticated sessions can open a pipe, and only with
+signed or sealed requests.
+.PP
 All top-level keys must appear before the first table header. Unknown keys are
 rejected.
 .PP

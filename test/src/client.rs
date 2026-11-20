@@ -82,6 +82,11 @@ pub struct Client {
     /// The server reset the connection (vs. closing it cleanly).
     reset: bool,
     last_cmd: u16,
+    /// The key RPC on a named pipe gets (MS-SMB2 Session.ApplicationKey on
+    /// 3.x), derived on the client's side of the wire.
+    pub app_key: [u8; 16],
+    /// Interim STATUS_PENDING replies seen.
+    pub pendings: u32,
 }
 
 impl Client {
@@ -107,6 +112,8 @@ impl Client {
             last_wire: Vec::new(),
             reset: false,
             last_cmd: 0,
+            app_key: [0; 16],
+            pendings: 0,
         })
     }
 
@@ -216,6 +223,7 @@ impl Client {
             };
             if r.msg_id == id {
                 if r.status == status::PENDING && r.flags & smb2::FLAG_ASYNC != 0 {
+                    self.pendings += 1;
                     continue;
                 }
                 return Ok(r);
@@ -455,6 +463,7 @@ impl Client {
                 return Err("final SESSION_SETUP reply is not signed".into());
             }
             self.sign_requests = require_signing;
+            self.app_key = smb2::derive_app_key(self.dialect, &k, &self.preauth);
             if self.cipher != 0 && self.dialect == 0x0311 {
                 let (c2s, s2c) = crypto::smb311_encryption_keys(self.cipher, &k, &self.preauth);
                 // wrap_transform seals with `s2c` and decrypt_transform opens
@@ -623,6 +632,25 @@ impl Client {
             out.extend_from_slice(&d);
         }
         Ok(out)
+    }
+
+    /// IOCTL `ctl` (an FSCTL) on `fid` with `input`: the reply.
+    pub fn ioctl(&mut self, tree: u32, fid: u64, ctl: u32, input: &[u8], max_out: u32) -> R<Resp> {
+        let mut b = Vec::with_capacity(56 + input.len());
+        b.p16(57);
+        b.p16(0);
+        b.p32(ctl);
+        Self::fid(&mut b, fid);
+        b.p32(if input.is_empty() { 0 } else { 64 + 56 }); // InputOffset
+        b.p32(input.len() as u32);
+        b.p32(0); // MaxInputResponse
+        b.p32(0); // OutputOffset
+        b.p32(0); // OutputCount
+        b.p32(max_out);
+        b.p32(1); // SMB2_0_IOCTL_IS_FSCTL
+        b.p32(0);
+        b.pbytes(input);
+        self.request(smb2::CMD_IOCTL, tree, &b, 1)
     }
 
     pub fn close(&mut self, tree: u32, fid: u64) -> R<u32> {

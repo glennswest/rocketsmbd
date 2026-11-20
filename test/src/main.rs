@@ -69,6 +69,7 @@ fn main() {
         ("healthz", healthz),
         ("smb1-only-refused", smb1_only_refused),
         ("smb1-upgrade-to-smb2", smb1_upgrade),
+        ("ipc-pipe-forward", ipc_pipe_forward),
     ];
     if suite != "short" {
         tests.extend([
@@ -182,6 +183,7 @@ impl Env {
             "listen = \"{addr}\"\nworkers = 2\nserver_name = \"RSMBDTEST\"\nlog_level = {lvl}\n\
              core_pinning = false\nhealth_listen = \"{health}\"\noplocks = true\n\
              allow_guest = true\nrequire_signing = false\nencrypt = false\n\
+             [ipc]\nbackend = \"{d}/rpc.sock\"\n\
              [[share]]\nname = \"data\"\npath = \"{d}/data\"\n\
              [[share]]\nname = \"ro\"\npath = \"{d}/ro\"\nread_only = true\n\
              [[share]]\nname = \"extra\"\npath = \"{d}/extra\"\n\
@@ -357,6 +359,105 @@ fn sealed_aes128gcm(env: &Env) -> R<String> {
     check(r.status == status::ACCESS_DENIED, || format!("plaintext ECHO on a sealed session: status {:#x}, want ACCESS_DENIED", r.status))?;
     c.logoff()?;
     Ok("2 MiB round-tripped sealed; plaintext request refused".into())
+}
+
+/// A DCE/RPC-shaped PDU: version 5, little-endian drep, `frag_length`
+/// `len`, `call_id`, the rest `fill`.
+fn rpc_pdu(len: u16, call_id: u32, fill: u8) -> Vec<u8> {
+    let mut v = vec![5, 0, 2, 3, 0x10, 0, 0, 0];
+    v.extend_from_slice(&len.to_le_bytes());
+    v.extend_from_slice(&[0, 0]);
+    v.extend_from_slice(&call_id.to_le_bytes());
+    v.resize(len as usize, fill);
+    v
+}
+
+fn read_pdu(s: &mut std::os::unix::net::UnixStream) -> R<Vec<u8>> {
+    let mut h = [0u8; 16];
+    s.read_exact(&mut h).map_err(|e| format!("backend: read PDU header: {e}"))?;
+    let n = u16::from_le_bytes([h[8], h[9]]) as usize;
+    let mut v = h.to_vec();
+    v.resize(n.max(16), 0);
+    s.read_exact(&mut v[16..]).map_err(|e| format!("backend: read PDU body: {e}"))?;
+    Ok(v)
+}
+
+/// IPC$ named pipes forwarded to an RPC backend (#83): a fake backend on the
+/// configured Unix socket gets the preamble (pipe, the session's application
+/// key as this client derives it, the user), then the client's DCE/RPC
+/// bytes; it answers late, so the TRANSCEIVE and the READ both pend and
+/// complete asynchronously, signed. A guest can't open the pipe; CLOSE
+/// reaches the backend as EOF.
+fn ipc_pipe_forward(env: &Env) -> R<String> {
+    use std::os::unix::net::UnixListener;
+    let sock = env.dir.join("rpc.sock");
+    let _ = std::fs::remove_file(&sock);
+    let l = UnixListener::bind(&sock).map_err(|e| format!("bind {}: {e}", sock.display()))?;
+    let backend = std::thread::spawn(move || -> R<(Vec<u8>, Vec<Vec<u8>>, bool)> {
+        let (mut s, _) = l.accept().map_err(|e| format!("backend: accept: {e}"))?;
+        s.set_read_timeout(Some(Duration::from_secs(20))).ok();
+        let mut hdr = [0u8; 16];
+        s.read_exact(&mut hdr).map_err(|e| format!("backend: preamble: {e}"))?;
+        let mut pre = hdr.to_vec();
+        pre.resize(16 + u32::from_le_bytes(hdr[12..16].try_into().unwrap()) as usize, 0);
+        s.read_exact(&mut pre[16..]).map_err(|e| format!("backend: preamble body: {e}"))?;
+        let mut got = Vec::new();
+        for (i, len) in [(1u32, 120u16), (2, 3000)] {
+            got.push(read_pdu(&mut s)?);
+            std::thread::sleep(Duration::from_millis(100)); // make the client wait
+            s.write_all(&rpc_pdu(len, i, 0x40 + i as u8)).map_err(|e| format!("backend: reply: {e}"))?;
+        }
+        let mut b = [0u8; 1];
+        let eof = matches!(s.read(&mut b), Ok(0));
+        Ok((pre, got, eof))
+    });
+
+    let (mut c, tree) = env.user("IPC$", None)?;
+    let o = c.create(tree, "samr", FILE_OPEN, RW, 0, None)?;
+    check(o.status == status::SUCCESS, || format!("CREATE samr status {:#x}", o.status))?;
+    let req1 = rpc_pdu(72, 1, 0x11);
+    let r = c.ioctl(tree, o.fid, 0x0011_C017, &req1, 4280)?;
+    check(r.status == status::SUCCESS, || format!("TRANSCEIVE status {:#x}", r.status))?;
+    let body = r.body();
+    let (ooff, olen) = (
+        u32::from_le_bytes(body[32..36].try_into().unwrap()) as usize,
+        u32::from_le_bytes(body[36..40].try_into().unwrap()) as usize,
+    );
+    let out = r.raw.get(ooff..ooff + olen).ok_or("TRANSCEIVE output out of range")?.to_vec();
+    check(out == rpc_pdu(120, 1, 0x41), || format!("TRANSCEIVE output: {} bytes, not the backend's reply", out.len()))?;
+    let req2 = rpc_pdu(200, 2, 0x22);
+    check(c.write(tree, o.fid, 0, &req2)? == status::SUCCESS, || "pipe WRITE failed".into())?;
+    let (st, d) = c.read(tree, o.fid, 0, 4280)?;
+    check(st == status::SUCCESS && d == rpc_pdu(3000, 2, 0x42), || format!("pipe READ status {st:#x}, {} bytes", d.len()))?;
+    let pendings = c.pendings;
+    check(pendings >= 2, || format!("{pendings} STATUS_PENDING interims, want one per call"))?;
+    check(c.close(tree, o.fid)? == status::SUCCESS, || "pipe CLOSE failed".into())?;
+
+    let (pre, got, eof) = backend.join().map_err(|_| "backend thread panicked".to_string())??;
+    check(&pre[..8] == rocketsmbd::pipe::PREAMBLE_MAGIC, || "preamble magic".into())?;
+    let id = rocketsmbd::pipe::Identity {
+        pipe: "samr",
+        flags: rocketsmbd::pipe::FLAG_SIGNED,
+        dialect: c.dialect,
+        session_key: &c.app_key,
+        user: USER,
+        domain: "",
+        user_sid: String::new(),
+        groups: vec![],
+    };
+    check(pre == rocketsmbd::pipe::encode_preamble(&id), || "preamble differs from the client's own (app key, user, flags)".into())?;
+    check(got == vec![req1, req2], || "backend got other bytes than the client sent".into())?;
+    check(eof, || "backend did not see EOF after CLOSE".into())?;
+    c.logoff()?;
+
+    let mut g = Client::connect(&env.addr)?;
+    g.negotiate(&[0x0311, 0x0302], None, false)?;
+    check(g.session_setup(None, false)? == status::SUCCESS, || "guest session failed".into())?;
+    let (st, gt) = g.tree_connect("IPC$")?;
+    check(st == status::SUCCESS, || format!("guest TREE_CONNECT IPC$ status {st:#x}"))?;
+    let go = g.create(gt, "samr", FILE_OPEN, RW, 0, None)?;
+    check(go.status == status::ACCESS_DENIED, || format!("guest CREATE samr status {:#x}, want ACCESS_DENIED", go.status))?;
+    Ok(format!("dialect {:#x}: preamble with app key, TRANSCEIVE + WRITE/READ through {pendings} pends, guest refused, CLOSE seen", c.dialect))
 }
 
 /// Client A holds an R|H lease; client B (another session) writes the file;

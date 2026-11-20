@@ -45,6 +45,13 @@ auth = "both"
 # spn = "cifs/fileserver.example.com" # default: cifs/<server_name>
 # realm = "EXAMPLE.COM"               # acceptor uses <spn>@EXAMPLE.COM; qualifies bare names in share lists
 
+# IPC$ named pipes forwarded to an RPC backend (docs/IPC-PIPES.md), e.g.
+# irondirectory's iron-rpcd for a domain join. A Unix socket only: each pipe's
+# connection starts with a preamble carrying the session key.
+# [ipc]
+# backend = "/run/iron-rpcd/ncacn_np.sock"
+# pipes = ["samr", "lsarpc", "netlogon"]   # the default
+
 [[share]]
 name = "data"
 path = "/srv/data"

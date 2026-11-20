@@ -152,6 +152,19 @@ about NetBIOS framing and the `ZcRead` plan escape hatch.
   `FrameAction::RespondClose`, and the reactor sends the reply, reads nothing
   more, and closes the connection once it has gone out (#47).
 
+- IPC$ named pipes (`src/smb2/ipc.rs`, `src/pipe.rs`, #83): CREATE of a pipe
+  named in `[ipc] pipes` opens a non-blocking Unix stream socket to `[ipc]
+  backend` and writes a preamble (user, PAC SIDs, application key). WRITE,
+  READ and FSCTL_PIPE_TRANSCEIVE pass DCE/RPC bytes through. Reads are
+  message-mode, cut at `frag_length`. A read with no complete fragment yet
+  answers STATUS_PENDING and goes on `ProtoConn::pipe_new`. The reactor then
+  arms an io_uring POLL_ADD (`OP_PIPE`) on a dup of the socket, and when it
+  fires it calls `ipc::pipe_ready`, which sends the final response (signed or
+  sealed) or keeps waiting. CANCEL and CLOSE end a waiting read through
+  `pipe_done`, which cancels the poll. Connection teardown cancels every
+  armed poll. Pipes live in the session (`SessionInner::pipes`) and close
+  with it. Format and rules: docs/IPC-PIPES.md.
+
 ## VFS layer (src/vfs.rs)
 
 - Path resolution rejects `..` and NUL; share paths are the jail boundary
@@ -168,7 +181,8 @@ about NetBIOS framing and the `ZcRead` plan escape hatch.
   current response batch (flush-then-splice). Concurrent reads per connection
   were designed and then shelved after measurement showed the server wasn't
   the bottleneck (#12, docs/CONCURRENCY.md); multichannel is the scaling path.
-- IPC$ tree connects get a stub tree (no pipes/RPC); DFS referrals are
+- IPC$ serves only the named pipes `[ipc]` forwards to an RPC backend
+  (below); no RPC is implemented in rocketsmbd itself. DFS referrals are
   unsupported.
 - No registered buffers (#14, waits for SMB Direct #19) and no registered
   files (not worth it: the fds are also used by plain syscalls; docs/TUNING.md).
