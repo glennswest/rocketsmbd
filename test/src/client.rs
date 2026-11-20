@@ -491,6 +491,12 @@ impl Client {
 
     /// CREATE. `lease`: request an R|H lease under this key.
     pub fn create(&mut self, tree: u32, name: &str, disposition: u32, desired: u32, options: u32, lease: Option<[u8; 16]>) -> R<Opened> {
+        self.create_shared(tree, name, disposition, desired, options, lease, 7)
+    }
+
+    /// CREATE with an explicit ShareAccess mask (`create` shares all).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_shared(&mut self, tree: u32, name: &str, disposition: u32, desired: u32, options: u32, lease: Option<[u8; 16]>, share: u32) -> R<Opened> {
         let n = utf16le(name);
         let mut ctx: Vec<u8> = Vec::new();
         if let Some(k) = lease {
@@ -517,7 +523,7 @@ impl Client {
         b.p64(0);
         b.p32(desired);
         b.p32(0); // attributes
-        b.p32(7); // share all
+        b.p32(share); // ShareAccess
         b.p32(disposition);
         b.p32(options);
         b.p16(120);
@@ -651,6 +657,37 @@ impl Client {
         b.p32(0);
         b.pbytes(input);
         self.request(smb2::CMD_IOCTL, tree, &b, 1)
+    }
+
+    /// SET_INFO of a file information class; returns the status.
+    pub fn set_info(&mut self, tree: u32, fid: u64, class: u8, buf: &[u8]) -> R<u32> {
+        let mut b = Vec::new();
+        b.p16(33);
+        b.p8(1); // SMB2_0_INFO_FILE
+        b.p8(class);
+        b.p32(buf.len() as u32);
+        b.p16(96); // BufferOffset: 64 header + 32 fixed
+        b.p16(0);
+        b.p32(0);
+        Self::fid(&mut b, fid);
+        b.pbytes(buf);
+        Ok(self.request(smb2::CMD_SET_INFO, tree, &b, 1)?.status)
+    }
+
+    /// LOCK with `(offset, length, flags)` elements; returns the status.
+    pub fn lock(&mut self, tree: u32, fid: u64, elems: &[(u64, u64, u32)]) -> R<u32> {
+        let mut b = Vec::new();
+        b.p16(48);
+        b.p16(elems.len() as u16);
+        b.p32(0);
+        Self::fid(&mut b, fid);
+        for &(off, len, flags) in elems {
+            b.p64(off);
+            b.p64(len);
+            b.p32(flags);
+            b.p32(0);
+        }
+        Ok(self.request(smb2::CMD_LOCK, tree, &b, 1)?.status)
     }
 
     pub fn close(&mut self, tree: u32, fid: u64) -> R<u32> {

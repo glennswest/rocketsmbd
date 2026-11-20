@@ -70,6 +70,7 @@ fn main() {
         ("smb1-only-refused", smb1_only_refused),
         ("smb1-upgrade-to-smb2", smb1_upgrade),
         ("ipc-pipe-forward", ipc_pipe_forward),
+        ("share-access-and-locks", share_access_and_locks),
     ];
     if suite != "short" {
         tests.extend([
@@ -484,6 +485,53 @@ fn lease_break_on_write(env: &Env) -> R<String> {
     b.close(tb, ob.fid)?;
     a.close(ta, o.fid)?;
     Ok(format!("lease state {:#x} granted; break received for A's key", o.lease_state))
+}
+
+/// #90 over the real reactor, two connections: a FILE_SHARE_NONE open
+/// keeps another client out (and its OVERWRITE from truncating); a
+/// read-only handle can't delete; a failed LOCK leaves the handle's earlier
+/// lock in place.
+fn share_access_and_locks(env: &Env) -> R<String> {
+    const SHARING_VIOLATION: u32 = 0xC000_0043;
+    const LOCK_NOT_GRANTED: u32 = 0xC000_0055;
+    let (mut a, ta) = env.user("data", None)?;
+    let (mut b, tb) = env.user("data", None)?;
+    let name = "share-mode.txt";
+    let o = a.create(ta, name, FILE_OVERWRITE_IF, RW, NON_DIRECTORY_FILE, None)?;
+    check(o.status == status::SUCCESS, || format!("A: create status {:#x}", o.status))?;
+    check(a.write(ta, o.fid, 0, b"held by A")? == status::SUCCESS, || "A: write failed".into())?;
+    a.close(ta, o.fid)?;
+
+    let x = a.create_shared(ta, name, FILE_OPEN, RW, NON_DIRECTORY_FILE, None, 0)?;
+    check(x.status == status::SUCCESS, || format!("A: share-none open status {:#x}", x.status))?;
+    let r = b.create(tb, name, FILE_OPEN, RO, NON_DIRECTORY_FILE, None)?;
+    check(r.status == SHARING_VIOLATION, || format!("B: read open status {:#x}, want SHARING_VIOLATION", r.status))?;
+    let w = b.create(tb, name, FILE_OVERWRITE_IF, RW, NON_DIRECTORY_FILE, None)?;
+    check(w.status == SHARING_VIOLATION, || format!("B: overwrite status {:#x}, want SHARING_VIOLATION", w.status))?;
+    let on_disk = std::fs::read(env.dir.join("data").join(name)).map_err(|e| e.to_string())?;
+    check(on_disk == b"held by A", || "the refused overwrite truncated the file".into())?;
+    a.close(ta, x.fid)?;
+
+    let ro = b.create(tb, name, FILE_OPEN, RO, NON_DIRECTORY_FILE, None)?;
+    check(ro.status == status::SUCCESS, || format!("B: read open after A's close: {:#x}", ro.status))?;
+    let st = b.set_info(tb, ro.fid, 13, &[1])?;
+    check(st == status::ACCESS_DENIED, || format!("B: delete via a read-only handle: {st:#x}"))?;
+    b.close(tb, ro.fid)?;
+    check(env.dir.join("data").join(name).exists(), || "file deleted through a read-only handle".into())?;
+
+    let (la, lb) = (a.create(ta, name, FILE_OPEN, RW, NON_DIRECTORY_FILE, None)?, b.create(tb, name, FILE_OPEN, RW, NON_DIRECTORY_FILE, None)?);
+    check(la.status == status::SUCCESS && lb.status == status::SUCCESS, || "lock opens failed".into())?;
+    check(a.lock(ta, la.fid, &[(0, 100, 1)])? == status::SUCCESS, || "A: shared lock failed".into())?;
+    check(b.lock(tb, lb.fid, &[(200, 100, 2)])? == status::SUCCESS, || "B: exclusive lock failed".into())?;
+    let st = a.lock(ta, la.fid, &[(50, 100, 1), (250, 10, 1)])?;
+    check(st == LOCK_NOT_GRANTED, || format!("A: conflicting batch: {st:#x}"))?;
+    let st = b.lock(tb, lb.fid, &[(60, 30, 2)])?;
+    check(st == LOCK_NOT_GRANTED, || format!("B: A's earlier lock was dropped by the failed batch ({st:#x})"))?;
+    let st = b.lock(tb, lb.fid, &[(100, 50, 2)])?;
+    check(st == status::SUCCESS, || format!("B: the failed batch's own range stayed locked ({st:#x})"))?;
+    a.close(ta, la.fid)?;
+    b.close(tb, lb.fid)?;
+    Ok("share-none excludes, read-only handle can't delete, failed LOCK keeps earlier locks".into())
 }
 
 fn http_get(addr: &str, path: &str) -> R<(u16, String)> {
