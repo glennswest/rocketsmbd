@@ -116,6 +116,7 @@ fn run(cfg: Config) {
         sessions: session::Registry::default(),
         mailboxes,
         leases: lease::LeaseTable::default(),
+        share_modes: Default::default(),
     });
     logi!(
         "rocketsmbd {} listening on {} ({} workers, max_read {} KiB)",

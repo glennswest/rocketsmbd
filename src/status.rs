@@ -24,6 +24,7 @@ pub const OBJECT_PATH_NOT_FOUND: u32 = 0xC000_003A;
 pub const SHARING_VIOLATION: u32 = 0xC000_0043;
 pub const FILE_LOCK_CONFLICT: u32 = 0xC000_0054;
 pub const LOCK_NOT_GRANTED: u32 = 0xC000_0055;
+pub const RANGE_NOT_LOCKED: u32 = 0xC000_007E;
 pub const LOGON_FAILURE: u32 = 0xC000_006D;
 /// Kerberos clock skew between client/server/KDC exceeds policy (MS-ERREF).
 pub const TIME_DIFFERENCE_AT_DC: u32 = 0xC000_0133;

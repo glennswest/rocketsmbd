@@ -17,7 +17,8 @@ data never enters userspace. A single client mount stripes across cores via
 Kerberos (GSS-API/SPNEGO) authentication, SMB2/3 signing, SMB 3.1.1 preauth
 integrity, SMB3 multichannel, and SMB3 encryption (AES-128/256-GCM,
 AES-128/256-CCM)**. Supports a user database, optional guest access,
-byte-range locks, and directory change notification. The config format and
+byte-range locks, CREATE share modes, per-handle access checks, and
+directory change notification. The config format and
 on-wire behavior are stable across the 1.x series. The `process_frame` and
 NTLMSSP parsers are fuzzed.
 

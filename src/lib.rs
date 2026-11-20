@@ -20,6 +20,7 @@ pub mod pipe;
 #[cfg(feature = "ntlm")]
 pub mod ntlm;
 pub mod session;
+pub mod sharemode;
 pub mod smb2;
 pub mod spnego;
 pub mod status;

@@ -454,6 +454,8 @@ pub struct Srv {
     pub mailboxes: Vec<crate::lease::Mailbox>,
     /// File-keyed lease registry, shared across all workers.
     pub leases: crate::lease::LeaseTable,
+    /// CREATE share modes of every open, shared across all workers.
+    pub share_modes: std::sync::Arc<crate::sharemode::Table>,
 }
 
 pub fn urandom(buf: &mut [u8]) {

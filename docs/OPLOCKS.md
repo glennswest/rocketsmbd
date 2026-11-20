@@ -177,7 +177,8 @@ Steps 1–4 and RH are done; W, the ack handler and durable handles are not.
    `Sender` table; a `wake(worker)` helper. Unit-test the wakeup.
 4. **Grant R + break-on-write (done as a lease grant, v1.3.0; breaks on
    truncate, overwrite, rename and delete added on `main`, #42; no break on
-   open, since share modes aren't enforced):** grant `READ_CACHING` when no
+   open: share modes are enforced since #90, and an open they refuse gets
+   STATUS_SHARING_VIOLATION without breaking anyone's lease):** grant `READ_CACHING` when no
    conflicting holder; on WRITE / conflicting CREATE from another client, send
    a lease break (R→None) via the mailbox; track ack. Most-tested path first
    because R is shared (no exclusivity bugs).

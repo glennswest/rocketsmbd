@@ -42,6 +42,8 @@ pub struct Meta {
     pub mtime: u64,
     pub ctime: u64,
     pub ino: u64,
+    /// Device of the file (`st_dev`): with `ino`, its identity for share modes.
+    pub dev: u64,
     pub nlink: u32,
     pub is_dir: bool,
 }
@@ -66,6 +68,7 @@ fn meta_from_std(m: &std::fs::Metadata) -> Meta {
         mtime,
         ctime: filetime(m.ctime(), m.ctime_nsec()),
         ino: m.ino(),
+        dev: m.dev(),
         nlink: m.nlink() as u32,
         is_dir,
     }
@@ -348,6 +351,17 @@ pub struct OpenFile {
     pub tree_id: u32,
     pub is_dir: bool,
     pub writable: bool,
+    /// Access granted at CREATE (generic bits mapped, MAXIMUM_ALLOWED
+    /// resolved). SET_INFO and FileAccessInformation use it (#90).
+    pub access: u32,
+    /// This open's share-mode record (`None` = attribute-only open); dropped
+    /// with the handle (#90).
+    pub share_reg: Option<crate::sharemode::Reg>,
+    /// Byte-range locks this handle holds, as SMB sees them: each granted
+    /// LOCK element, by `(offset, length, exclusive)`. The fd's OFD lock
+    /// state is their union, so a failed LOCK request can undo exactly what
+    /// it added (#90).
+    pub locks: Vec<(u64, u64, bool)>,
     pub delete_on_close: bool,
     pub dir: Option<DirState>,
     /// Inode of the file this handle holds a granted lease on (for releasing
@@ -515,6 +529,9 @@ mod tests {
             tree_id: 1,
             is_dir: true,
             writable: false,
+            access: 0,
+            share_reg: None,
+            locks: Vec::new(),
             delete_on_close: false,
             dir: None,
             oplock_ino: None,

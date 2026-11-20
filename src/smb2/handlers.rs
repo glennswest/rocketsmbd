@@ -20,6 +20,39 @@ const WRITE_BITS: u32 = FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GEN
 /// Access a read-only tree refuses at CREATE: writing data, plus DELETE,
 /// FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES, WRITE_DAC and WRITE_OWNER.
 const READ_ONLY_DENIED: u32 = WRITE_BITS | 0x0001_0000 | 0x10 | 0x100 | 0x0004_0000 | 0x0008_0000;
+const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+const DELETE: u32 = 0x0001_0000;
+const GENERIC_EXECUTE: u32 = 0x2000_0000;
+const GENERIC_READ: u32 = 0x8000_0000;
+const FILE_GENERIC_READ: u32 = 0x0012_0089;
+const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
+
+/// The access a CREATE grants: generic bits mapped to file rights
+/// (MS-SMB2 2.2.13.1.1), MAXIMUM_ALLOWED resolved to what the tree allows,
+/// and data-writing rights dropped when the fd could only be opened
+/// read-only (#90).
+fn granted_access(desired: u32, tree_read_only: bool, fd_writable: bool, is_dir: bool) -> u32 {
+    let max = if tree_read_only { MAXIMAL_ACCESS_READ } else { MAXIMAL_ACCESS_ALL };
+    let mut a = desired & MAXIMAL_ACCESS_ALL;
+    if desired & GENERIC_READ != 0 {
+        a |= FILE_GENERIC_READ;
+    }
+    if desired & GENERIC_WRITE != 0 {
+        a |= FILE_GENERIC_WRITE;
+    }
+    if desired & GENERIC_EXECUTE != 0 {
+        a |= FILE_GENERIC_EXECUTE;
+    }
+    if desired & (GENERIC_ALL | MAXIMUM_ALLOWED) != 0 {
+        a |= max;
+    }
+    a &= max;
+    if !fd_writable && !is_dir {
+        a &= !(FILE_WRITE_DATA | FILE_APPEND_DATA);
+    }
+    a
+}
 
 // CreateDisposition
 const FILE_SUPERSEDE: u32 = 0;
@@ -1363,6 +1396,8 @@ struct LeaseReq {
 
 struct CreateReq {
     desired: u32,
+    /// ShareAccess: what this open lets other opens do (#90).
+    share_access: u32,
     disposition: u32,
     options: u32,
     name: String,
@@ -1391,7 +1426,7 @@ fn parse_create(msg: &[u8]) -> Option<CreateReq> {
     r.skip(4 + 8 + 8)?; // ImpersonationLevel, SmbCreateFlags, Reserved
     let desired = r.u32()?;
     let _attrs = r.u32()?;
-    let _share_access = r.u32()?;
+    let share_access = r.u32()?;
     let disposition = r.u32()?;
     let options = r.u32()?;
     let name_off = r.u16()? as usize;
@@ -1409,7 +1444,7 @@ fn parse_create(msg: &[u8]) -> Option<CreateReq> {
     } else {
         None
     };
-    Some(CreateReq { desired, disposition, options, name, oplock, lease })
+    Some(CreateReq { desired, share_access, disposition, options, name, oplock, lease })
 }
 
 /// Walk the chained SMB2_CREATE_CONTEXT list and return the parsed `RqLs`
@@ -1529,6 +1564,20 @@ fn create(
         return;
     }
 
+    // Share modes (#90): refuse before touching the file, so a conflicting
+    // OVERWRITE never truncates it. Re-checked atomically once opened.
+    let pre_access = granted_access(req.desired, tree.read_only, true, treat_as_dir);
+    if delete_on_close && pre_access & DELETE == 0 {
+        err_resp(tx, h, status::ACCESS_DENIED, chain);
+        return;
+    }
+    if let Some(m) = existing {
+        if !srv.share_modes.check((m.dev, m.ino), pre_access, req.share_access) {
+            err_resp(tx, h, status::SHARING_VIOLATION, chain);
+            return;
+        }
+    }
+
     let mut action = CREATE_ACTION_OPENED;
     let (fd, is_dir, writable) = if treat_as_dir {
         if !exists {
@@ -1601,6 +1650,22 @@ fn create(
             return;
         }
     };
+    let access = granted_access(req.desired, tree.read_only, writable, is_dir);
+    let share_reg = match crate::sharemode::Table::register(
+        &srv.share_modes,
+        (meta.dev, meta.ino),
+        access,
+        req.share_access,
+    ) {
+        Ok(r) => r,
+        Err(()) => {
+            // Lost a race with a conflicting open made since the check above.
+            // SAFETY: fd is not yet in the handle table; this is its only owner.
+            unsafe { libc::close(fd) };
+            err_resp(tx, h, status::SHARING_VIOLATION, chain);
+            return;
+        }
+    };
     // Prefetch hint for streamed file reads (helps cold-storage throughput).
     if !is_dir {
         vfs::advise_sequential(fd);
@@ -1639,6 +1704,9 @@ fn create(
         tree_id: chain.tree_id,
         is_dir,
         writable,
+        access,
+        share_reg,
+        locks: Vec::new(),
         delete_on_close,
         dir: None,
         oplock_ino: if grant_lease { Some(meta.ino) } else { None },
@@ -2257,7 +2325,7 @@ fn file_info(of: &vfs::OpenFile, class: u8, b: &mut Vec<u8>) -> u32 {
         5 => put_standard_info(b, &m, of.delete_on_close), // FileStandardInformation
         6 => b.p64(m.ino),                 // FileInternalInformation
         7 => b.p32(0),                     // FileEaInformation
-        8 => b.p32(MAXIMAL_ACCESS_ALL),    // FileAccessInformation
+        8 => b.p32(of.access),             // FileAccessInformation
         9 => {
             // FileNameInformation
             let name = utf16le(&format!("\\{}", of.rel));
@@ -2273,7 +2341,7 @@ fn file_info(of: &vfs::OpenFile, class: u8, b: &mut Vec<u8>) -> u32 {
             put_standard_info(b, &m, of.delete_on_close);
             b.p64(m.ino);
             b.p32(0); // Ea
-            b.p32(MAXIMAL_ACCESS_ALL);
+            b.p32(of.access);
             b.p64(0); // Position
             b.p32(0); // Mode
             b.p32(0); // Alignment
@@ -2462,6 +2530,17 @@ fn set_info(
     // (from other lease keys), plus a rename's replaced target.
     let own = vfs::fstat_meta(of.fd).ok().filter(|m| !m.is_dir).map(|m| (of.share_idx, m.ino));
     let mut broken: Vec<(u32, u64)> = Vec::new();
+    // The right each class needs on this handle (#90).
+    let needed = match class {
+        4 => FILE_WRITE_ATTRIBUTES,
+        10 | 13 => DELETE,
+        19 | 20 => FILE_WRITE_DATA,
+        _ => 0,
+    };
+    if of.access & needed != needed {
+        err_resp(tx, h, status::ACCESS_DENIED, chain);
+        return;
+    }
     let st = match class {
         4 => set_basic_info(of, data),
         13 => {
@@ -2653,28 +2732,108 @@ fn lock(sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx:
         return;
     }
 
-    // Batch semantics: all-or-nothing. Locks taken earlier in this request
-    // are unwound if a later element conflicts. Blocking waits degrade to
-    // immediate failure in v0.2 (clients retry).
-    let mut applied: Vec<(u64, u64)> = Vec::new();
-    let mut fail = status::SUCCESS;
-    for &(off, len, flags) in &elems {
-        let res = if flags & LOCKFLAG_UNLOCK != 0 {
-            vfs::range_lock(of.fd, off, len, vfs::LockKind::Unlock)
-        } else if flags & LOCKFLAG_EXCLUSIVE != 0 {
-            vfs::range_lock(of.fd, off, len, vfs::LockKind::Exclusive)
-        } else if flags & LOCKFLAG_SHARED != 0 {
-            vfs::range_lock(of.fd, off, len, vfs::LockKind::Shared)
+    // MS-SMB2 3.3.5.14: the first element decides whether the request is a
+    // series of unlocks or of locks; mixing them is invalid. Validate every
+    // element before changing anything.
+    let unlocking = elems[0].2 & LOCKFLAG_UNLOCK != 0;
+    for &(_, _, flags) in &elems {
+        let kind = flags & (LOCKFLAG_SHARED | LOCKFLAG_EXCLUSIVE | LOCKFLAG_UNLOCK);
+        let ok = if unlocking {
+            kind == LOCKFLAG_UNLOCK
         } else {
-            fail = status::INVALID_PARAMETER;
-            break;
+            kind == LOCKFLAG_SHARED || kind == LOCKFLAG_EXCLUSIVE
         };
-        match res {
-            Ok(()) => {
-                if flags & LOCKFLAG_UNLOCK == 0 {
-                    applied.push((off, len));
-                }
-            }
+        if !ok {
+            err_resp(tx, h, status::INVALID_PARAMETER, chain);
+            return;
+        }
+    }
+    let fail = if unlocking { unlock_ranges(of, &elems) } else { lock_ranges(of, &elems) };
+    if fail != status::SUCCESS {
+        err_resp(tx, h, fail, chain);
+        return;
+    }
+    begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
+    tx.p16(4);
+    tx.p16(0);
+}
+
+/// Locks a handle may hold at once (bounds the per-handle list).
+const MAX_LOCKS_PER_HANDLE: usize = 4096;
+
+fn ranges_overlap(a: (u64, u64), b: (u64, u64)) -> bool {
+    let (a_end, b_end) = (a.0.saturating_add(a.1), b.0.saturating_add(b.1));
+    a.1 != 0 && b.1 != 0 && a.0 < b_end && b.0 < a_end
+}
+
+/// The parts of `[off, off+len)` that none of `held` covers, in order.
+fn uncovered(off: u64, len: u64, held: &[(u64, u64, bool)]) -> Vec<(u64, u64)> {
+    let end = off.saturating_add(len);
+    let mut cover: Vec<(u64, u64)> = held
+        .iter()
+        .filter(|&&(o, l, _)| ranges_overlap((o, l), (off, len)))
+        .map(|&(o, l, _)| (o.max(off), o.saturating_add(l).min(end)))
+        .collect();
+    cover.sort_unstable();
+    let mut out = Vec::new();
+    let mut at = off;
+    for (s, e) in cover {
+        if s > at {
+            out.push((at, s - at));
+        }
+        at = at.max(e);
+    }
+    if at < end {
+        out.push((at, end - at));
+    }
+    out
+}
+
+/// Release, at the fd, the part of `range` no other lock of this handle
+/// still covers. The OFD lock state is the union of `of.locks`; an exclusive
+/// lock overlaps none of the handle's other locks, so what stays covered is
+/// shared and keeps its kernel lock untouched.
+fn release_uncovered(of: &vfs::OpenFile, off: u64, len: u64) {
+    for (o, l) in uncovered(off, len, &of.locks) {
+        let _ = vfs::range_lock(of.fd, o, l, vfs::LockKind::Unlock);
+    }
+}
+
+/// A series of unlocks: each must name a range this handle locked, exactly.
+/// Unlocks done before a failing element stay done (MS-SMB2 3.3.5.14.1).
+fn unlock_ranges(of: &mut vfs::OpenFile, elems: &[(u64, u64, u32)]) -> u32 {
+    for &(off, len, _) in elems {
+        let Some(i) = of.locks.iter().position(|&(o, l, _)| (o, l) == (off, len)) else {
+            return status::RANGE_NOT_LOCKED;
+        };
+        of.locks.remove(i);
+        release_uncovered(of, off, len);
+    }
+    status::SUCCESS
+}
+
+/// A series of locks, all or nothing. A failure undoes only the ranges this
+/// request added: locks the handle held before it are left exactly as they
+/// were (#90).
+fn lock_ranges(of: &mut vfs::OpenFile, elems: &[(u64, u64, u32)]) -> u32 {
+    let before = of.locks.len();
+    let mut fail = status::SUCCESS;
+    for &(off, len, flags) in elems {
+        let exclusive = flags & LOCKFLAG_EXCLUSIVE != 0;
+        if of.locks.len() >= MAX_LOCKS_PER_HANDLE {
+            fail = status::INSUFFICIENT_RESOURCES;
+            break;
+        }
+        // Against this handle's own locks (Windows: an exclusive lock
+        // overlaps no other lock, even the same handle's; shared locks may
+        // overlap each other). The kernel would merge or convert these.
+        if of.locks.iter().any(|&(o, l, x)| (exclusive || x) && ranges_overlap((o, l), (off, len))) {
+            fail = status::LOCK_NOT_GRANTED;
+            break;
+        }
+        let kind = if exclusive { vfs::LockKind::Exclusive } else { vfs::LockKind::Shared };
+        match vfs::range_lock(of.fd, off, len, kind) {
+            Ok(()) => of.locks.push((off, len, exclusive)),
             Err(e) if e == libc::EAGAIN || e == libc::EACCES => {
                 fail = status::LOCK_NOT_GRANTED;
                 break;
@@ -2686,15 +2845,12 @@ fn lock(sess: &mut SessionInner, h: &ReqHdr, body: &[u8], chain: &mut Chain, tx:
         }
     }
     if fail != status::SUCCESS {
-        for &(off, len) in applied.iter().rev() {
-            let _ = vfs::range_lock(of.fd, off, len, vfs::LockKind::Unlock);
+        while of.locks.len() > before {
+            let (off, len, _) = of.locks.pop().expect("len > before");
+            release_uncovered(of, off, len);
         }
-        err_resp(tx, h, fail, chain);
-        return;
     }
-    begin_resp(tx, h, status::SUCCESS, chain.related, chain.tree_id, chain.session_id);
-    tx.p16(4);
-    tx.p16(0);
+    fail
 }
 
 // ------------------------------------------------------------ CHANGE_NOTIFY

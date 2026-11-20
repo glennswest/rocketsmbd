@@ -1146,6 +1146,13 @@ mod tests {
     #[cfg(feature = "ntlm")]
     #[allow(clippy::too_many_arguments)]
     fn create_file(srv: &Srv, pc: &mut ProtoConn, sess: u64, tree: u32, name: &str, disp: u32, opts: u32, desired: u32) -> (u32, u64) {
+        create_shared(srv, pc, sess, tree, name, disp, opts, desired, 7)
+    }
+
+    /// CREATE with an explicit ShareAccess mask.
+    #[cfg(feature = "ntlm")]
+    #[allow(clippy::too_many_arguments)]
+    fn create_shared(srv: &Srv, pc: &mut ProtoConn, sess: u64, tree: u32, name: &str, disp: u32, opts: u32, desired: u32, share: u32) -> (u32, u64) {
         let n = utf16le(name);
         let mut f = req_hdr(CMD_CREATE, 10, tree, sess);
         f.p16(57);
@@ -1156,7 +1163,7 @@ mod tests {
         f.p64(0);
         f.p32(desired);
         f.p32(0);
-        f.p32(7);
+        f.p32(share);
         f.p32(disp);
         f.p32(opts);
         f.p16(120);
@@ -2426,4 +2433,196 @@ mod tests {
         assert!(handlers::smb1_negotiate_dialects(&bad).is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[cfg(feature = "ntlm")]
+    fn lock_req(srv: &Srv, pc: &mut ProtoConn, sess: u64, tree: u32, fid: u64, elems: &[(u64, u64, u32)]) -> u32 {
+        let mut f = req_hdr(CMD_LOCK, 14, tree, sess);
+        f.p16(48);
+        f.p16(elems.len() as u16);
+        f.p32(0);
+        f.p64(fid);
+        f.p64(fid);
+        for &(off, len, flags) in elems {
+            f.p64(off);
+            f.p64(len);
+            f.p32(flags);
+            f.p32(0);
+        }
+        roundtrip(srv, pc, f).status
+    }
+
+    /// #90 (04f8dfbec22b): SET_INFO needs the right on the handle, not just a
+    /// writable tree. A read-only handle can't delete, rename, retime or
+    /// truncate; DELETE_ON_CLOSE needs DELETE; FileAccessInformation reports
+    /// the access actually granted.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn set_info_requires_handle_access() {
+        let dir = tmp_share("access90");
+        let srv = test_srv(&dir);
+        std::fs::write(dir.join("f"), b"keep me").unwrap();
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let (sess, tree) = establish(&srv, &mut pc);
+        const OPEN: u32 = 1;
+        let read = 0x0012_0089; // FILE_GENERIC_READ
+        let (st, fid) = create_file(&srv, &mut pc, sess, tree, "f", OPEN, 0, read);
+        assert_eq!(st, status::SUCCESS);
+        let n = utf16le("g");
+        let mut rename: Vec<u8> = Vec::new();
+        rename.p8(1);
+        rename.zeros(7 + 8);
+        rename.p32(n.len() as u32);
+        rename.pbytes(&n);
+        let mut basic: Vec<u8> = Vec::new();
+        basic.p64(0);
+        basic.p64(0);
+        basic.p64(132_000_000_000_000_000); // LastWriteTime
+        basic.p64(0);
+        basic.p32(0);
+        basic.p32(0);
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 13, &[1]), status::ACCESS_DENIED, "delete");
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 10, &rename), status::ACCESS_DENIED, "rename");
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 4, &basic), status::ACCESS_DENIED, "times");
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 20, &0u64.to_le_bytes()), status::ACCESS_DENIED, "eof");
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 19, &0u64.to_le_bytes()), status::ACCESS_DENIED, "alloc");
+        // FileAccessInformation (class 8) = the granted mask.
+        let mut q = req_hdr(CMD_QUERY_INFO, 15, tree, sess);
+        q.p16(41);
+        q.p8(1);
+        q.p8(8);
+        q.p32(64);
+        q.p16(0);
+        q.p16(0);
+        q.p32(0);
+        q.p32(0);
+        q.p32(0);
+        q.p64(fid);
+        q.p64(fid);
+        let r = roundtrip(&srv, &mut pc, q);
+        assert_eq!(r.status, status::SUCCESS);
+        assert_eq!(u32::from_le_bytes(r.body[8..12].try_into().unwrap()), read);
+        assert_eq!(close_fid(&srv, &mut pc, sess, tree, fid), status::SUCCESS);
+        assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"keep me");
+        assert!(!dir.join("g").exists());
+
+        // DELETE_ON_CLOSE without DELETE is refused at CREATE.
+        let (st, _) = create_file(&srv, &mut pc, sess, tree, "f", OPEN, 0x1000, read);
+        assert_eq!(st, status::ACCESS_DENIED);
+        assert!(dir.join("f").exists());
+
+        // With the rights, each class works.
+        let (st, fid) = create_file(&srv, &mut pc, sess, tree, "f", OPEN, 0, 0x0001_0000 | 0x100 | 0x2 | read);
+        assert_eq!(st, status::SUCCESS);
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 4, &basic), status::SUCCESS);
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 20, &4u64.to_le_bytes()), status::SUCCESS);
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 10, &rename), status::SUCCESS);
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 13, &[1]), status::SUCCESS);
+        assert_eq!(close_fid(&srv, &mut pc, sess, tree, fid), status::SUCCESS);
+        assert!(!dir.join("g").exists() && !dir.join("f").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #90 (b5f20ac6f51b): CREATE enforces ShareAccess across connections. A
+    /// FILE_SHARE_NONE open keeps every data open out (and an OVERWRITE from
+    /// truncating the file); attribute-only opens still work; CLOSE releases.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn create_enforces_share_access() {
+        let dir = tmp_share("share90");
+        let srv = test_srv(&dir);
+        std::fs::write(dir.join("f"), b"exclusive").unwrap();
+        let mut pa = ProtoConn::new(&srv, 0, 1, 1);
+        let mut pb = ProtoConn::new(&srv, 0, 2, 1);
+        let (sa, ta) = establish(&srv, &mut pa);
+        let (sb, tb) = establish(&srv, &mut pb);
+        const OPEN: u32 = 1;
+        const OVERWRITE_IF: u32 = 5;
+        let (read, rw) = (0x0012_0089, 0x0012_019F);
+
+        let (st, fa) = create_shared(&srv, &mut pa, sa, ta, "f", OPEN, 0, rw, 0);
+        assert_eq!(st, status::SUCCESS);
+        assert_eq!(create_file(&srv, &mut pb, sb, tb, "f", OPEN, 0, read).0, status::SHARING_VIOLATION);
+        assert_eq!(create_file(&srv, &mut pb, sb, tb, "f", OVERWRITE_IF, 0, rw).0, status::SHARING_VIOLATION);
+        assert_eq!(std::fs::read(dir.join("f")).unwrap(), b"exclusive", "refused overwrite must not truncate");
+        // The same session's second open is refused too.
+        assert_eq!(create_file(&srv, &mut pa, sa, ta, "f", OPEN, 0, read).0, status::SHARING_VIOLATION);
+        // FILE_READ_ATTRIBUTES only: no data access, no conflict.
+        let (st, fattr) = create_file(&srv, &mut pb, sb, tb, "f", OPEN, 0, 0x80);
+        assert_eq!(st, status::SUCCESS);
+        assert_eq!(close_fid(&srv, &mut pb, sb, tb, fattr), status::SUCCESS);
+        assert_eq!(close_fid(&srv, &mut pa, sa, ta, fa), status::SUCCESS);
+
+        // Share read only: a second reader is fine, a writer and a deleter are not.
+        let (st, fa) = create_shared(&srv, &mut pa, sa, ta, "f", OPEN, 0, read, 1);
+        assert_eq!(st, status::SUCCESS);
+        let (st, fb) = create_file(&srv, &mut pb, sb, tb, "f", OPEN, 0, read);
+        assert_eq!(st, status::SUCCESS);
+        assert_eq!(create_file(&srv, &mut pb, sb, tb, "f", OPEN, 0, rw).0, status::SHARING_VIOLATION);
+        assert_eq!(create_file(&srv, &mut pb, sb, tb, "f", OPEN, 0, 0x0001_0000).0, status::SHARING_VIOLATION);
+        assert_eq!(close_fid(&srv, &mut pb, sb, tb, fb), status::SUCCESS);
+        // A newcomer that won't share read collides with the existing reader.
+        assert_eq!(create_shared(&srv, &mut pb, sb, tb, "f", OPEN, 0, read, 2).0, status::SHARING_VIOLATION);
+        assert_eq!(close_fid(&srv, &mut pa, sa, ta, fa), status::SUCCESS);
+
+        // Released on CLOSE, and when a connection's sessions end.
+        let (st, _fa) = create_shared(&srv, &mut pa, sa, ta, "f", OPEN, 0, rw, 0);
+        assert_eq!(st, status::SUCCESS);
+        handlers::teardown_conn(&srv, &mut pa);
+        let (st, fb) = create_shared(&srv, &mut pb, sb, tb, "f", OPEN, 0, rw, 0);
+        assert_eq!(st, status::SUCCESS, "the dropped connection's open is gone");
+        assert_eq!(close_fid(&srv, &mut pb, sb, tb, fb), status::SUCCESS);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #90 (d2f790ab3e00): a LOCK request that fails undoes only what it
+    /// added; locks the handle held before stay held. Mixed lock/unlock
+    /// requests are invalid; an unlock must name a held range.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn failed_lock_keeps_prior_locks() {
+        let dir = tmp_share("lock90");
+        let srv = test_srv(&dir);
+        std::fs::write(dir.join("f"), vec![0u8; 1024]).unwrap();
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let (sess, tree) = establish(&srv, &mut pc);
+        const OPEN: u32 = 1;
+        const SH: u32 = 1;
+        const EX: u32 = 2;
+        const UN: u32 = 4;
+        let rw = 0x0012_019F;
+        let (_, h1) = create_file(&srv, &mut pc, sess, tree, "f", OPEN, 0, rw);
+        let (_, h2) = create_file(&srv, &mut pc, sess, tree, "f", OPEN, 0, rw);
+        let lk = |pc: &mut ProtoConn, fid: u64, e: &[(u64, u64, u32)]| lock_req(&srv, pc, sess, tree, fid, e);
+
+        assert_eq!(lk(&mut pc, h1, &[(0, 100, SH)]), status::SUCCESS);
+        assert_eq!(lk(&mut pc, h2, &[(200, 100, EX)]), status::SUCCESS);
+        // [50,150) shared is granted (overlaps h1's own shared lock), then
+        // [250,260) collides with h2: the request fails and is undone.
+        assert_eq!(lk(&mut pc, h1, &[(50, 100, SH), (250, 10, SH)]), status::LOCK_NOT_GRANTED);
+        // h1's earlier [0,100) shared lock is intact, all of it...
+        assert_eq!(lk(&mut pc, h2, &[(0, 10, EX)]), status::LOCK_NOT_GRANTED);
+        assert_eq!(lk(&mut pc, h2, &[(60, 30, EX)]), status::LOCK_NOT_GRANTED);
+        // ...and only the part the failed request added is free again.
+        assert_eq!(lk(&mut pc, h2, &[(100, 50, EX)]), status::SUCCESS);
+        assert_eq!(lk(&mut pc, h2, &[(100, 50, UN)]), status::SUCCESS);
+
+        // An exclusive lock overlaps no other lock, even the same handle's.
+        assert_eq!(lk(&mut pc, h1, &[(10, 10, EX)]), status::LOCK_NOT_GRANTED);
+        // Mixed lock/unlock: invalid, nothing changes.
+        assert_eq!(lk(&mut pc, h1, &[(0, 100, UN), (400, 10, EX)]), status::INVALID_PARAMETER);
+        assert_eq!(lk(&mut pc, h2, &[(0, 10, EX)]), status::LOCK_NOT_GRANTED, "unlock in a mixed request not applied");
+        assert_eq!(lk(&mut pc, h1, &[(400, 10, EX), (0, 100, UN)]), status::INVALID_PARAMETER);
+        assert_eq!(lk(&mut pc, h2, &[(400, 10, EX)]), status::SUCCESS, "lock in a mixed request not applied");
+        // Unlock must match a held range exactly.
+        assert_eq!(lk(&mut pc, h1, &[(0, 50, UN)]), status::RANGE_NOT_LOCKED);
+        // Overlapping shared locks: unlocking one keeps the other's bytes.
+        assert_eq!(lk(&mut pc, h1, &[(80, 40, SH)]), status::SUCCESS);
+        assert_eq!(lk(&mut pc, h1, &[(0, 100, UN)]), status::SUCCESS);
+        assert_eq!(lk(&mut pc, h2, &[(0, 80, EX)]), status::SUCCESS, "[0,80) released");
+        assert_eq!(lk(&mut pc, h2, &[(90, 10, EX)]), status::LOCK_NOT_GRANTED, "[80,120) still held");
+        assert_eq!(lk(&mut pc, h1, &[(80, 40, UN)]), status::SUCCESS);
+        assert_eq!(lk(&mut pc, h2, &[(90, 10, EX)]), status::SUCCESS);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
 }

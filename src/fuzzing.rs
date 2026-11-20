@@ -38,6 +38,7 @@ pub fn srv_from_toml(raw: &str) -> Srv {
         sessions: crate::session::Registry::default(),
         mailboxes: vec![],
         leases: crate::lease::LeaseTable::default(),
+        share_modes: Default::default(),
     }
 }
 

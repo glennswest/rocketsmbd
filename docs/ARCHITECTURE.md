@@ -27,7 +27,7 @@ Requests are served one at a time with a 2 s timeout and a 4 KiB cap.
 
 A connection lives its whole life on one worker, and its connection and
 protocol state (`Conn`, `ProtoConn`) is touched only by that worker. Workers do
-share three things through `Arc<Srv>`:
+share four things through `Arc<Srv>`:
 
 - the read-only config and share table;
 - the **session registry** (`src/session.rs`, `Mutex`). Sessions and their open
@@ -40,7 +40,27 @@ share three things through `Arc<Srv>`:
 - the **lease table** (`src/lease.rs`, `Mutex`) keyed by `(share_idx, ino)`, plus
   a per-worker **break mailbox**: an MPSC queue plus an eventfd polled in each
   ring, so a WRITE on worker B can deliver a lease-break to a connection on
-  worker A. See docs/OPLOCKS.md.
+  worker A. See docs/OPLOCKS.md;
+- the **share-mode table** (`src/sharemode.rs`, `Mutex`) keyed by
+  `(st_dev, st_ino)`: every open with data access (read, write, append,
+  execute, delete) records its granted access and its ShareAccess, and a
+  CREATE that conflicts either way gets STATUS_SHARING_VIOLATION (MS-FSA
+  2.1.5.1.2.1). A conflicting OVERWRITE is refused before the file is
+  truncated. The record is held by the handle and dropped with it.
+
+Each handle also keeps the access CREATE granted (generic rights mapped,
+MAXIMUM_ALLOWED resolved). SET_INFO checks it per class: basic information
+needs FILE_WRITE_ATTRIBUTES, rename and disposition need DELETE, end-of-file
+and allocation need FILE_WRITE_DATA. FileAccessInformation reports it.
+
+Byte-range locks are OFD locks on the handle's fd, and the handle keeps its
+granted SMB locks as a list. As on Windows, an exclusive lock overlaps no
+other lock, not even one on the same handle, while shared locks may overlap.
+So the fd's kernel lock state is exactly the union of the list. A LOCK
+request is either all locks or all unlocks (mixed is INVALID_PARAMETER). A
+failed lock request unlocks only the bytes it added that no earlier lock
+covers, so locks held before it are untouched. An unlock must name a held
+range exactly (else RANGE_NOT_LOCKED).
 
 READ I/O runs without holding the session lock (the fd is dup'd under the
 lock, then the read proceeds lock-free), so reads on different channels don't
