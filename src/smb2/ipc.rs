@@ -186,7 +186,7 @@ fn close(pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], ch
         err_resp(tx, h, status::INVALID_PARAMETER, chain);
         return;
     };
-    if !sess.pipes.get(&fid).is_some_and(|p| p.tree_id == chain.tree_id) {
+    if sess.pipes.get(&fid).is_none_or(|p| p.tree_id != chain.tree_id) {
         err_resp(tx, h, status::FILE_CLOSED, chain);
         return;
     }
@@ -200,7 +200,7 @@ fn close(pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, msg: &[u8], ch
     tx.zeros(52);
 }
 
-fn pipe_of<'a>(sess: &'a mut SessionInner, fid: u64, tree_id: u32) -> Option<&'a mut PipeOpen> {
+fn pipe_of(sess: &mut SessionInner, fid: u64, tree_id: u32) -> Option<&mut PipeOpen> {
     sess.pipes.get_mut(&fid).filter(|p| p.tree_id == tree_id)
 }
 

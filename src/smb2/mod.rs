@@ -1144,6 +1144,7 @@ mod tests {
     }
 
     #[cfg(feature = "ntlm")]
+    #[allow(clippy::too_many_arguments)]
     fn create_file(srv: &Srv, pc: &mut ProtoConn, sess: u64, tree: u32, name: &str, disp: u32, opts: u32, desired: u32) -> (u32, u64) {
         let n = utf16le(name);
         let mut f = req_hdr(CMD_CREATE, 10, tree, sess);
@@ -1889,10 +1890,10 @@ mod tests {
         neg.p16(0);
         neg.p16(0x0311); // dialect
                          // pad to 8 from header start
-        while (neg.len() - neg_body) % 8 != 0 {
+        while !(neg.len() - neg_body).is_multiple_of(8) {
             neg.p16(0);
         }
-        let ctx_off = neg.len() - 0; // offset from SMB2 header start (frame base)
+        let ctx_off = neg.len(); // offset from SMB2 header start (frame base)
         // PREAUTH_INTEGRITY_CAPABILITIES context
         neg.p16(1); // type
         neg.p16(38); // data length
@@ -2329,7 +2330,7 @@ mod tests {
         assert!(!closed);
         let plain = decrypt_transform(&tx[4..], &EncCtx { c2s: enc.s2c, ..enc.clone() }).expect("sealed LOGOFF reply");
         assert_eq!(u32::from_le_bytes(plain[8..12].try_into().unwrap()), status::SUCCESS);
-        assert!(pc.channels.get(&sid).is_none());
+        assert!(!pc.channels.contains_key(&sid));
         std::fs::remove_dir_all(&dir).ok();
     }
 
