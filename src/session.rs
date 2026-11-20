@@ -23,6 +23,9 @@ pub struct SessionInner {
     /// channels derive their signing keys from this, regardless of the
     /// per-channel KEY_EXCH randomness in a binding auth.
     pub session_key: [u8; 16],
+    /// The key handed to RPC on a named pipe (#83): Session.ApplicationKey
+    /// on SMB 3.x, the session key on 2.x.
+    pub app_key: [u8; 16],
     pub established: bool,
     pub guest: bool,
     pub signing_required: bool,
@@ -34,6 +37,9 @@ pub struct SessionInner {
     pub trees: HashMap<u32, Tree>,
     pub next_tree_id: u32,
     pub handles: HandleTable,
+    /// Open IPC$ named pipes by FileId (#83).
+    pub pipes: HashMap<u64, crate::pipe::PipeOpen>,
+    pub next_pipe_id: u64,
     /// Number of channels (connections) currently bound to this session.
     pub channels: u32,
 }
@@ -42,6 +48,7 @@ impl SessionInner {
     fn new() -> Self {
         Self {
             session_key: [0; 16],
+            app_key: [0; 16],
             established: false,
             guest: false,
             signing_required: false,
@@ -51,6 +58,8 @@ impl SessionInner {
             trees: HashMap::new(),
             next_tree_id: 0,
             handles: HandleTable::default(),
+            pipes: HashMap::new(),
+            next_pipe_id: 0,
             channels: 0,
         }
     }

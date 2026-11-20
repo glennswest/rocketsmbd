@@ -30,6 +30,9 @@ const OP_INOTIFY: u8 = 6;
 const OP_CANCEL: u8 = 7;
 /// Worker-level op: the per-worker break mailbox eventfd fired.
 const OP_WAKE: u8 = 8;
+/// A pended IPC$ pipe read's backend socket polled readable (#83); the slot
+/// field carries the wait's key.
+const OP_PIPE: u8 = 9;
 
 const IN_MASK: u32 = libc::IN_CREATE
     | libc::IN_DELETE
@@ -142,6 +145,16 @@ struct Watch {
     pend: crate::smb2::NotifyPend,
 }
 
+/// A pipe read pended in the reactor (#83): a POLL_ADD on `pend.fd`, a dup
+/// of the backend socket that this wait owns.
+struct PipeWait {
+    key: u16,
+    pend: crate::smb2::PipePend,
+    /// Ended by CANCEL / CLOSE / teardown: its final response (if any) has
+    /// gone out and the poll has been asked to cancel.
+    ended: bool,
+}
+
 struct Conn {
     fd: RawFd,
     gen: u16,
@@ -183,6 +196,9 @@ struct Conn {
     closing: bool,
     /// Whether the parked inotify Read has been asked to cancel.
     inotify_cancelled: bool,
+    /// Pended IPC$ pipe reads, each with a poll armed (#83).
+    pipe_waits: Vec<PipeWait>,
+    next_pipe_key: u16,
 }
 
 impl Drop for Conn {
@@ -208,6 +224,10 @@ impl Drop for Conn {
         }
         if let Some(plan) = self.pending_zc.take() {
             unsafe { libc::close(plan.fd) };
+        }
+        // Each pipe wait owns its dup of the backend socket.
+        for wt in self.pipe_waits.drain(..) {
+            unsafe { libc::close(wt.pend.fd) };
         }
     }
 }
@@ -502,7 +522,7 @@ fn deliver_break(ring: &mut IoUring, w: &mut Worker, b: crate::lease::BreakMsg) 
 }
 
 fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32, flags: u32) {
-    let (op, idx, gen, _slot) = ud_parts(udata);
+    let (op, idx, gen, slot) = ud_parts(udata);
     if op == OP_ACCEPT {
         // Multishot accept stays armed (F_MORE set); only re-arm when it has
         // terminated. Oneshot accept never sets F_MORE, so it always re-arms.
@@ -556,6 +576,7 @@ fn handle_cqe(ring: &mut IoUring, w: &mut Worker, udata: u64, res: i32, flags: u
         OP_SPLICE_IN => on_splice_in(ring, w, idx, res),
         OP_SPLICE_OUT => on_splice_out(ring, w, idx, res),
         OP_INOTIFY => on_inotify(ring, w, idx, res),
+        OP_PIPE => on_pipe_poll(ring, w, idx, slot, res),
         _ => {}
     }
 }
@@ -620,6 +641,8 @@ fn on_accept(ring: &mut IoUring, w: &mut Worker, fd: RawFd) {
         close_after_send: false,
         closing: false,
         inotify_cancelled: false,
+        pipe_waits: Vec::new(),
+        next_pipe_key: 0,
     });
     logd!("worker {}: new connection (slot {idx})", w.wid);
     maybe_arm_recv(ring, w, idx);
@@ -642,6 +665,11 @@ fn close_conn_ring(ring: &mut IoUring, w: &mut Worker, idx: usize) {
             .build()
             .user_data(ud(OP_CANCEL, 0xFF_FFFF, 0, 0));
         sq_push(ring, &e); // not counted; sentinel completion is ignored
+    }
+    // Armed pipe polls only complete when the backend speaks: cancel them.
+    for wt in c.pipe_waits.iter_mut().filter(|wt| !wt.ended) {
+        wt.ended = true;
+        cancel_op(ring, ud(OP_PIPE, idx, c.gen, wt.key));
     }
     if c.inflight == 0 {
         finalize_close(w, idx);
@@ -806,6 +834,10 @@ fn drive(ring: &mut IoUring, w: &mut Worker, idx: usize) {
         if !c.proto.notify_new.is_empty() || !c.proto.notify_done.is_empty() {
             service_notify(ring, w, idx);
         }
+        let c = conn_mut(w, idx);
+        if !c.proto.pipe_new.is_empty() || !c.proto.pipe_done.is_empty() {
+            service_pipes(ring, c, idx);
+        }
         match action {
             FrameAction::Respond => {}
             FrameAction::Close => {
@@ -841,6 +873,12 @@ fn drive(ring: &mut IoUring, w: &mut Worker, idx: usize) {
         }
     }
     let c = conn_mut(w, idx);
+    // Completions these frames produced (a CANCEL'd notify or pipe read has
+    // no response of its own) go out with this batch, not at the next event.
+    while c.tx.len() < TX_FLUSH {
+        let Some(d) = c.deferred.pop_front() else { break };
+        c.tx.extend_from_slice(&d);
+    }
     if !c.tx.is_empty() {
         start_send(ring, w, idx);
     }
@@ -898,6 +936,81 @@ fn service_notify(ring: &mut IoUring, w: &mut Worker, idx: usize) {
                 smb2::build_notify_final(&mut c.proto, &watch.pend.meta, d.status, &[], watch.pend.out_len);
             c.deferred.push_back(resp);
         }
+    }
+}
+
+/// Ask the kernel to cancel the op with user_data `target`. The cancel's own
+/// completion is not counted (its sentinel is ignored); the cancelled op
+/// still completes (-ECANCELED) and is accounted then.
+fn cancel_op(ring: &mut IoUring, target: u64) {
+    let e = opcode::AsyncCancel::new(target)
+        .build()
+        .user_data(ud(OP_CANCEL, 0xFF_FFFF, 0, 0));
+    sq_push(ring, &e);
+}
+
+/// Drain the protocol layer's pipe queues (#83): arm a poll for each new
+/// pend; answer and cancel the ones CANCEL / CLOSE ended.
+fn service_pipes(ring: &mut IoUring, c: &mut Conn, idx: usize) {
+    for pend in std::mem::take(&mut c.proto.pipe_new) {
+        let key = loop {
+            c.next_pipe_key = c.next_pipe_key.wrapping_add(1);
+            let k = c.next_pipe_key;
+            if !c.pipe_waits.iter().any(|wt| wt.key == k) {
+                break k;
+            }
+        };
+        c.pipe_waits.push(PipeWait { key, pend, ended: false });
+        arm_pipe(ring, c, idx, key);
+    }
+    for d in std::mem::take(&mut c.proto.pipe_done) {
+        if let Some(wt) = c.pipe_waits.iter_mut().find(|wt| wt.pend.async_id == d.async_id && !wt.ended) {
+            wt.ended = true;
+            cancel_op(ring, ud(OP_PIPE, idx, c.gen, wt.key));
+            let resp = smb2::ipc::pipe_end(&mut c.proto, &wt.pend, d.status);
+            c.deferred.push_back(resp);
+        }
+    }
+}
+
+fn arm_pipe(ring: &mut IoUring, c: &mut Conn, idx: usize, key: u16) {
+    let Some(wt) = c.pipe_waits.iter().find(|wt| wt.key == key) else {
+        return;
+    };
+    let mask = (libc::POLLIN | libc::POLLRDHUP) as u32;
+    let e = opcode::PollAdd::new(types::Fd(wt.pend.fd), mask)
+        .build()
+        .user_data(ud(OP_PIPE, idx, c.gen, key));
+    c.inflight += 1;
+    sq_push(ring, &e);
+}
+
+fn on_pipe_poll(ring: &mut IoUring, w: &mut Worker, idx: usize, key: u16, res: i32) {
+    let srv = Arc::clone(&w.srv);
+    let c = conn_mut(w, idx);
+    let Some(pos) = c.pipe_waits.iter().position(|wt| wt.key == key) else {
+        return;
+    };
+    let active = c.proto.pipe_active.iter().any(|&(_, a)| a == c.pipe_waits[pos].pend.async_id);
+    if c.pipe_waits[pos].ended || !active || res == -libc::ECANCELED {
+        let wt = c.pipe_waits.swap_remove(pos);
+        // SAFETY: the wait owns this dup and its poll has just completed.
+        unsafe { libc::close(wt.pend.fd) };
+        return;
+    }
+    // Readable, hung up or errored: pipe_ready reads the socket and tells
+    // which (an error surfaces as a broken pipe).
+    match smb2::ipc::pipe_ready(&srv, &mut c.proto, &c.pipe_waits[pos].pend) {
+        Some(resp) => {
+            let wt = c.pipe_waits.swap_remove(pos);
+            // SAFETY: as above.
+            unsafe { libc::close(wt.pend.fd) };
+            c.deferred.push_back(resp);
+            if matches!(c.txm, Tx::Idle) {
+                drive(ring, w, idx);
+            }
+        }
+        None => arm_pipe(ring, c, idx, key),
     }
 }
 

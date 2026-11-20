@@ -16,6 +16,7 @@ pub mod health;
 pub mod krb5;
 pub mod net;
 pub mod pac;
+pub mod pipe;
 #[cfg(feature = "ntlm")]
 pub mod ntlm;
 pub mod session;

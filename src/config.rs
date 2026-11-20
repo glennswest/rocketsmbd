@@ -77,6 +77,10 @@ pub struct Config {
     /// Kerberos/GSS settings (used only in a `kerberos`-feature build).
     #[serde(default)]
     pub kerberos: Option<KerberosCfg>,
+    /// IPC$ named pipes forwarded to an RPC backend (#83). Unset: no pipe
+    /// can be opened.
+    #[serde(default)]
+    pub ipc: Option<IpcCfg>,
     #[serde(rename = "share")]
     pub shares: Vec<ShareCfg>,
     #[serde(rename = "user", default)]
@@ -167,6 +171,53 @@ impl KerberosCfg {
             }
         }
         Ok(())
+    }
+}
+
+/// `[ipc]`: named pipes on IPC$ whose DCE/RPC traffic goes to a backend
+/// (irondirectory's `iron-rpcd`) over a Unix stream socket (#83). Only a
+/// Unix socket: the preamble carries the session key (docs/IPC-PIPES.md).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IpcCfg {
+    /// Absolute path of the backend's listening Unix stream socket.
+    pub backend: PathBuf,
+    /// Pipe names served (case-insensitive, without `\PIPE\`).
+    #[serde(default = "default_pipes")]
+    pub pipes: Vec<String>,
+}
+
+fn default_pipes() -> Vec<String> {
+    vec!["samr".into(), "lsarpc".into(), "netlogon".into()]
+}
+
+impl IpcCfg {
+    fn validate(&self) -> Result<(), String> {
+        if !self.backend.is_absolute() {
+            return Err(format!("[ipc] backend {:?}: must be an absolute socket path", self.backend));
+        }
+        // sun_path is 108 bytes including the NUL.
+        if self.backend.as_os_str().len() > 107 {
+            return Err(format!("[ipc] backend {:?}: longer than a Unix socket path allows (107 bytes)", self.backend));
+        }
+        if self.pipes.is_empty() {
+            return Err("[ipc] pipes: list at least one pipe name".into());
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for p in &self.pipes {
+            let lower = p.to_lowercase();
+            if p.is_empty() || p.contains(['\\', '/']) || seen.contains(&lower) {
+                return Err(format!("[ipc] pipes: invalid or duplicate pipe name {p:?}"));
+            }
+            seen.push(lower);
+        }
+        Ok(())
+    }
+
+    /// The configured name `name` matches (case-insensitive), lowercased.
+    pub fn served(&self, name: &str) -> Option<String> {
+        let lower = name.to_lowercase();
+        self.pipes.iter().any(|p| p.to_lowercase() == lower).then_some(lower)
     }
 }
 
@@ -287,6 +338,9 @@ impl Config {
         }
         if let Some(k) = &self.kerberos {
             k.validate()?;
+        }
+        if let Some(i) = &self.ipc {
+            i.validate()?;
         }
         crate::authz::validate(self)?;
         Ok(())

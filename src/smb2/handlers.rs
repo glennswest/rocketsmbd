@@ -173,6 +173,9 @@ pub fn dispatch(
             };
             if h.command == CMD_TREE_DISCONNECT {
                 sess.trees.remove(&chain.tree_id);
+                if tree.ipc {
+                    super::ipc::close_tree(pc, &mut sess, chain.tree_id);
+                }
                 // The tree's opens close with it.
                 let ids = sess.handles.ids_in_tree(chain.tree_id);
                 for fid in ids {
@@ -186,10 +189,7 @@ pub fn dispatch(
             }
             if tree.ipc {
                 drop(sess);
-                match h.command {
-                    CMD_IOCTL => ioctl(srv, pc, h, msg, chain, tx),
-                    _ => err_resp(tx, h, status::ACCESS_DENIED, chain),
-                }
+                super::ipc::dispatch(srv, pc, &sref, h, msg, chain, tx);
                 return None;
             }
             let share = &srv.cfg.shares[tree.share_idx as usize];
@@ -304,6 +304,8 @@ pub fn end_session(srv: &Srv, sid: u64) {
         let opens = {
             let mut s = sref.lock().unwrap();
             s.trees.clear();
+            // Dropping a pipe shuts its backend socket down (#83).
+            s.pipes.clear();
             s.handles.take_all()
         };
         for of in opens {
@@ -340,8 +342,9 @@ pub fn teardown_conn(srv: &Srv, pc: &mut ProtoConn) {
     }
 }
 
-/// CANCEL: no response of its own; a matching pended operation completes
-/// with STATUS_CANCELLED via the notify queues.
+/// CANCEL: no response of its own; a matching pended operation (a
+/// CHANGE_NOTIFY or a pipe read) completes with STATUS_CANCELLED via the
+/// notify / pipe queues.
 fn cancel(pc: &mut ProtoConn, h: &ReqHdr) {
     let Some(aid) = h.async_id else {
         return; // sync cancel of an already-completed op: nothing pended
@@ -349,6 +352,10 @@ fn cancel(pc: &mut ProtoConn, h: &ReqHdr) {
     if let Some(pos) = pc.notify_active.iter().position(|&(_, a)| a == aid) {
         let (_, async_id) = pc.notify_active.remove(pos);
         pc.notify_done.push(crate::smb2::NotifyDone { async_id, status: status::CANCELLED });
+    }
+    if let Some(pos) = pc.pipe_active.iter().position(|&(_, a)| a == aid) {
+        let (_, async_id) = pc.pipe_active.remove(pos);
+        pc.pipe_done.push(crate::smb2::NotifyDone { async_id, status: status::CANCELLED });
     }
 }
 
@@ -963,6 +970,7 @@ fn ntlm_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], cha
                     {
                         let mut s = sref.lock().unwrap();
                         s.session_key = key;
+                        s.app_key = crate::smb2::derive_app_key(dialect, &key, &ch_preauth);
                         s.established = true;
                         s.guest = false;
                         s.signing_required = signing_required;
@@ -1201,6 +1209,7 @@ fn kerberos_session_setup(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8],
     {
         let mut s = sref.lock().unwrap();
         s.session_key = key;
+        s.app_key = crate::smb2::derive_app_key(dialect, &key, &ch_preauth);
         s.established = true;
         s.guest = false;
         s.signing_required = signing_required;
@@ -1364,6 +1373,11 @@ struct CreateReq {
     /// Parsed RqLs lease request, if present.
     #[allow(dead_code)]
     lease: Option<LeaseReq>,
+}
+
+/// The name a CREATE request opens (IPC$ pipes, #83).
+pub(super) fn create_name(msg: &[u8]) -> Option<String> {
+    parse_create(msg).map(|r| r.name)
 }
 
 fn parse_create(msg: &[u8]) -> Option<CreateReq> {
@@ -2748,7 +2762,7 @@ fn change_notify(pc: &mut ProtoConn, sess: &mut SessionInner, h: &ReqHdr, body: 
 
 // -------------------------------------------------------------------- IOCTL
 
-fn ioctl(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
+pub(super) fn ioctl(srv: &Srv, pc: &mut ProtoConn, h: &ReqHdr, msg: &[u8], chain: &mut Chain, tx: &mut Vec<u8>) {
     let parsed = (|| {
         let body = &msg[64..];
         let mut r = Rdr::new(body);

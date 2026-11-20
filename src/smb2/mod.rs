@@ -6,6 +6,7 @@
 //! splice; everything else is answered from the tx buffer.
 
 pub mod handlers;
+pub mod ipc;
 
 use std::collections::HashMap;
 use std::os::fd::RawFd;
@@ -224,6 +225,23 @@ pub struct NotifyPend {
     pub meta: AsyncMeta,
 }
 
+/// A READ or FSCTL_PIPE_TRANSCEIVE on an IPC$ pipe waiting for the backend
+/// (#83). The reactor polls `fd` (a dup of the backend socket, owned by the
+/// pend and closed by the reactor) and calls [`ipc::pipe_ready`] when it is
+/// readable.
+#[derive(Debug, Clone)]
+pub struct PipePend {
+    pub async_id: u64,
+    pub fid: u64,
+    pub tree_id: u32,
+    pub fd: RawFd,
+    /// The client's buffer (READ Length / IOCTL MaxOutputResponse).
+    pub max: u32,
+    /// CMD_READ or CMD_IOCTL: which response body completes it.
+    pub cmd: u16,
+    pub meta: AsyncMeta,
+}
+
 #[derive(Debug, Clone)]
 pub struct NotifyDone {
     pub async_id: u64,
@@ -268,6 +286,12 @@ pub struct ProtoConn {
     pub notify_done: Vec<NotifyDone>,
     /// Live pends: (fid, async_id) — owned here so CLOSE/CANCEL can find them.
     pub notify_active: Vec<(u64, u64)>,
+    /// Pipe reads to pend in the reactor (drained each frame, #83).
+    pub pipe_new: Vec<PipePend>,
+    /// Pipe pends to end with a status (cancel / handle close).
+    pub pipe_done: Vec<NotifyDone>,
+    /// Live pipe pends: (fid, async_id).
+    pub pipe_active: Vec<(u64, u64)>,
     /// This connection's location in the reactor, so a lease/oplock break
     /// raised on another worker can be routed back here (worker id + the
     /// connection's slot index + generation guard). See `crate::lease`.
@@ -307,6 +331,9 @@ impl ProtoConn {
             notify_new: Vec::new(),
             notify_done: Vec::new(),
             notify_active: Vec::new(),
+            pipe_new: Vec::new(),
+            pipe_done: Vec::new(),
+            pipe_active: Vec::new(),
             wid,
             conn_idx,
             conn_gen,
@@ -439,6 +466,18 @@ pub fn verify_signature(msg: &[u8], sc: &SignCtx) -> bool {
     sig.iter().zip(&msg[48..64]).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0
 }
 
+/// The key an application (RPC over a named pipe, #83) gets as the session
+/// key: Session.ApplicationKey on SMB 3.x (MS-SMB2 3.3.5.5.3: "SMB2APP" /
+/// "SmbRpc" on 3.0 and 3.0.2, "SMBAppKey" over the session's preauth hash on
+/// 3.1.1), the session key itself on 2.x.
+pub fn derive_app_key(dialect: u16, session_key: &[u8; 16], preauth: &[u8; 64]) -> [u8; 16] {
+    match dialect {
+        0x0311 => crypto::kdf128(session_key, b"SMBAppKey\0", preauth),
+        0x0300 | 0x0302 => crypto::kdf128(session_key, b"SMB2APP\0", b"SmbRpc\0"),
+        _ => *session_key,
+    }
+}
+
 /// Derive the SMB2/3 signing context for `dialect` from a 16-byte session key.
 pub fn derive_sign_ctx(dialect: u16, session_key: &[u8; 16], preauth: &[u8; 64]) -> SignCtx {
     match dialect {
@@ -520,8 +559,6 @@ pub fn build_notify_final(
     events: &[(u32, String)],
     out_len: u32,
 ) -> Vec<u8> {
-    let mut tx = Vec::with_capacity(256);
-    tx.zeros(4);
     let mut data: Vec<u8> = Vec::new();
     if st == status::SUCCESS && !events.is_empty() {
         let mut entry_starts: Vec<usize> = Vec::new();
@@ -543,18 +580,30 @@ pub fn build_notify_final(
         }
     }
     if st == status::SUCCESS && !events.is_empty() && data.len() <= out_len as usize {
-        let start = begin_resp_async(&mut tx, meta, st, 0, CMD_CHANGE_NOTIFY);
-        tx.p16(9);
-        tx.p16(72);
-        tx.p32(data.len() as u32);
-        tx.pbytes(&data);
-        finalize_async(pc, meta, &mut tx, start);
+        let mut body = Vec::with_capacity(8 + data.len());
+        body.p16(9);
+        body.p16(72);
+        body.p32(data.len() as u32);
+        body.pbytes(&data);
+        build_async_final(pc, meta, st, CMD_CHANGE_NOTIFY, Some(&body))
     } else {
         let final_st = if st == status::SUCCESS { status::NOTIFY_ENUM_DIR } else { st };
-        let start = begin_resp_async(&mut tx, meta, final_st, 0, CMD_CHANGE_NOTIFY);
-        err_body(&mut tx);
-        finalize_async(pc, meta, &mut tx, start);
+        build_async_final(pc, meta, final_st, CMD_CHANGE_NOTIFY, None)
     }
+}
+
+/// A complete (NBT-framed, signed or sealed as the channel requires) final
+/// response to a pended request: `body` after the async header, or the
+/// error body when `None`.
+pub fn build_async_final(pc: &mut ProtoConn, meta: &AsyncMeta, st: u32, cmd: u16, body: Option<&[u8]>) -> Vec<u8> {
+    let mut tx = Vec::with_capacity(128 + body.map_or(0, |b| b.len()));
+    tx.zeros(4);
+    let start = begin_resp_async(&mut tx, meta, st, 0, cmd);
+    match body {
+        Some(b) => tx.pbytes(b),
+        None => err_body(&mut tx),
+    }
+    finalize_async(pc, meta, &mut tx, start);
     // On an encrypting channel the completion goes out sealed, like every
     // other response there; it used to go out in cleartext (#39 R13).
     if let Some(ch) = pc.channels.get_mut(&meta.session_id) {
