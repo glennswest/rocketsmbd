@@ -8,7 +8,7 @@
   - WRITE, READ and FSCTL_PIPE_TRANSCEIVE pass DCE/RPC bytes through. Each read returns one fragment, with STATUS_BUFFER_OVERFLOW for a short buffer.
   - A read whose reply hasn't arrived answers STATUS_PENDING. The worker's ring polls a dup of the backend socket (no blocking on the reactor), and CANCEL and CLOSE end the wait.
   - Pipes are refused on guest sessions and on any request that is neither signed nor sealed.
-  - Without `[ipc]`, a CREATE on IPC$ now answers OBJECT_NAME_NOT_FOUND (it was ACCESS_DENIED).
+  - Without `[ipc]`, an authenticated, signed or sealed CREATE on IPC$ now answers OBJECT_NAME_NOT_FOUND (it was ACCESS_DENIED). Guest and unsigned ones still get ACCESS_DENIED.
   - Covered by unit tests (`src/pipe.rs`, and `src/smb2/ipc.rs` through `process_frame`) and by `ipc-pipe-forward` in the `rocketsmbd-test` short suite over the real reactor.
   - Not yet tried with impacket or Windows, or against `iron-rpcd`.
 - **fix:** An async completion that a frame produced with no response of its own (a CANCEL'd CHANGE_NOTIFY) used to wait in the reactor's deferred queue until the connection's next event. It now goes out with that frame's batch.

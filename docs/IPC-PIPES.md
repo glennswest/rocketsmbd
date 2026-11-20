@@ -18,7 +18,9 @@ pipes = ["samr", "lsarpc", "netlogon"]     # the default; case-insensitive
 ```
 
 Without `[ipc]`, a CREATE on `IPC$` gets `STATUS_OBJECT_NAME_NOT_FOUND`, as
-does any pipe name not in `pipes`. Only Unix sockets are accepted, because the
+does any pipe name not in `pipes`. This applies to CREATEs that pass the
+checks under "Who may open a pipe" below; any other CREATE gets
+`STATUS_ACCESS_DENIED`. Only Unix sockets are accepted, because the
 preamble carries the session key. A TCP backend would send that key in
 cleartext.
 
