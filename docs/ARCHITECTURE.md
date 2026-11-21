@@ -126,6 +126,19 @@ pipe capacity probed at startup.
 On error or short read below MinimumCount, the pipe is drained synchronously
 and an error response is sent instead.
 
+**Linked fast path.** When the handler's `fstat` says the whole range lies
+inside the file (`ZcReadPlan.linked`) and it fits the pipe in one splice, the
+three steps go to the ring as one `IO_LINK` chain, with the header built for
+the full length up front. That premise can go stale: another client can
+truncate the file before the splice-in runs (#91). io_uring fails a short
+splice's link, so the header send and splice-out complete `-ECANCELED` unrun
+and nothing reaches the socket (`short_linked_splice_cancels_header_and_splice_out`
+pins this). The reactor then finishes the READ on the sequential path from
+what is in the pipe: a header with the real byte count, or END_OF_FILE. If a
+header did go out wrong (a short header send, or a short splice-in that did
+not cancel the header), the response can't be repaired and the connection is
+closed.
+
 READs inside compound requests, below 8 KiB, or on signed/encrypted sessions
 take a buffered `pread` path: the payload has to be hashed or sealed, so it
 can't bypass userspace. Zero-copy for those was investigated and closed as

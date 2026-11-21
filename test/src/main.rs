@@ -71,6 +71,7 @@ fn main() {
         ("smb1-upgrade-to-smb2", smb1_upgrade),
         ("ipc-pipe-forward", ipc_pipe_forward),
         ("share-access-and-locks", share_access_and_locks),
+        ("read-while-truncated", read_while_truncated),
     ];
     if suite != "short" {
         tests.extend([
@@ -532,6 +533,78 @@ fn share_access_and_locks(env: &Env) -> R<String> {
     a.close(ta, la.fid)?;
     b.close(tb, lb.fid)?;
     Ok("share-none excludes, read-only handle can't delete, failed LOCK keeps earlier locks".into())
+}
+
+/// #91: zero-copy READs of a file another writer keeps truncating and
+/// re-extending. A read the handler's fstat saw as fitting can find a shorter
+/// file at splice time; the server must answer it (the bytes that are there,
+/// or END_OF_FILE), never drop or stall the connection.
+fn read_while_truncated(env: &Env) -> R<String> {
+    const FULL: usize = 2 << 20;
+    const SHORT: u64 = 256 << 10;
+    const CHUNK: u32 = 512 << 10;
+    let mut c = Client::connect(&env.addr)?;
+    c.negotiate(&[0x0302, 0x0300, 0x0210], None, false)?;
+    let st = c.session_setup(None, false)?;
+    check(st == status::SUCCESS && c.guest, || format!("guest SESSION_SETUP status {st:#x}"))?;
+    let (st, tree) = c.tree_connect("data")?;
+    check(st == status::SUCCESS, || format!("TREE_CONNECT status {st:#x}"))?;
+    let name = "shrinking.bin";
+    let data = pattern(FULL, 91);
+    let o = c.create(tree, name, FILE_OVERWRITE_IF, RW, NON_DIRECTORY_FILE, None)?;
+    check(o.status == status::SUCCESS, || format!("CREATE status {:#x}", o.status))?;
+    c.write_all(tree, o.fid, &data)?;
+
+    let path = env.dir.join("data").join(name);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flipper = {
+        let stop = stop.clone();
+        std::thread::spawn(move || -> R<u32> {
+            let f = std::fs::OpenOptions::new().write(true).open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
+            let mut flips = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                f.set_len(SHORT).map_err(|e| e.to_string())?;
+                f.set_len(FULL as u64).map_err(|e| e.to_string())?;
+                flips += 1;
+            }
+            Ok(flips)
+        })
+    };
+    let (mut full, mut short, mut eof) = (0u32, 0u32, 0u32);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut res: R<()> = Ok(());
+    'reads: while Instant::now() < deadline {
+        for off in [0u64, 1 << 20] {
+            let (st, d) = match c.read(tree, o.fid, off, CHUNK) {
+                Ok(r) => r,
+                Err(e) => {
+                    res = Err(format!("READ at {off} after {} reads: {e}", full + short + eof));
+                    break 'reads;
+                }
+            };
+            if st == status::END_OF_FILE {
+                eof += 1;
+                continue;
+            }
+            if st != status::SUCCESS || d.is_empty() || d.len() > CHUNK as usize {
+                res = Err(format!("READ at {off}: status {st:#x}, {} bytes", d.len()));
+                break 'reads;
+            }
+            // The first 256 KiB are never truncated away: they must stay the pattern.
+            let keep = (SHORT as usize).saturating_sub(off as usize).min(d.len());
+            if d[..keep] != data[off as usize..off as usize + keep] {
+                res = Err(format!("READ at {off}: the bytes below the truncation point changed"));
+                break 'reads;
+            }
+            if d.len() == CHUNK as usize { full += 1 } else { short += 1 }
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let flips = flipper.join().map_err(|_| "truncate thread panicked".to_string())??;
+    res?;
+    check(c.echo()? == status::SUCCESS, || "connection unusable after the reads".into())?;
+    c.close(tree, o.fid)?;
+    Ok(format!("{} READs over {flips} truncate/extend cycles: {full} full, {short} short, {eof} END_OF_FILE; connection kept", full + short + eof))
 }
 
 fn http_get(addr: &str, path: &str) -> R<(u16, String)> {

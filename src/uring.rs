@@ -138,6 +138,10 @@ struct Zc {
     linked: bool,
     chain: u8,
     err: bool,
+    /// Linked chain results: the splice-in's byte count and the header
+    /// send's, once their CQEs land (#91).
+    in_res: i32,
+    hdr_res: i32,
 }
 
 struct Watch {
@@ -1286,12 +1290,12 @@ fn start_zc(ring: &mut IoUring, w: &mut Worker, idx: usize, plan: ZcReadPlan) {
         c.tx = tx;
         c.tx_off = 0;
         let out_left = plan.length;
-        c.zc = Some(Zc { plan, want, got: want, out_left, linked: true, chain: 3, err: false });
+        c.zc = Some(Zc { plan, want, got: want, out_left, linked: true, chain: 3, err: false, in_res: 0, hdr_res: 0 });
         c.txm = Tx::ZcOut;
         submit_zc_linked(ring, w, idx);
         return;
     }
-    c.zc = Some(Zc { plan, want, got: 0, out_left: 0, linked: false, chain: 0, err: false });
+    c.zc = Some(Zc { plan, want, got: 0, out_left: 0, linked: false, chain: 0, err: false, in_res: 0, hdr_res: 0 });
     c.txm = Tx::ZcIn;
     submit_splice_in(ring, w, idx);
 }
@@ -1352,8 +1356,11 @@ fn on_linked_cqe(ring: &mut IoUring, w: &mut Worker, idx: usize, op: u8, res: i3
     {
         let zc = conn_mut(w, idx).zc.as_mut().expect("zc in flight");
         zc.chain = zc.chain.saturating_sub(1);
-        if op == OP_SPLICE_OUT && res > 0 {
-            zc.out_left = zc.out_left.saturating_sub(res as u32);
+        match op {
+            OP_SPLICE_IN => zc.in_res = res,
+            OP_SEND => zc.hdr_res = res,
+            _ if res > 0 => zc.out_left = zc.out_left.saturating_sub(res as u32),
+            _ => {}
         }
         if res < 0 {
             zc.err = true; // includes -ECANCELED from a broken link
@@ -1364,9 +1371,30 @@ fn on_linked_cqe(ring: &mut IoUring, w: &mut Worker, idx: usize, op: u8, res: i3
     }
     let c = conn_mut(w, idx);
     let zc = c.zc.as_mut().expect("zc in flight");
-    if zc.err {
-        // Rare (e.g. EIO mid-read): drop the connection. Conn::drop releases
-        // the dup'd fd and the pipe once in-flight ops drain.
+    let short_in = zc.in_res >= 0 && (zc.in_res as u32) < zc.want;
+    if short_in && zc.hdr_res == -libc::ECANCELED {
+        // The file shrank between the handler's fstat and the splice-in (a
+        // concurrent truncate, #91). io_uring fails a short splice's link
+        // (io_uring/splice.c: ret != len → req_set_fail), so the header send
+        // and splice-out were cancelled unrun: nothing went out, and the
+        // pipe holds exactly in_res bytes. Finish on the sequential path,
+        // which sends a header with the real count or END_OF_FILE.
+        let got = zc.in_res;
+        zc.linked = false;
+        zc.err = false;
+        zc.got = 0;
+        zc.out_left = 0;
+        c.tx.clear();
+        c.tx_off = 0;
+        c.txm = Tx::ZcIn;
+        on_splice_in(ring, w, idx, got);
+        return;
+    }
+    if zc.err || short_in || zc.hdr_res as usize != c.tx.len() {
+        // An op failed (e.g. EIO mid-read), the header went out short, or a
+        // short splice-in did not cancel the header: the client has, or
+        // would get, a torn response. Drop the connection. Conn::drop
+        // releases the dup'd fd and the pipe once in-flight ops drain.
         close_conn_ring(ring, w, idx);
         return;
     }
@@ -1505,4 +1533,63 @@ fn on_splice_out(ring: &mut IoUring, w: &mut Worker, idx: usize, res: i32) {
     c.tx_off = 0;
     c.txm = Tx::Idle;
     drive(ring, w, idx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+
+    /// #91: the linked zero-copy READ relies on io_uring failing a short
+    /// splice's link. A splice-in that finds fewer bytes than asked (the file
+    /// was truncated after the handler's fstat) must cancel the header send
+    /// and splice-out unrun, so nothing reaches the socket and the reactor can
+    /// finish the READ on the sequential path.
+    #[test]
+    fn short_linked_splice_cancels_header_and_splice_out() {
+        let mut ring = IoUring::new(8).expect("this test requires io_uring (kernel >= 5.15)");
+        let path = std::env::temp_dir().join(format!("rsmbd-short-splice-{}", std::process::id()));
+        std::fs::write(&path, vec![0x5a; 4096]).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let mut p = [0i32; 2];
+        // SAFETY: p is a live [c_int; 2]; both fds are closed at the end of the test.
+        assert_eq!(unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let (mut peer, sock) = std::os::unix::net::UnixStream::pair().unwrap();
+        let hdr = [0xa5u8; 80];
+        let want = 64 * 1024u32; // the handler's fstat said 64 KiB; 4 KiB is left
+        let ops = [
+            opcode::Splice::new(types::Fd(file.as_raw_fd()), 0, types::Fd(p[1]), -1, want)
+                .build()
+                .flags(squeue::Flags::IO_LINK)
+                .user_data(1),
+            opcode::Send::new(types::Fd(sock.as_raw_fd()), hdr.as_ptr(), hdr.len() as u32)
+                .flags(libc::MSG_MORE)
+                .build()
+                .flags(squeue::Flags::IO_LINK)
+                .user_data(2),
+            opcode::Splice::new(types::Fd(p[0]), -1, types::Fd(sock.as_raw_fd()), -1, want).build().user_data(3),
+        ];
+        for e in &ops {
+            // SAFETY: every buffer and fd the entries reference outlives the wait below.
+            unsafe { ring.submission().push(e).unwrap() };
+        }
+        ring.submit_and_wait(3).unwrap();
+        let mut res = [0i32; 4];
+        for cqe in ring.completion() {
+            res[cqe.user_data() as usize] = cqe.result();
+        }
+        assert_eq!(res[1], 4096, "splice-in gets what is left of the file");
+        assert_eq!(res[2], -libc::ECANCELED, "header send must not run after a short splice-in");
+        assert_eq!(res[3], -libc::ECANCELED, "splice-out must not run after a short splice-in");
+        peer.set_nonblocking(true).unwrap();
+        let mut b = [0u8; 16];
+        assert!(peer.read(&mut b).is_err(), "nothing reached the socket");
+        // SAFETY: both pipe fds were created above and are closed once here.
+        unsafe {
+            libc::close(p[0]);
+            libc::close(p[1]);
+        }
+    }
 }
