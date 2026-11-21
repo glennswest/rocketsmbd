@@ -2451,6 +2451,62 @@ mod tests {
         roundtrip(srv, pc, f).status
     }
 
+    /// #92 (7c734e0afebc): FileBasicInformation reports a time it couldn't set.
+    #[cfg(feature = "ntlm")]
+    #[test]
+    fn basic_info_reports_denied_times() {
+        // #92: a time the server can't set is an error, not a silent success.
+        // The share holds a symlink to a file the server's user doesn't own
+        // (symlinks are followed out of the share), so futimens with an
+        // explicit time fails with EPERM.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            // Root may set any file's times; this would rewrite /etc/passwd's.
+            eprintln!("basic_info_reports_denied_times: not run as root");
+            return;
+        }
+        let dir = tmp_share("times92");
+        let srv = test_srv(&dir);
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("foreign")).unwrap();
+        let before = std::fs::metadata("/etc/passwd").unwrap();
+        let mut pc = ProtoConn::new(&srv, 0, 0, 1);
+        let (sess, tree) = establish(&srv, &mut pc);
+        const OPEN: u32 = 1;
+        let access = 0x0012_0089 | 0x100; // FILE_GENERIC_READ + FILE_WRITE_ATTRIBUTES
+        let (st, fid) = create_file(&srv, &mut pc, sess, tree, "foreign", OPEN, 0, access);
+        assert_eq!(st, status::SUCCESS);
+        let basic = |at: u64, wt: u64, attrs: u32| {
+            let mut b: Vec<u8> = Vec::new();
+            b.p64(0);
+            b.p64(at);
+            b.p64(wt);
+            b.p64(0);
+            b.p32(attrs);
+            b.p32(0);
+            b
+        };
+        let t = 132_000_000_000_000_000;
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 4, &basic(0, t, 0)), status::ACCESS_DENIED, "write time");
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 4, &basic(t, 0, 0)), status::ACCESS_DENIED, "access time");
+        // Nothing to set (attributes only, or every time left alone): SUCCESS.
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 4, &basic(0, 0, 0x20)), status::SUCCESS, "attrs only");
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 4, &basic(u64::MAX, u64::MAX, 0)), status::SUCCESS, "all omitted");
+        assert_eq!(close_fid(&srv, &mut pc, sess, tree, fid), status::SUCCESS);
+        let after = std::fs::metadata("/etc/passwd").unwrap();
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+
+        // A file the server owns still takes both times.
+        std::fs::write(dir.join("own"), b"x").unwrap();
+        let (st, fid) = create_file(&srv, &mut pc, sess, tree, "own", OPEN, 0, access);
+        assert_eq!(st, status::SUCCESS);
+        assert_eq!(set_info_file(&srv, &mut pc, sess, tree, fid, 4, &basic(t, t, 0)), status::SUCCESS, "own file");
+        assert_eq!(close_fid(&srv, &mut pc, sess, tree, fid), status::SUCCESS);
+        let m = std::fs::metadata(dir.join("own")).unwrap();
+        let want = std::time::UNIX_EPOCH + std::time::Duration::from_secs((t - 116_444_736_000_000_000) / 10_000_000);
+        assert_eq!(m.modified().unwrap(), want);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// #90 (04f8dfbec22b): SET_INFO needs the right on the handle, not just a
     /// writable tree. A read-only handle can't delete, rename, retime or
     /// truncate; DELETE_ON_CLOSE needs DELETE; FileAccessInformation reports

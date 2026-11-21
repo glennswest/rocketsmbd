@@ -52,6 +52,11 @@ Each handle also keeps the access CREATE granted (generic rights mapped,
 MAXIMUM_ALLOWED resolved). SET_INFO checks it per class: basic information
 needs FILE_WRITE_ATTRIBUTES, rename and disposition need DELETE, end-of-file
 and allocation need FILE_WRITE_DATA. FileAccessInformation reports it.
+Basic information sets only the access and write times (`futimens`);
+creation and change times and the attribute bits have no POSIX counterpart
+and are ignored. A request that sets neither time succeeds without touching
+the file. One whose time the server's Unix user may not set (EPERM: it
+doesn't own the file) gets ACCESS_DENIED (#92).
 
 Byte-range locks are OFD locks on the handle's fd, and the handle keeps its
 granted SMB locks as a list. As on Windows, an exclusive lock overlaps no

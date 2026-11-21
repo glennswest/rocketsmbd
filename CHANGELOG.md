@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-21
+- **fix(#92, 7c734e0afebc):** SET_INFO FileBasicInformation no longer reports SUCCESS for a time it couldn't set. A request with an access or write time that `futimens` refuses (EPERM when the server's Unix user doesn't own the file, EACCES) now gets ACCESS_DENIED, so sync and restore tools see that the time wasn't kept. A request that sets no time (attributes only, or every time 0 or -1) still succeeds without touching the file. Test: `basic_info_reports_denied_times`.
 - **fix(#94):** The build compiles again: `sharemode::Reg` (added for #90) gets a `Debug` impl, which `vfs::OpenFile`'s derived `Debug` needs.
 
 ### 2026-11-20

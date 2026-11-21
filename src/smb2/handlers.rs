@@ -2610,14 +2610,19 @@ fn set_basic_info(of: &vfs::OpenFile, data: &[u8]) -> u32 {
         }
     }
     let times = [ts(at), ts(mt)];
+    if times.iter().all(|t| t.tv_nsec == libc::UTIME_OMIT) {
+        // No access or write time to set: creation/change times and the
+        // attributes (archive bit etc.) have no POSIX counterpart, so the
+        // update is a no-op that succeeds.
+        return status::SUCCESS;
+    }
     // SAFETY: times is a live [timespec; 2], exactly what futimens reads; of.fd is held
     // under the session lock.
     if unsafe { libc::futimens(of.fd, times.as_ptr()) } < 0 {
-        // Attribute-only updates (archive bit etc.) succeed as a no-op.
-        let e = vfs::errno();
-        if e != libc::EACCES && e != libc::EPERM {
-            return status::from_errno(e);
-        }
+        // A time the server may not set (EPERM: the Unix user doesn't own
+        // the file) is an error the client must see (#92), not a success
+        // that leaves the time unchanged.
+        return status::from_errno(vfs::errno());
     }
     status::SUCCESS
 }
