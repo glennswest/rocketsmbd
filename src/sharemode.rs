@@ -61,6 +61,14 @@ pub struct Reg {
     id: u64,
 }
 
+// Debug for `vfs::OpenFile`, which derives it (#94): the record's key and id,
+// not the whole shared table.
+impl std::fmt::Debug for Reg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reg").field("key", &self.key).field("id", &self.id).finish()
+    }
+}
+
 impl Drop for Reg {
     fn drop(&mut self) {
         let mut map = self.table.map.lock().unwrap_or_else(|p| p.into_inner());

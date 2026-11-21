@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-21
+- **fix(#94):** The build compiles again: `sharemode::Reg` (added for #90) gets a `Debug` impl, which `vfs::OpenFile`'s derived `Debug` needs.
+
 ### 2026-11-20
 - **fix(#91, e9a13b1b8d28):** A zero-copy READ no longer drops the connection when the file shrinks under it. A READ the handler saw as fully inside the file goes to the ring as one linked splice-in → header send → splice-out chain. If another client truncated the file in between, the short splice-in breaks the link (the header and splice-out are cancelled unrun), and the reactor closed the connection. It now finishes that READ on the sequential path: a header with the bytes the file really had, or END_OF_FILE. A header send that went out short in the chain now closes the connection, where it used to leave a torn response.
 - **test(#91):** `short_linked_splice_cancels_header_and_splice_out` (src/uring.rs) checks on a real ring that a short linked splice cancels the header send and splice-out before anything reaches the socket. `read-while-truncated` in the `rocketsmbd-test` short suite reads a file through the zero-copy path while another writer truncates and re-extends it.
